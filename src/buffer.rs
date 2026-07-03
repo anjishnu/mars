@@ -92,6 +92,11 @@ impl Buffer {
         }
     }
 
+    /// (steps you can undo, steps you can redo) — for the time-travel indicator.
+    pub fn undo_depth(&self) -> (usize, usize) {
+        (self.undo_stack.len(), self.redo_stack.len())
+    }
+
     pub fn line_count(&self) -> usize {
         let n = self.rope.len_lines();
         if n == 0 {

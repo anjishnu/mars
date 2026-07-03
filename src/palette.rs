@@ -38,6 +38,7 @@ pub enum Action {
     // edit
     Undo,
     Redo,
+    UndoMode,
     KillLine,
     KillRegion,
     CopyRegion,
@@ -109,6 +110,7 @@ impl Action {
             Action::KillBuffer         => "kill buffer",
             Action::Undo               => "undo",
             Action::Redo               => "redo",
+            Action::UndoMode           => "undo history (time travel)",
             Action::KillLine           => "kill line",
             Action::KillRegion         => "kill region",
             Action::CopyRegion         => "copy region",
@@ -180,6 +182,7 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Search",        Action::Search,       "Incremental search in this buffer"),
         MenuItem::run_desc("Undo",          Action::Undo,         "Undo the last edit"),
         MenuItem::run_desc("Redo",          Action::Redo,         "Redo the undone edit"),
+        MenuItem::run_desc("Undo history…", Action::UndoMode,     "Time-travel: ←/→ step back and forward through edits"),
         MenuItem::run_desc("Paste",         Action::Paste,        "Paste from the system clipboard"),
         MenuItem::run_desc("Select all",    Action::SelectAll,    "Select the whole buffer"),
         MenuItem::sub("Edit ▸",             "edit"),

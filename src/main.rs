@@ -483,6 +483,31 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] undo (coalesced runs) ..... PASS");
 
+    // 6d2. Undo time-travel mode: enter, ← steps back, Home undoes all, End
+    //      redoes all, Esc exits.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "one")?;
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a breaks the run
+        typ(&mut app, "two")?; // two undo steps
+        let text = |a: &App| -> String {
+            match a.focused_pane().content {
+                pane::PaneContent::Editor(id) => a.buffers[&id].rope.to_string(),
+                _ => String::new(),
+            }
+        };
+        assert!(text(&app).contains("one"), "setup: text not present before undo");
+        app.run_action(palette::Action::UndoMode);
+        assert!(matches!(app.mode, mode::Mode::Undo), "UndoMode did not enter undo mode");
+        app.handle_key(k(KeyCode::Home))?; // undo everything
+        assert!(text(&app).trim().is_empty(), "Home did not undo to the start: {:?}", text(&app));
+        app.handle_key(k(KeyCode::End))?; // redo everything
+        assert!(text(&app).contains("one"), "End did not redo forward");
+        app.handle_key(k(KeyCode::Esc))?;
+        assert!(matches!(app.mode, mode::Mode::Edit), "Esc did not exit undo mode");
+    }
+    println!("[selfcheck] undo time-travel mode ..... PASS");
+
     // 6e. Horizontal motion wraps across lines: → at line end → next line start;
     //     ← at line start → previous line end.
     {

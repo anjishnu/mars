@@ -325,7 +325,6 @@ Then, forever, on any box:
 ssh box2                  # the auth socket is forwarded automatically (from ~/.ssh/config)
 mars new work             # agent just works. No export. Nothing in shell history.
                           # box2 never sees, stores, or transmits your key.
-```
 
 Nothing to remember, nothing to copy, nothing left behind. The key lives exactly one place —
 your machine — and every Mars you touch borrows the *ability to ask*, never the secret

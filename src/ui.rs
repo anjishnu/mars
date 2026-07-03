@@ -779,6 +779,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Tab      => (chipfg, accent,       accent, chipfg),
         Mode::Bar      => (chipfg, accent,       accent, chipfg),
         Mode::Tree     => (chipfg, accent,       accent, chipfg),
+        Mode::Undo     => (chipfg, sand,         sand,   chipfg),
         Mode::Terminal => {
             let teal = rgb(app.tuning.theme_terminal);
             (Color::White, teal, teal, Color::White)

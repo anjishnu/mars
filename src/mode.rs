@@ -12,6 +12,8 @@ pub enum Mode {
     Terminal,
     /// Left file-tree sidebar owns the keyboard (browse + type-to-filter).
     Tree,
+    /// Undo time-travel: ←/→ step backward/forward through edit history.
+    Undo,
 }
 
 impl Mode {
@@ -23,6 +25,7 @@ impl Mode {
             Mode::Tab      => "C-t",
             Mode::Terminal => "TERM",
             Mode::Tree     => "TREE",
+            Mode::Undo     => "UNDO",
         }
     }
 
@@ -65,6 +68,13 @@ impl Mode {
                 ("←",    "collapse"),
                 ("type", "filter"),
                 ("Esc",  "close"),
+            ],
+            Mode::Undo => &[
+                ("←",    "undo"),
+                ("→",    "redo"),
+                ("Home", "undo all"),
+                ("End",  "redo all"),
+                ("Esc",  "done"),
             ],
         }
     }

@@ -1249,6 +1249,39 @@ impl App {
         self.clamp_cursor_after_edit();
     }
 
+    /// Enter the undo time-travel mode: ←/→ scrub backward/forward, Esc exits.
+    /// Only meaningful in an editor pane.
+    fn enter_undo_mode(&mut self) {
+        if self.editor_pos().is_none() {
+            self.status_msg = Some("Undo history works in an editor pane".into());
+            return;
+        }
+        self.edit_run = EditRun::None;
+        self.mode = Mode::Undo;
+        self.undo_status();
+    }
+
+    /// Status line shown in undo mode: how far back / forward you can go.
+    fn undo_status(&mut self) {
+        let (back, fwd) = self
+            .editor_pos()
+            .and_then(|(_, _, id)| self.buffers.get(&id))
+            .map(|b| b.undo_depth())
+            .unwrap_or((0, 0));
+        self.status_msg =
+            Some(format!("UNDO ◂ {back} back · {fwd} forward ▸   ←/→ step · Home/End all · Esc done"));
+    }
+
+    fn handle_undo_mode(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('u') => { self.do_undo(); self.undo_status(); }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('r') => { self.do_redo(); self.undo_status(); }
+            KeyCode::Home => { while self.focused_buf_mut().undo() {} self.clamp_cursor_after_edit(); self.undo_status(); }
+            KeyCode::End  => { while self.focused_buf_mut().redo() {} self.clamp_cursor_after_edit(); self.undo_status(); }
+            _ => { self.mode = Mode::Edit; self.status_msg = Some("Undo history closed".into()); }
+        }
+    }
+
     fn clamp_cursor_after_edit(&mut self) {
         let pane = self.focused_pane();
         let buf_id = match pane.content { PaneContent::Editor(id) => id, _ => return };
@@ -1541,6 +1574,7 @@ impl App {
             Mode::Tab      => self.handle_tab(key),
             Mode::Terminal => self.handle_terminal(key),
             Mode::Tree     => self.handle_tree(key),
+            Mode::Undo     => self.handle_undo_mode(key),
         }
         Ok(())
     }
@@ -3008,6 +3042,7 @@ impl App {
             Action::KillBuffer         => self.kill_buffer(),
             Action::Undo               => self.do_undo(),
             Action::Redo               => self.do_redo(),
+            Action::UndoMode           => self.enter_undo_mode(),
             Action::KillLine           => self.kill_line(),
             Action::KillRegion         => self.kill_region(),
             Action::CopyRegion         => self.copy_region(),

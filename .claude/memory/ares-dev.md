@@ -12,6 +12,22 @@
 - Splash: MARS block logo + tagline + starter hints in the empty scratch until first
   key (app.show_splash). Selfcheck asserts "mission control" appears then vanishes.
 
+## Undo: coalesced runs + time-travel mode (2026-07)
+- ROOT BUG (fixed): insert_char_at_cursor/delete_before_cursor never checkpoint()'d → typing
+  was invisible to undo. Now coalesced via App.edit_run: EditRun{None,Insert,Delete}. In
+  handle_edit_primitive: capture prev_run at top, reset edit_run=None; the Char arm checkpoints
+  only if prev_run != Insert (a run of typed chars = ONE undo), Backspace arm similarly for
+  Delete. run_action resets edit_run=None so any command breaks the run. Enter checkpoints +
+  auto_indent (copies prev line's leading whitespace). Bindings: C-/, C-_, C-x u = undo; M-/,
+  C-x C-u, cmd-Z = redo; cmd-z = undo (Mac muscle memory, kitty only).
+- TIME-TRAVEL MODE (user request): Mode::Undo, entered via Action::UndoMode (M-u + menu row
+  "Undo history…"). handle_undo_mode: ←/↑/u = do_undo, →/↓/r = do_redo, Home = undo-all
+  (while focused_buf_mut().undo()), End = redo-all, any other key = exit to Edit. Status line
+  (undo_status) shows "UNDO ◂ N back · M forward". buffer.undo_depth()→(undo_len,redo_len).
+  Verified live: M-u → Home rewinds to file start, End restores, Esc exits.
+- GOTCHA: testing undo via screen_text() is flaky (empty-buffer render); assert on
+  buffers[id].rope.to_string() directly instead.
+
 ## GOTCHA: bg_busy leak wedged all background AI (2026-07, FIXED)
 - Symptom: watch (W6) never produced a summary. Cause: agent::watch_summary/auto_name/
   name_session only sent their AgentEvent inside `if let Ok(chat)…` — on ANY LLM failure
