@@ -117,9 +117,10 @@ forever; `auto_name_secs = 0` turns it off).
 
 Mars speaks three dialects at once — whichever your fingers know:
 
-- **Find a file fast**: `Ctrl+Space` then `@` (or `C-x C-f` / `C-x p`) opens a fuzzy
-  file picker over the whole project — VS-Code-`Ctrl+P` style. Empty shows open buffers
-  + recent files; type to fuzzy-match; `Tab` completes the shared prefix; `Enter` opens.
+- **Browse files**: `Ctrl+Space` then `@` (or `C-x d`) opens a **file tree** on the left.
+  Folders are bold + colored and collapsed — arrow to one and `Enter`/`→` expands it in
+  place (`←` collapses); `../` at the top steps up a directory. Start **typing** to
+  fuzzy-filter the whole project to a shortlist; `Enter` opens the file, `Esc` closes.
 - **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `C-k`/`C-y` kill/yank ·
   `C-x 2`/`C-x 3`/`C-x o` windows · `M-x` command bar
 - **Modern/Mac**: `C-c`/`C-v` copy/paste (system clipboard) · Shift+arrows select ·

@@ -65,7 +65,7 @@ AGENT
 INSIDE THE EDITOR
   Ctrl+Space   search every command        !   run a shell command
   ?            ask the agent               C-t tabs / panes / splits
-  C-x C-s      save                        C-g cancel anything
+  @ or C-x d   file tree (browse/filter)   C-x C-s save   C-g cancel anything
 
 MORE
   mars help                      this text          (aliases: -h, --help)
@@ -256,6 +256,16 @@ fn selfcheck() -> Result<()> {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
 
+    // Hermetic: an inherited agent key would flip no-key code paths (e.g. the
+    // shell composer translates instead of running). Clear them so the suite is
+    // deterministic regardless of the caller's environment.
+    for key in [
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY",
+        "MARS_LLM_KEY", "MARS_LLM_URL", "ARES_LLM_KEY", "ARES_LLM_URL",
+    ] {
+        std::env::remove_var(key);
+    }
+
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -359,6 +369,82 @@ fn selfcheck() -> Result<()> {
     );
     assert!(app.search_hl.is_empty(), "highlights not cleared after cancel");
     println!("[selfcheck] live isearch (C-s/C-g) ..... PASS");
+
+    // 6a. Search-as-teleport: match counter, Tab-label jump, land-on-any-key.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "aa bb aa cc aa")?; // three "aa" matches at cols 0, 6, 12
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a → line start
+        app.handle_key(kc(KeyCode::Char('s')))?; // C-s → isearch
+        typ(&mut app, "aa")?;
+        assert_eq!(app.isearch_status(), Some((1, 3)), "counter should read 1/3 at first match");
+        // Tab labels the matches; the 2nd label ('s') jumps to the 2nd match (col 6).
+        app.handle_key(k(KeyCode::Tab))?;
+        assert!(app.search_pick && app.search_labels.len() == 3, "Tab did not label matches");
+        assert_eq!(app.search_labels[1].2, 's', "second label should be 's'");
+        app.handle_key(k(KeyCode::Char('s')))?; // pick label 's' → 2nd match
+        assert_eq!(app.focused_pane().cursor_col, 6, "label jump did not land on the 2nd match");
+        assert!(matches!(app.mode, mode::Mode::Edit), "label pick did not accept the search");
+
+        // Land-on-any-key: type target, then a motion key commits + applies.
+        app.handle_key(kc(KeyCode::Char('s')))?; // isearch again
+        typ(&mut app, "cc")?; // jumps to "cc" (col 9)
+        assert_eq!(app.focused_pane().cursor_col, 9, "isearch did not land on cc");
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a while searching → commit + line-start
+        assert!(matches!(app.mode, mode::Mode::Edit), "land-on-key did not exit search");
+        assert_eq!(app.focused_pane().cursor_col, 0, "C-a did not apply after committing search");
+    }
+    println!("[selfcheck] search-as-teleport ......... PASS");
+
+    // 6c. Selection-aware refactor: code-block extraction + reversible apply.
+    {
+        assert_eq!(
+            app::extract_code_block("here you go:\n```rust\nfn a() {}\n```\ndone"),
+            Some("fn a() {}".to_string()),
+            "code block not extracted"
+        );
+        assert_eq!(app::extract_code_block("no fences here"), None);
+
+        let mut app = App::new(None)?;
+        typ(&mut app, "old_code")?;
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a → line start
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT))?; // select the line
+        assert!(app.selection_range().is_some(), "selection not set");
+        // Simulate an accepted refactor and apply it as one reversible edit.
+        app.refactor_target = app.selection_range();
+        app.refactor_replacement = Some("new_code".to_string());
+        app.apply_refactor();
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("new_code") && !t.contains("old_code"), "refactor not applied");
+        app.handle_key(kc(KeyCode::Char('_')))?; // C-_ → Undo (one chunk)
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("old_code"), "one undo did not revert the refactor");
+    }
+    println!("[selfcheck] selection refactor (undo) .. PASS");
+
+    // 6b. Fast motion: ⌘-token stops (code-aware), matching-bracket, symbol jump.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "foo.bar(baz)")?;
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a → line start (col 0)
+        let col = |a: &App| a.focused_pane().cursor_col;
+        app.move_token_forward(); assert_eq!(col(&app), 3, "token→ should stop at '.'");
+        app.move_token_forward(); assert_eq!(col(&app), 4, "token→ should stop at 'bar'");
+        app.move_token_forward(); assert_eq!(col(&app), 7, "token→ should stop at '('");
+        app.move_token_backward(); assert_eq!(col(&app), 4, "token← should return to 'bar'");
+        app.move_token_forward(); // back onto '(' at col 7
+        app.match_bracket(); assert_eq!(col(&app), 11, "match_bracket → ')'");
+        app.match_bracket(); assert_eq!(col(&app), 7, "match_bracket → '('");
+
+        let mut app = App::new(None)?;
+        typ(&mut app, "fn one() {")?; app.handle_key(k(KeyCode::Enter))?;
+        typ(&mut app, "    body")?;   app.handle_key(k(KeyCode::Enter))?;
+        typ(&mut app, "fn two() {")?; // cursor on row 2
+        app.jump_symbol(false); assert_eq!(app.focused_pane().cursor_row, 0, "symbol← to fn one");
+        app.jump_symbol(true);  assert_eq!(app.focused_pane().cursor_row, 2, "symbol→ to fn two");
+    }
+    println!("[selfcheck] token/bracket/symbol jumps . PASS");
 
     // 7. which-key: a pending prefix pops the continuation panel after a beat;
     //    C-x C-s on a pathless buffer opens Save-As (no ghost `:w` advice).
@@ -794,11 +880,18 @@ fn selfcheck() -> Result<()> {
     typ(&mut app, "sesn")?;
     assert_eq!(app.tree_rows.first().map(|r| r.label.as_str()), Some("src/session.rs"),
         "filter did not shortlist session.rs on top");
-    // Enter opens the top match → focus returns to the editor.
+    // → PREVIEWS the top file: shows it but stays in the tree (reversible).
+    let bufs_before = app.buffers.len();
+    app.handle_key(k(KeyCode::Right))?;
+    assert!(matches!(app.mode, mode::Mode::Tree), "→ on a file left the tree (should preview)");
+    // A second preview of the same file must not duplicate the buffer.
+    app.handle_key(k(KeyCode::Right))?;
+    assert_eq!(app.buffers.len(), bufs_before + 1, "preview duplicated the buffer");
+    // Enter COMMITS: opens the top match → focus returns to the editor.
     app.handle_key(k(KeyCode::Enter))?;
-    assert!(matches!(app.mode, mode::Mode::Edit), "opening a tree file did not focus the editor");
+    assert!(matches!(app.mode, mode::Mode::Edit), "Enter on a tree file did not focus the editor");
     assert!(app.tree_open, "sidebar should stay open after opening a file");
-    println!("[selfcheck] file tree (browse/filter) . PASS");
+    println!("[selfcheck] file tree (preview/open) .. PASS");
 
     // 26b4. C-x d toggles the tree; `../` re-roots to the parent directory.
     let mut app = App::new(None)?;
@@ -810,10 +903,15 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Enter))?; // selected row 0 is ../ → re-root up
     let root_after = app.file_tree.as_ref().map(|t| t.root.clone()).unwrap();
     assert_eq!(root_after, root_before.parent().unwrap(), "../ did not re-root to the parent");
+    app.handle_key(k(KeyCode::Esc))?; // Esc closes the focused tree
+    assert!(!app.tree_open && matches!(app.mode, mode::Mode::Edit), "Esc did not close the tree");
+    // Closing forgets navigation state: reopening starts back at the project root.
     app.handle_key(kc(KeyCode::Char('x')))?;
-    app.handle_key(k(KeyCode::Char('d')))?; // C-x d again → hide
-    assert!(!app.tree_open, "C-x d did not hide the tree");
-    println!("[selfcheck] file tree (C-x d / ../) ... PASS");
+    app.handle_key(k(KeyCode::Char('d')))?; // C-x d → reopen
+    let reopened_root = app.file_tree.as_ref().map(|t| t.root.clone()).unwrap();
+    assert_eq!(reopened_root, root_before, "tree did not reset to the project root on reopen");
+    assert!(app.tree_open && matches!(app.mode, mode::Mode::Tree), "C-x d did not reopen the tree");
+    println!("[selfcheck] file tree (reset/../) ..... PASS");
 
     // 26c. Conversation transcript: history renders, panel grows past the old
     //      16-row cap, scrolls, and C-l clears.
@@ -994,36 +1092,27 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Esc))?; // leave travel
     println!("[selfcheck] pane resize + zoom ........ PASS");
 
-    // 26k. W3: Ctrl+Space from a terminal opens the inline shell composer;
-    //      the translated command lands in the pill; a second Ctrl+Space
-    //      switches to the full command bar.
+    // 26k. Unified terminal composer: one Ctrl+Space opens the command bar; a
+    //      query matching a Mars command runs it, and a query matching NO command
+    //      runs as a shell command (no agent key here → executed directly).
     let mut app = App::new(None)?;
     app.handle_key(kc(KeyCode::Char(' ')))?;
     app.handle_key(k(KeyCode::Char('!')))?; // open a terminal via bar `!`…
     typ(&mut app, "true")?;
     app.handle_key(k(KeyCode::Enter))?; // …now attached to a terminal pane
     assert!(app.mode == mode::Mode::Terminal, "not in a terminal");
-    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → inline shell composer
-    assert!(
-        matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)),
-        "Ctrl+Space in terminal did not open the shell composer"
-    );
-    typ(&mut app, "list files by size")?;
-    term.draw(|f| ui::render(f, &mut app))?;
-    assert!(screen_text(&term).contains("list files by size"), "shell composer not showing input");
-    // Translation lands (simulated) → query becomes the command, ready to run.
-    app.agent_tx.send(agent::AgentEvent::ShellTranslation { command: "ls -S".into() })?;
-    app.tick();
-    assert_eq!(app.palette.as_ref().map(|p| p.query.as_str()), Some("ls -S"),
-        "translation did not replace the shell query");
-    assert!(app.shell_ready, "translated command should be marked ready-to-run");
-    // A second Ctrl+Space switches to the full command bar.
-    app.handle_key(kc(KeyCode::Char(' ')))?;
+    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → command bar (no double-press)
     assert!(
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Command)),
-        "second Ctrl+Space did not switch to the command bar"
+        "Ctrl+Space in terminal did not open the command composer"
     );
-    println!("[selfcheck] inline shell composer .... PASS");
+    // A phrase matching no Mars command falls through to the shell.
+    typ(&mut app, "echo composer_ok_xyz")?;
+    assert_eq!(app.palette.as_ref().map(|p| p.visible_items(&app.frecency).len()), Some(0),
+        "the shell phrase unexpectedly matched a command");
+    app.handle_key(k(KeyCode::Enter))?;
+    assert!(app.mode == mode::Mode::Terminal, "no-command query did not run as a shell command");
+    println!("[selfcheck] unified terminal composer .. PASS");
 
     // 27. Session daemon: detach → state + shells survive → reattach; takeover;
     //     version handshake; quit removes the socket. Fully headless.

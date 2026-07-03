@@ -65,6 +65,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_tab_bar(frame, app, tab_area);
     render_panes(frame, app, pane_area);
+    // Session-start splash: the MARS banner overlays the workspace (terminal or
+    // editor) until the first keypress dismisses it.
+    if app.show_splash {
+        render_splash(frame, app, pane_area);
+    }
     render_status(frame, app, status_area);
     render_control_bar(frame, app, bar_area);
 
@@ -377,12 +382,6 @@ fn render_editor_pane(
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    // Day-0 splash: MARS banner in the untouched scratch, until the first key.
-    if app.show_splash && buf.rope.len_chars() == 0 {
-        render_splash(frame, app, inner);
-        return None;
-    }
-
     let vp_h = inner.height as usize;
     let line_count = buf.line_count();
     let mut lines: Vec<Line> = Vec::with_capacity(vp_h);
@@ -396,6 +395,11 @@ fn render_editor_pane(
     let [hr, hg, hb] = app.tuning.search_match_bg;
     let sel_style = Style::default().bg(Color::Rgb(sr, sg, sb));
     let search_style = Style::default().bg(Color::Rgb(hr, hg, hb));
+    // Teleport labels: high-contrast chip (accent bg, dark fg, bold).
+    let label_style = Style::default()
+        .bg(rgb(app.tuning.theme_accent_bright))
+        .fg(rgb(app.tuning.theme_chip_fg))
+        .add_modifier(Modifier::BOLD);
 
     let numbers = app.tuning.line_numbers;
     for row_off in 0..vp_h {
@@ -435,11 +439,21 @@ fn render_editor_pane(
                     for h in hl.iter_mut().take(end).skip(start) { *h = 1; }
                 }
             }
+            let mut label_ch: Vec<Option<char>> = vec![None; chars.len()];
             if focused {
                 for &(hr, hc, hlen) in &app.search_hl {
                     if hr == row {
                         let end = (hc + hlen).min(chars.len());
                         for h in hl.iter_mut().take(end).skip(hc.min(chars.len())) { *h = 2; }
+                    }
+                }
+                // Teleport labels (kind 3) overwrite the first cell of each match.
+                if app.search_pick {
+                    for &(lr, lc, ch) in &app.search_labels {
+                        if lr == row && lc < chars.len() {
+                            hl[lc] = 3;
+                            label_ch[lc] = Some(ch);
+                        }
                     }
                 }
             }
@@ -450,8 +464,14 @@ fn render_editor_pane(
                 let mut i = 0;
                 while i < chars.len() {
                     let kind = hl[i];
+                    if kind == 3 {
+                        let ch = label_ch[i].unwrap_or(chars[i]);
+                        spans.push(Span::styled(ch.to_string(), label_style));
+                        i += 1;
+                        continue;
+                    }
                     let mut j = i;
-                    while j < chars.len() && hl[j] == kind { j += 1; }
+                    while j < chars.len() && hl[j] == kind && hl[j] != 3 { j += 1; }
                     let text: String = chars[i..j].iter().collect();
                     spans.push(match kind {
                         1 => Span::styled(text, sel_style),
@@ -523,6 +543,8 @@ fn ansi_to_line(raw: &str) -> (Line<'static>, u16) {
 
 fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     let t = &app.tuning;
+    // Overlay: wipe whatever's underneath (terminal shell or empty editor).
+    frame.render_widget(Clear, inner);
 
     // Parse the rich ANSI banner; fall back to a plain wordmark when narrow.
     let parsed: Vec<(Line, u16)> = crate::banner::BANNER_LINES
@@ -857,7 +879,20 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Prompt => {
             if let Some(p) = app.prompt.as_ref() {
-                let text = format!("{}{}", p.label, p.input);
+                // Live search shows an `n/m` match counter (and a Tab hint).
+                let extra = if p.kind == crate::app::PromptKind::Search {
+                    match app.isearch_status() {
+                        Some((cur, total)) if total > 0 => {
+                            let pick = if total >= 2 { "  ⇥ jump" } else { "" };
+                            format!("  {cur}/{total}{pick}")
+                        }
+                        _ if !p.input.is_empty() => "  (no match)".to_string(),
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                let text = format!("{}{}{}", p.label, p.input, extra);
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         text.clone(),
@@ -865,7 +900,8 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
                     )),
                     area,
                 );
-                let cx = area.x + text.chars().count() as u16;
+                // Cursor sits after the query itself, before the counter suffix.
+                let cx = area.x + (p.label.chars().count() + p.input.chars().count()) as u16;
                 if cx < area.x + area.width {
                     frame.set_cursor_position((cx, area.y));
                 }
@@ -1026,30 +1062,49 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
     }
     let scroll = if selected >= max_show { selected + 1 - max_show } else { 0 };
 
+    let width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
     for (idx, row) in app.tree_rows.iter().enumerate().skip(scroll).take(max_show) {
-        let is_sel = idx == selected;
-        let bg = if is_sel && focused { Color::DarkGray } else { Color::Reset };
+        let is_sel = idx == selected && focused;
+        // Selected row: a full-width accent band (unmistakable), like a chip.
+        let bg = if is_sel { accent } else { Color::Reset };
         let indent = "  ".repeat(row.depth);
-        // Folders: a disclosure caret + bold, accent color. Files: plain.
-        let (glyph, label_style) = if row.updir {
-            ("  ", Style::default().fg(Color::DarkGray).bg(bg))
+        let glyph = if row.updir {
+            "↑ "
         } else if row.is_dir {
-            (
-                if row.expanded { "▾ " } else { "▸ " },
-                Style::default().fg(accent).bg(bg).add_modifier(Modifier::BOLD),
-            )
+            if row.expanded { "▾ " } else { "▸ " }
         } else {
-            ("  ", Style::default().fg(Color::White).bg(bg))
+            "  "
         };
         let label = if row.is_dir && !row.updir {
             format!("{}/", row.label)
         } else {
             row.label.clone()
         };
+        // Foreground: readable on the band when selected; folders bold+accent,
+        // files white, `../` dim — otherwise.
+        let chip = rgb(app.tuning.theme_chip_fg);
+        let name_fg = if is_sel {
+            chip
+        } else if row.updir {
+            rgb(app.tuning.theme_accent_bright) // visible "go up" affordance
+        } else if row.is_dir {
+            accent
+        } else {
+            Color::White
+        };
+        let glyph_fg = if is_sel { chip } else { accent };
+        let mut modifier = Modifier::empty();
+        if row.is_dir && !row.updir {
+            modifier |= Modifier::BOLD;
+        }
+        // Pad to the full inner width so the selection band spans the row.
+        let used = indent.chars().count() + glyph.chars().count() + label.chars().count();
+        let pad = " ".repeat(width.saturating_sub(used));
         lines.push(Line::from(vec![
-            Span::styled(format!("{indent}{glyph}"), Style::default().fg(accent).bg(bg)),
-            Span::styled(label, label_style),
+            Span::styled(format!("{indent}{glyph}"), Style::default().fg(glyph_fg).bg(bg)),
+            Span::styled(label, Style::default().fg(name_fg).bg(bg).add_modifier(modifier)),
+            Span::styled(pad, Style::default().bg(bg)),
         ]));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -1156,7 +1211,16 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
             )));
         }
     }
-    if let Some(d) = &app.agent_directive {
+    // A pending selection-refactor takes the confirm slot (Enter replaces the
+    // selection reversibly).
+    if app.refactor_replacement.is_some() {
+        let n = app.refactor_replacement.as_deref().map(|c| c.lines().count()).unwrap_or(0);
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            format!(" ▶ Enter to replace the selection ({n} lines) · C-l cancel "),
+            Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(d) = &app.agent_directive {
         let label = match d {
             crate::agent::AgentDirective::Run(name) => format!(" ▶ Enter to run: {name} "),
             crate::agent::AgentDirective::Type(cmd) => {

@@ -219,6 +219,12 @@ impl RawBindings {
             ("M-<",     Action::GoTop),
             ("M->",     Action::GoBottom),
             ("M-g",     Action::GotoLine),
+            // structural jumps (Emacs-style paragraph = C-x [ / ]; symbols + brackets)
+            ("C-x [",   Action::JumpBlockPrev),
+            ("C-x ]",   Action::JumpBlockNext),
+            ("C-x {",   Action::JumpSymbolPrev),
+            ("C-x }",   Action::JumpSymbolNext),
+            ("C-x m",   Action::MatchBracket),
             ("C-l",     Action::Recenter),
             // agent
             ("C-x e",   Action::ExplainThis),

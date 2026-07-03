@@ -4,7 +4,6 @@
 primitives that unlock them (with engineering designs and trade-offs), and the final
 build recommendation.*
 
----
 
 ## 1. The thesis
 

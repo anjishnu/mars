@@ -60,7 +60,8 @@ impl Mode {
             ],
             Mode::Tree => &[
                 ("↑↓",   "move"),
-                ("⏎/→",  "open/expand"),
+                ("→",    "expand/preview"),
+                ("⏎",    "open"),
                 ("←",    "collapse"),
                 ("type", "filter"),
                 ("Esc",  "close"),

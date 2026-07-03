@@ -64,8 +64,6 @@ pub struct Prompt {
 
 #[derive(Clone, PartialEq)]
 pub enum PromptKind {
-    FindFile,
-    SwitchBuffer,
     SaveAs,
     GotoLine,
     RenameTab,
@@ -102,6 +100,10 @@ pub struct App {
     pub search_origin: Option<(usize, usize)>,
     /// Highlighted matches as (row, col, len) — rendered like selections.
     pub search_hl: Vec<(usize, usize, usize)>,
+    /// Teleport labels over matches (row, col, label) while picking (Tab).
+    pub search_labels: Vec<(usize, usize, char)>,
+    /// True when the next key selects a labeled match instead of extending the query.
+    pub search_pick: bool,
     // ── Command bar ──
     /// Mode to return to when the bar closes (Terminal keeps its focus).
     bar_return: Mode,
@@ -121,6 +123,8 @@ pub struct App {
     pub show_splash: bool,
     /// Directory new terminals open in — the parent of the first opened file.
     startup_cwd: Option<std::path::PathBuf>,
+    /// Directory `mars` was launched from — the terminal's cwd when no file set one.
+    run_cwd: Option<std::path::PathBuf>,
     /// Lazily-built project file index (feeds the tree's type-to-filter).
     project_index: Option<project::Index>,
     /// How often each file has been opened — ranks the filter shortlist.
@@ -145,6 +149,11 @@ pub struct App {
     pub agent_answer: Option<String>,
     /// Confirm-gated action the model proposed (RUN:/TYPE: directive).
     pub agent_directive: Option<agent::AgentDirective>,
+    /// The selection (buf, start, end) captured when an agent query was asked —
+    /// the target a proposed refactor would replace.
+    pub refactor_target: Option<(BufferId, usize, usize)>,
+    /// A code-block the agent returned to replace `refactor_target` (confirm-gated).
+    pub refactor_replacement: Option<String>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
     pub agent_history: Vec<(String, String)>,
     /// Ask-panel scroll: lines scrolled up from the bottom of the transcript.
@@ -192,6 +201,8 @@ impl App {
             last_yank: None,
             search_origin: None,
             search_hl: Vec::new(),
+            search_labels: Vec::new(),
+            search_pick: false,
             bar_return: Mode::Edit,
             bar_uses: state.bar_uses,
             pane_rects: Vec::new(),
@@ -210,6 +221,7 @@ impl App {
                 .as_ref()
                 .and_then(|f| std::path::Path::new(f).parent().map(|p| p.to_path_buf()))
                 .filter(|p| !p.as_os_str().is_empty()),
+            run_cwd: std::env::current_dir().ok(),
             project_index: None,
             file_frecency: state.file_frecency,
             file_tree: None,
@@ -223,6 +235,8 @@ impl App {
             agent_pending: false,
             agent_answer: None,
             agent_directive: None,
+            refactor_target: None,
+            refactor_replacement: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
             auto_name_inflight: false,
@@ -533,7 +547,7 @@ impl App {
         if p.selection_anchor.is_none() { p.selection_anchor = Some((r, c)); }
     }
 
-    fn selection_range(&self) -> Option<(BufferId, usize, usize)> {
+    pub fn selection_range(&self) -> Option<(BufferId, usize, usize)> {
         let p = self.focused_pane();
         let anchor = p.selection_anchor?;
         let buf_id = match p.content { PaneContent::Editor(id) => id, _ => return None };
@@ -595,6 +609,181 @@ impl App {
         }
         let (r, c) = self.rowcol_of(buf_id, idx);
         self.set_cursor(r, c);
+    }
+
+    // ── Code-token motion (⌘←/→) ─────────────────────────────────────────────
+    // A token is a maximal run of one class — word (alnum/`_`) or punctuation —
+    // with whitespace skipped. So `foo.bar(baz)` stops at foo · . · bar · ( · baz
+    // · ), which tracks how code reads (identifiers and operators as atoms).
+
+    /// 0 = whitespace, 1 = word (alnum/underscore), 2 = punctuation.
+    fn token_class(c: char) -> u8 {
+        if c.is_whitespace() { 0 } else if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
+    }
+
+    pub fn move_token_forward(&mut self) {
+        let (row, col, buf_id) = match self.editor_pos() { Some(x) => x, None => return };
+        let (len, mut idx) = {
+            let b = &self.buffers[&buf_id];
+            (b.rope.len_chars(), b.char_at(row, col))
+        };
+        {
+            let rope = &self.buffers[&buf_id].rope;
+            // Consume the current token's run, then any whitespace, landing on the
+            // start of the next token.
+            if idx < len {
+                let c0 = Self::token_class(rope.char(idx));
+                if c0 != 0 {
+                    while idx < len && Self::token_class(rope.char(idx)) == c0 { idx += 1; }
+                }
+            }
+            while idx < len && Self::token_class(rope.char(idx)) == 0 { idx += 1; }
+        }
+        let (r, c) = self.rowcol_of(buf_id, idx);
+        self.set_cursor(r, c);
+    }
+
+    pub fn move_token_backward(&mut self) {
+        let (row, col, buf_id) = match self.editor_pos() { Some(x) => x, None => return };
+        let mut idx = self.buffers[&buf_id].char_at(row, col);
+        {
+            let rope = &self.buffers[&buf_id].rope;
+            while idx > 0 && Self::token_class(rope.char(idx - 1)) == 0 { idx -= 1; }
+            if idx > 0 {
+                let c0 = Self::token_class(rope.char(idx - 1));
+                while idx > 0 && Self::token_class(rope.char(idx - 1)) == c0 { idx -= 1; }
+            }
+        }
+        let (r, c) = self.rowcol_of(buf_id, idx);
+        self.set_cursor(r, c);
+    }
+
+    fn move_token_sel(&mut self, forward: bool, extend: bool) {
+        if extend { self.begin_or_keep_selection(); } else { self.clear_selection(); }
+        if forward { self.move_token_forward(); } else { self.move_token_backward(); }
+    }
+
+    // ── Structural jumps (C-x [ ] { } m) ─────────────────────────────────────
+
+    fn line_is_blank(b: &Buffer, r: usize) -> bool {
+        b.rope.line(r).chars().all(|c| c.is_whitespace())
+    }
+
+    /// Jump to the next/prev blank line — fly between code blocks.
+    pub fn jump_block(&mut self, forward: bool) {
+        let (row, _c, buf_id) = match self.editor_pos() { Some(x) => x, None => return };
+        let n = self.buffers[&buf_id].line_count();
+        let target = {
+            let b = &self.buffers[&buf_id];
+            if forward {
+                let mut r = row + 1;
+                while r < n && Self::line_is_blank(b, r) { r += 1; }
+                while r < n && !Self::line_is_blank(b, r) { r += 1; }
+                r.min(n.saturating_sub(1))
+            } else {
+                let mut r = row.saturating_sub(1);
+                while r > 0 && Self::line_is_blank(b, r) { r -= 1; }
+                while r > 0 && !Self::line_is_blank(b, r) { r -= 1; }
+                r
+            }
+        };
+        self.clear_selection();
+        self.set_cursor(target, 0);
+    }
+
+    /// Jump to the next/prev top-level definition (column-0 keyword heuristic).
+    pub fn jump_symbol(&mut self, forward: bool) {
+        let (row, _c, buf_id) = match self.editor_pos() { Some(x) => x, None => return };
+        let n = self.buffers[&buf_id].line_count();
+        const KWS: &[&str] = &[
+            "fn ", "pub fn", "pub(", "pub struct", "pub enum", "def ", "class ", "impl",
+            "struct ", "enum ", "trait ", "mod ", "type ", "func ", "function ",
+            "interface ", "async fn", "export ", "const fn",
+        ];
+        let is_def = |b: &Buffer, r: usize| -> bool {
+            let line: String = b.rope.line(r).chars().collect();
+            let t = line.trim_start();
+            KWS.iter().any(|k| t.starts_with(k))
+        };
+        let target = {
+            let b = &self.buffers[&buf_id];
+            if forward {
+                let mut r = row + 1;
+                while r < n && !is_def(b, r) { r += 1; }
+                (r < n).then_some(r)
+            } else if row == 0 {
+                None
+            } else {
+                let mut r = row - 1;
+                loop {
+                    if is_def(b, r) { break Some(r); }
+                    if r == 0 { break None; }
+                    r -= 1;
+                }
+            }
+        };
+        if let Some(r) = target {
+            self.clear_selection();
+            self.set_cursor(r, 0);
+        }
+    }
+
+    /// Jump to the bracket matching the one at (or just before) the cursor.
+    pub fn match_bracket(&mut self) {
+        let (row, col, buf_id) = match self.editor_pos() { Some(x) => x, None => return };
+        const OPENS: [char; 3] = ['(', '[', '{'];
+        const CLOSES: [char; 3] = [')', ']', '}'];
+        let target = {
+            let rope = &self.buffers[&buf_id].rope;
+            let len = rope.len_chars();
+            let cur = self.buffers[&buf_id].char_at(row, col);
+            // Find a bracket: the char under the cursor, scanning to end of line;
+            // else the char just before the cursor.
+            let mut found = None;
+            let mut j = cur;
+            while j < len {
+                let c = rope.char(j);
+                if c == '\n' { break; }
+                if OPENS.contains(&c) || CLOSES.contains(&c) { found = Some((j, c)); break; }
+                j += 1;
+            }
+            if found.is_none() && cur > 0 {
+                let c = rope.char(cur - 1);
+                if OPENS.contains(&c) || CLOSES.contains(&c) { found = Some((cur - 1, c)); }
+            }
+            found.and_then(|(pos, c)| {
+                if let Some(oi) = OPENS.iter().position(|&o| o == c) {
+                    let (open, close) = (c, CLOSES[oi]);
+                    let mut depth = 1i32;
+                    let mut k = pos + 1;
+                    while k < len {
+                        let ch = rope.char(k);
+                        if ch == open { depth += 1; }
+                        else if ch == close { depth -= 1; if depth == 0 { return Some(k); } }
+                        k += 1;
+                    }
+                    None
+                } else if let Some(ci) = CLOSES.iter().position(|&cc| cc == c) {
+                    let (open, close) = (OPENS[ci], c);
+                    let mut depth = 1i32;
+                    let mut k = pos;
+                    while k > 0 {
+                        k -= 1;
+                        let ch = rope.char(k);
+                        if ch == close { depth += 1; }
+                        else if ch == open { depth -= 1; if depth == 0 { return Some(k); } }
+                    }
+                    None
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(idx) = target {
+            let (r, c) = self.rowcol_of(buf_id, idx);
+            self.clear_selection();
+            self.set_cursor(r, c);
+        }
     }
 
     // ── Kill-ring editing (C-d / C-k / C-w / M-w / C-y) ──────────────────────
@@ -936,6 +1125,8 @@ impl App {
         }
         self.search_origin = None;
         self.search_hl.clear();
+        self.search_labels.clear();
+        self.search_pick = false;
     }
 
     // ── Undo / redo ──────────────────────────────────────────────────────────
@@ -1320,6 +1511,7 @@ impl App {
         let ctrl  = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt   = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let cmd   = key.modifiers.contains(KeyModifiers::SUPER);
 
         self.last_yank = None; // any primitive key breaks a C-y / M-y chain
 
@@ -1340,6 +1532,14 @@ impl App {
             KeyCode::Char(c) if alt && c.is_ascii_digit() => {
                 self.goto_tab((c as u8 - b'0') as usize);
             }
+
+            // Cmd+arrows — fast motion (⌘ arrives only on kitty-protocol
+            // terminals; M-f/M-b + PageUp/Down are the universal fallback).
+            // ⌘←/→ = code-token, ⌘↑/↓ = page; Shift extends the selection.
+            KeyCode::Left  if cmd => self.move_token_sel(false, shift),
+            KeyCode::Right if cmd => self.move_token_sel(true, shift),
+            KeyCode::Up    if cmd => self.page_up(),
+            KeyCode::Down  if cmd => self.page_down(),
 
             // M-arrows / Ctrl+arrows — directional pane focus (Ctrl needs no
             // Meta setup on mac terminals).
@@ -1468,6 +1668,20 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let query = self.prompt.as_ref().map(|p| p.input.clone()).unwrap_or_default();
 
+        // Label-pick mode (after Tab): the next key jumps to a labeled match.
+        if self.search_pick {
+            self.search_pick = false;
+            if let KeyCode::Char(c) = key.code {
+                if let Some(&(r, col, _)) = self.search_labels.iter().find(|(_, _, l)| *l == c) {
+                    self.set_cursor(r, col);
+                    self.end_isearch(false);
+                    self.close_prompt();
+                    return;
+                }
+            }
+            self.search_labels.clear(); // not a label → drop labels, handle normally
+        }
+
         if ctrl && matches!(key.code, KeyCode::Char('g')) {
             self.end_isearch(true);
             self.close_prompt();
@@ -1478,6 +1692,13 @@ impl App {
             KeyCode::Enter => { self.end_isearch(false); self.close_prompt(); }
             KeyCode::Char('s') if ctrl => self.isearch_step(&query, true),
             KeyCode::Char('r') if ctrl => self.isearch_step(&query, false),
+            // Tab → teleport: label the matches; the next key jumps to one.
+            KeyCode::Tab => {
+                if self.search_hl.len() >= 2 {
+                    self.build_search_labels();
+                    self.search_pick = true;
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(p) = self.prompt.as_mut() { p.input.pop(); }
                 let q = self.prompt.as_ref().map(|p| p.input.clone()).unwrap_or_default();
@@ -1488,8 +1709,43 @@ impl App {
                 let q = self.prompt.as_ref().map(|p| p.input.clone()).unwrap_or_default();
                 self.update_isearch(&q);
             }
-            _ => {}
+            // Land-on-any-key: any other key accepts at the current match, then is
+            // applied in edit mode — so search flows straight into editing.
+            _ => {
+                self.end_isearch(false);
+                self.close_prompt();
+                let _ = self.handle_key(key);
+            }
         }
+    }
+
+    /// Assign home-row labels to the first matches (document order) for Tab-pick.
+    fn build_search_labels(&mut self) {
+        const ALPHA: &[u8] = b"asdfghjklqwertyuiopvbnm";
+        self.search_labels = self
+            .search_hl
+            .iter()
+            .take(ALPHA.len())
+            .enumerate()
+            .map(|(i, &(r, c, _))| (r, c, ALPHA[i] as char))
+            .collect();
+    }
+
+    /// (1-based current, total) match index at the cursor, for the `n/m` counter.
+    pub fn isearch_status(&self) -> Option<(usize, usize)> {
+        let total = self.search_hl.len();
+        if total == 0 {
+            return None;
+        }
+        let pane = self.focused_pane();
+        let (cr, cc) = (pane.cursor_row, pane.cursor_col);
+        let cur = self
+            .search_hl
+            .iter()
+            .position(|&(r, c, _)| r == cr && c == cc)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        Some((cur, total))
     }
 
     fn handle_confirm_quit_key(&mut self, key: KeyEvent) {
@@ -1537,37 +1793,6 @@ impl App {
 
     fn finish_prompt(&mut self, p: Prompt) {
         match p.kind {
-            PromptKind::FindFile => {
-                let path = p.input.trim().to_string();
-                if path.is_empty() { return; }
-                match self.open_file(&path) {
-                    Ok(buf_id) => {
-                        let pid = self.focused_pane_id();
-                        if let Some(pane) = self.panes.get_mut(&pid) {
-                            pane.content = PaneContent::Editor(buf_id);
-                            pane.cursor_row = 0; pane.cursor_col = 0; pane.scroll_row = 0;
-                        }
-                        self.status_msg = Some(format!("Opened  {}", path));
-                    }
-                    Err(e) => self.status_msg = Some(format!("Error: {}", e)),
-                }
-            }
-            PromptKind::SwitchBuffer => {
-                let q = p.input.trim().to_lowercase();
-                let found = self.buffers.values()
-                    .find(|b| b.name.to_lowercase().contains(&q))
-                    .map(|b| b.id);
-                match found {
-                    Some(buf_id) => {
-                        let pid = self.focused_pane_id();
-                        if let Some(pane) = self.panes.get_mut(&pid) {
-                            pane.content = PaneContent::Editor(buf_id);
-                            pane.cursor_row = 0; pane.cursor_col = 0; pane.scroll_row = 0;
-                        }
-                    }
-                    None => self.status_msg = Some("No matching buffer".into()),
-                }
-            }
             PromptKind::GotoLine => {
                 match p.input.trim().parse::<usize>() {
                     Ok(n) if n >= 1 => {
@@ -1754,11 +1979,32 @@ impl App {
 
     /// Clear the bar and any pending agent state, returning to the mode the
     /// bar was opened from (Edit, or Terminal for seamless switching).
+    /// The unified terminal composer's shell fallback: the query didn't match a
+    /// command, so translate it (LLM) into a shell command for confirmation —
+    /// or, with no agent key, run it directly.
+    fn submit_terminal_shell(&mut self) {
+        let cmd = self.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
+        if cmd.trim().is_empty() {
+            return;
+        }
+        if self.shell_ready || !agent::AgentConfig::from_env().is_configured() {
+            self.close_bar();
+            self.run_shell_command(&cmd);
+        } else {
+            // Flip to the inline shell composer so the translated command shows,
+            // anchored at the cursor, for a confirming second Enter.
+            if let Some(p) = self.palette.as_mut() { p.bar_mode = BarMode::Shell; }
+            self.translate_shell_query();
+        }
+    }
+
     fn close_bar(&mut self) {
         self.palette = None;
         self.mode = self.bar_return.clone();
         self.agent_answer = None;
         self.agent_directive = None;
+        self.refactor_target = None;
+        self.refactor_replacement = None;
         self.ask_scroll = 0;
         // agent_pending/agent_history survive — an in-flight answer lands in
         // the transcript and is there when the bar reopens.
@@ -1792,7 +2038,14 @@ impl App {
                 let kind = self.palette.as_ref().and_then(|p| {
                     p.visible_items(frec).into_iter().nth(p.selected).map(|r| r.kind)
                 });
-                self.activate_kind(kind);
+                // Terminal composer: a query that matches no Mars command is a
+                // shell command → LLM-translate + confirm (never a silent no-op).
+                let has_query = self.palette.as_ref().map(|p| !p.query.trim().is_empty()).unwrap_or(false);
+                if items_len == 0 && has_query && self.bar_return == Mode::Terminal {
+                    self.submit_terminal_shell();
+                } else {
+                    self.activate_kind(kind);
+                }
             }
             KeyCode::Backspace => {
                 let close = if let Some(p) = self.palette.as_mut() {
@@ -1828,6 +2081,8 @@ impl App {
             self.agent_history.clear();
             self.agent_answer = None;
             self.agent_directive = None;
+            self.refactor_target = None;
+            self.refactor_replacement = None;
             self.ask_scroll = 0;
             return;
         }
@@ -1838,6 +2093,13 @@ impl App {
             KeyCode::Up => self.ask_scroll = self.ask_scroll.saturating_add(1),
             KeyCode::Down => self.ask_scroll = self.ask_scroll.saturating_sub(1),
             KeyCode::Enter => {
+                // A pending refactor is confirmed with Enter (unless you're typing
+                // a follow-up question), applied as one reversible edit.
+                let has_query = self.palette.as_ref().map(|p| !p.query.trim().is_empty()).unwrap_or(false);
+                if self.refactor_replacement.is_some() && !has_query {
+                    self.apply_refactor();
+                    return;
+                }
                 match self.agent_directive.clone() {
                     Some(agent::AgentDirective::Run(name)) => {
                         self.agent_directive = None;
@@ -1984,6 +2246,9 @@ impl App {
                     .as_ref()
                     .map(|i| i.root.clone())
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
+                // Absolute path so `../` (parent) navigation works — a relative
+                // "." has an empty parent and would blank the tree.
+                let root = std::fs::canonicalize(&root).unwrap_or(root);
                 self.file_tree = Some(FileTree {
                     root,
                     expanded: std::collections::HashSet::new(),
@@ -1995,12 +2260,20 @@ impl App {
             self.mode = Mode::Tree;
             self.refresh_tree_rows();
         } else if self.mode == Mode::Tree {
-            self.tree_open = false;
-            self.mode = Mode::Edit;
+            self.close_tree();
         } else {
             self.mode = Mode::Tree;
             self.refresh_tree_rows();
         }
+    }
+
+    /// Hide the sidebar and forget its navigation state, so the next open starts
+    /// fresh at the project root (not wherever `../` last wandered to).
+    fn close_tree(&mut self) {
+        self.tree_open = false;
+        self.mode = Mode::Edit;
+        self.file_tree = None;
+        self.tree_rows.clear();
     }
 
     /// Recompute the flattened visible rows after any tree mutation.
@@ -2120,7 +2393,7 @@ impl App {
                     if t.filter.is_empty() { false } else { t.filter.clear(); t.selected = 0; true }
                 }).unwrap_or(false);
                 if cleared { self.refresh_tree_rows(); }
-                else { self.tree_open = false; self.mode = Mode::Edit; }
+                else { self.close_tree(); }
             }
             KeyCode::Up | KeyCode::BackTab => {
                 if let Some(t) = self.file_tree.as_mut() { t.selected = t.selected.saturating_sub(1); }
@@ -2138,7 +2411,8 @@ impl App {
                     if t.selected + 1 < len { t.selected += 1; }
                 }
             }
-            KeyCode::Enter | KeyCode::Right => self.tree_activate(),
+            KeyCode::Enter => self.tree_activate(true),  // open + focus editor
+            KeyCode::Right => self.tree_activate(false), // expand / preview (stay in tree)
             KeyCode::Left => self.tree_collapse(),
             KeyCode::Backspace => {
                 let changed = self.file_tree.as_mut().map(|t| {
@@ -2154,8 +2428,10 @@ impl App {
         }
     }
 
-    /// Enter/→ on a row: expand/collapse a folder, re-root on `../`, open a file.
-    fn tree_activate(&mut self) {
+    /// Enter/→ on a row. Folders expand and `../` re-roots for both. For a file,
+    /// `commit` (Enter) opens it and focuses the editor; a preview (→) shows it
+    /// but keeps you in the tree, reversibly — arrow to another file to re-preview.
+    fn tree_activate(&mut self, commit: bool) {
         let Some(row) = self.tree_rows.get(self.file_tree.as_ref().map(|t| t.selected).unwrap_or(0)) else { return };
         let (path, is_dir, updir) = (row.path.clone(), row.is_dir, row.updir);
         if updir {
@@ -2169,7 +2445,7 @@ impl App {
             }
             self.refresh_tree_rows();
         } else {
-            self.open_tree_file(&path);
+            self.show_file_in_pane(&path, commit);
         }
     }
 
@@ -2188,16 +2464,26 @@ impl App {
         }
     }
 
-    /// Open a file chosen in the tree, in the focused pane (focus → editor).
-    fn open_tree_file(&mut self, path: &std::path::Path) {
-        let path_str = path.to_string_lossy().to_string();
-        // Keep a visible terminal by opening beside it.
+    /// Show a tree file in the focused pane. `commit` (Enter) focuses the editor;
+    /// otherwise (→) it's a preview and focus stays in the tree. Reuses an already
+    /// open buffer so repeated previews don't pile up duplicates.
+    fn show_file_in_pane(&mut self, path: &std::path::Path, commit: bool) {
+        let existing = self
+            .buffers
+            .values()
+            .find(|b| b.path.as_deref() == Some(path))
+            .map(|b| b.id);
+        // Keep a visible terminal by opening the file beside it.
         if matches!(self.focused_pane().content, PaneContent::Terminal(_))
             && self.tab().layout.count() < self.tuning.max_panes
         {
             self.split_vertical();
         }
-        match self.open_file(&path_str) {
+        let buf = match existing {
+            Some(id) => Ok(id),
+            None => self.open_file(&path.to_string_lossy()),
+        };
+        match buf {
             Ok(buf_id) => {
                 let pid = self.focused_pane_id();
                 if let Some(pane) = self.panes.get_mut(&pid) {
@@ -2205,9 +2491,12 @@ impl App {
                     pane.cursor_row = 0; pane.cursor_col = 0; pane.scroll_row = 0;
                     pane.selection_anchor = None;
                 }
-                self.mode = Mode::Edit; // focus the editor; sidebar stays open
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path_str);
-                self.status_msg = Some(format!("Opened {name}"));
+                if commit {
+                    self.mode = Mode::Edit; // focus the editor; sidebar stays open
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.to_string_lossy().to_string());
+                    self.status_msg = Some(format!("Opened {name}"));
+                }
             }
             Err(e) => self.status_msg = Some(format!("Can't open {}: {e}", path.display())),
         }
@@ -2283,20 +2572,70 @@ impl App {
         self.agent_pending = true;
         self.agent_answer = None;
         self.agent_directive = None;
+        self.refactor_replacement = None;
         self.ask_scroll = 0; // snap to the newest turn
         let history = self.agent_history.clone();
         self.agent_history.push(("user".into(), question.clone()));
         if let Some(p) = self.palette.as_mut() {
             p.query.clear();
         }
+        // Selection-aware: a live selection becomes precise context, and marks the
+        // range a proposed refactor would replace.
+        let mut context = self.screen_context();
+        self.refactor_target = self.selection_range();
+        if let Some(sel) = self.selected_text() {
+            context.push_str(&sel);
+        }
         agent::ask(
             cfg,
             question,
             palette::registry_context(),
-            self.screen_context(),
+            context,
             history,
             self.agent_tx.clone(),
         );
+    }
+
+    /// Apply a confirm-gated refactor: replace the captured selection with the
+    /// agent's code block, as ONE undo step (C-/ reverts the whole AI edit).
+    pub fn apply_refactor(&mut self) {
+        let (Some((buf_id, s, e)), Some(code)) =
+            (self.refactor_target, self.refactor_replacement.take())
+        else {
+            return;
+        };
+        self.refactor_target = None;
+        if let Some(buf) = self.buffers.get_mut(&buf_id) {
+            buf.checkpoint(); // one reversible chunk
+            buf.rope.remove(s..e);
+            buf.rope.insert(s.min(buf.rope.len_chars()), &code);
+            buf.modified = true;
+        }
+        let (r, c) = self.rowcol_of(buf_id, s + code.chars().count());
+        self.close_bar();
+        self.clear_selection();
+        self.set_cursor(r, c);
+        self.mode = Mode::Edit;
+        self.status_msg = Some("Refactor applied — C-/ to undo".into());
+    }
+
+    /// The highlighted code as a labeled context block, telling the model that a
+    /// refactor request should reply with ONLY the replacement in a ``` block.
+    fn selected_text(&self) -> Option<String> {
+        let (buf_id, s, e) = self.selection_range()?;
+        let buf = self.buffers.get(&buf_id)?;
+        let text = buf.rope.slice(s..e).to_string();
+        let (sr, _) = self.rowcol_of(buf_id, s);
+        let (er, _) = self.rowcol_of(buf_id, e);
+        Some(format!(
+            "\n\nSELECTED CODE — {} lines {}-{} (the user has this highlighted). If they ask \
+             to refactor/rewrite/fix/simplify it, reply with ONLY the replacement inside one \
+             ``` code block and no prose:\n```\n{}\n```\n",
+            buf.name,
+            sr + 1,
+            er + 1,
+            text
+        ))
     }
 
     /// The context-bus slice: what the user is looking at, as text the model
@@ -2469,6 +2808,11 @@ impl App {
             Action::GoTop              => self.move_file_start(),
             Action::GoBottom           => self.move_file_end(),
             Action::GotoLine           => self.start_prompt(PromptKind::GotoLine, "Go to line: "),
+            Action::JumpBlockPrev      => self.jump_block(false),
+            Action::JumpBlockNext      => self.jump_block(true),
+            Action::JumpSymbolPrev     => self.jump_symbol(false),
+            Action::JumpSymbolNext     => self.jump_symbol(true),
+            Action::MatchBracket       => self.match_bracket(),
             Action::Recenter           => self.recenter(),
             Action::Search             => self.start_isearch(),
             Action::SearchBackward     => self.start_isearch(),
@@ -2505,7 +2849,9 @@ impl App {
         self.next_term_id += 1;
         let (rows, cols) = (self.tuning.terminal_default_rows, self.tuning.terminal_default_cols);
         let scrollback = self.tuning.terminal_scrollback_lines;
-        let cwd = self.startup_cwd.clone();
+        // The first opened file's dir if any, else where `mars` was launched —
+        // never portable-pty's default (which lands the shell at /).
+        let cwd = self.startup_cwd.clone().or_else(|| self.run_cwd.clone());
         match terminal::spawn(id, rows, cols, scrollback, cwd, self.term_tx.clone()) {
             Ok(term) => {
                 self.terms.insert(id, term);
@@ -2544,12 +2890,12 @@ impl App {
     }
 
     fn handle_terminal(&mut self, key: KeyEvent) {
-        // Ctrl+Space from a terminal opens the INLINE natural-language shell
-        // composer at the cursor; a second Ctrl+Space (in the bar) switches to
-        // the full command bar.
+        // Ctrl+Space from a terminal opens ONE composer: type to fuzzy-match Mars
+        // commands; if the text matches no command, Enter treats it as a shell
+        // command (LLM-translated + confirmed). No double-press.
         let chord = chord_of(&key);
         if self.keys.bar_open.contains(&chord) || matches!(key.code, KeyCode::Null) {
-            self.open_bar(BarMode::Shell);
+            self.open_bar(BarMode::Command);
             return;
         }
         // Ctrl+g detaches back to the editor.
@@ -2694,6 +3040,11 @@ impl App {
             match ev {
                 AgentEvent::Answer { text, directive } => {
                     self.agent_pending = false;
+                    // If the query targeted a selection and the reply carries a code
+                    // block, offer it as a confirm-gated replacement (a refactor).
+                    if self.refactor_target.is_some() {
+                        self.refactor_replacement = extract_code_block(&text);
+                    }
                     self.agent_history.push(("assistant".into(), text));
                     self.agent_directive = directive;
                     self.ask_scroll = 0; // show the new turn
@@ -2981,6 +3332,18 @@ impl PersistedState {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
+}
+
+/// Extract the first fenced ``` code block's body (drops an optional language
+/// tag on the opening fence). None if there's no complete block.
+pub fn extract_code_block(text: &str) -> Option<String> {
+    let start = text.find("```")?;
+    let after = &text[start + 3..];
+    // Skip the rest of the opening-fence line (e.g. ```rust).
+    let body_start = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
+    let body = &after[body_start..];
+    let end = body.find("```")?;
+    Some(body[..end].trim_end_matches('\n').to_string())
 }
 
 /// Translate a key event into the byte sequence a PTY expects.

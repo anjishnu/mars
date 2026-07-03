@@ -12,6 +12,34 @@
 - Splash: MARS block logo + tagline + starter hints in the empty scratch until first
   key (app.show_splash). Selfcheck asserts "mission control" appears then vanishes.
 
+## Speed features shipped (speed_design.md steps 1-4, 2026-07)
+- STEP 1 motion: KeyModifiers::SUPER detected in handle_edit_primitive; ⌘←/→=move_token_sel
+  (code-token: class-run of word/punct, whitespace skipped — token_class helper), ⌘↑/↓=page,
+  ⌘⇧=extend. Structural jumps: jump_block (blank line), jump_symbol (col-0 kw heuristic),
+  match_bracket — Actions JumpBlockPrev/Next, JumpSymbolPrev/Next, MatchBracket bound
+  C-x [ ] { } m. ⌘ only on kitty terminals; M-f/M-b + PageUp/Down are the fallback.
+- STEP 2 search-as-teleport: search_labels + search_pick fields. handle_isearch_key: Tab →
+  build_search_labels (home-row asdfghjkl over search_hl in doc order) + search_pick=true;
+  next key picks a label → jump+accept. Land-on-any-key: the `_` arm ends isearch + re-
+  dispatches the key to handle_key. isearch_status()→(cur,total) for the n/m counter (shown
+  in the Prompt label; cursor anchored to label+input len, not incl. the counter). Labels
+  render as hl kind 3 (label_style chip) in the per-char highlight map.
+- STEP 3 unified terminal composer: handle_terminal Ctrl+Space → open_bar(Command) (was
+  Shell). handle_bar_command Enter: if items_len==0 && has_query && bar_return==Terminal →
+  submit_terminal_shell() (flips to BarMode::Shell + translate_shell_query, or runs directly
+  with no key). "if not a command → shell-translate" per user. No double-press.
+- STEP 4 selection-aware agent + reversible refactor: refactor_target/refactor_replacement
+  fields. submit_agent_query captures selection_range + appends selected_text() block to
+  context (tells model: refactor→reply ONLY a ``` block). tick Answer: if refactor_target,
+  extract_code_block(text)→refactor_replacement. Ask-panel Enter (empty query) → apply_refactor:
+  ONE checkpoint() + rope.remove+insert → reversible via C-/. Panel shows "▶ Enter to replace
+  the selection (N lines)". Cleared in close_bar + C-l.
+- GOTCHA fixed: selfcheck now hermetic — clears GEMINI/GOOGLE/GROQ/MARS_LLM/ARES_LLM env at
+  the top of selfcheck() (an inherited key flipped the shell composer to translate-not-run,
+  failing the terminal check). 51 checks pass. Logo: render_splash is now a top-level overlay
+  (Clear + centered) gated on show_splash — was editor-pane-only, so terminal-default startup
+  hid it.
+
 ## GOTCHA: tree selection highlight must be full-width + high-contrast (2026-07)
 - Bug report "can't move up/down in the tree, can't type, right opens the file": the tree
   was WORKING (Mode::Tree correct, keys routed) — the SELECTION HIGHLIGHT was just invisible.
