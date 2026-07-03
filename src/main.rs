@@ -248,6 +248,7 @@ fn ask_cli(question: String) -> Result<()> {
         agent::AgentEvent::AutoName { .. }
         | agent::AgentEvent::SessionName { .. }
         | agent::AgentEvent::WatchSummary { .. }
+        | agent::AgentEvent::BgDone
         | agent::AgentEvent::ShellTranslation { .. } => Ok(()),
         agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
     }
@@ -1143,6 +1144,11 @@ fn selfcheck() -> Result<()> {
     app.mode = mode::Mode::Edit; // Esc is a shell key in terminal mode; dismiss from edit
     app.handle_key(k(KeyCode::Esc))?;
     assert!(app.notices.is_empty(), "Esc did not dismiss the notice");
+    // A failed background call must not wedge the gate: BgDone always clears it.
+    app.bg_busy = true;
+    app.agent_tx.send(agent::AgentEvent::BgDone)?;
+    app.tick();
+    assert!(!app.bg_busy, "BgDone did not release the bg_busy gate");
     println!("[selfcheck] watch pane + notice (W6) ... PASS");
 
     // 26m. W7 reattach briefing: detach snapshot → change while away → attach diff

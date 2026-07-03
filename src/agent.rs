@@ -38,6 +38,9 @@ pub enum AgentEvent {
     SessionName { name: String },
     /// W6: one-line verdict on a watched terminal (term id, verdict).
     WatchSummary { term_id: usize, verdict: String },
+    /// A background agent thread finished — clears the `bg_busy` gate even if the
+    /// call failed (so one failed request can't wedge all background work).
+    BgDone,
     /// W3 shell translate: English → one shell command (fills the SH bar).
     ShellTranslation { command: String },
     Error(String),
@@ -264,6 +267,7 @@ pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Send
                 let _ = tx.send(AgentEvent::AutoName { tab_id, name });
             }
         }
+        let _ = tx.send(AgentEvent::BgDone); // release the gate even on failure
     });
 }
 
@@ -288,12 +292,22 @@ pub fn watch_summary(
                  or 'failed:'/'done:'. No preamble, no markdown.") }),
             serde_json::json!({ "role": "user", "content": tail }),
         ];
-        if let Ok(text) = chat(&cfg, messages) {
-            let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
-            if !verdict.is_empty() {
-                let _ = tx.send(AgentEvent::WatchSummary { term_id, verdict });
+        match chat(&cfg, messages) {
+            Ok(text) => {
+                let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
+                if !verdict.is_empty() {
+                    let _ = tx.send(AgentEvent::WatchSummary { term_id, verdict });
+                }
+            }
+            // Surface the failure instead of going silent (and clear the gate).
+            Err(e) => {
+                let _ = tx.send(AgentEvent::WatchSummary {
+                    term_id,
+                    verdict: format!("⚠ watch couldn't summarize — {e}"),
+                });
             }
         }
+        let _ = tx.send(AgentEvent::BgDone); // always release the gate
     });
 }
 
@@ -313,6 +327,7 @@ pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEven
                 let _ = tx.send(AgentEvent::SessionName { name });
             }
         }
+        let _ = tx.send(AgentEvent::BgDone); // release the gate even on failure
     });
 }
 

@@ -207,7 +207,7 @@ pub struct App {
     /// Ask-panel scroll: lines scrolled up from the bottom of the transcript.
     pub ask_scroll: usize,
     /// Auto-naming state: one request in flight; tabs already tried.
-    bg_busy: bool,
+    pub bg_busy: bool,
     auto_name_attempted: std::collections::HashSet<TabId>,
     /// Shell composer: the query is a ready-to-run command (translated or
     /// typed literally with no key) — the next Enter runs it.
@@ -3246,6 +3246,9 @@ impl App {
                     self.agent_answer = Some(format!("⚠ {}", e));
                     self.agent_directive = None;
                 }
+                AgentEvent::BgDone => {
+                    self.bg_busy = false;
+                }
                 AgentEvent::WatchSummary { term_id, verdict } => {
                     self.bg_busy = false;
                     let failed = verdict.to_lowercase().contains("fail")
@@ -3275,12 +3278,18 @@ impl App {
             self.status_msg = Some("Watch works on a terminal pane".into());
             return;
         };
+        let now = self.frame_tick;
         let w = self.watches.entry(id).or_default();
         w.watched = !w.watched;
-        w.last_output_tick = self.frame_tick;
+        w.last_output_tick = now;
         w.triggered = false;
-        self.status_msg = Some(if w.watched {
-            "Watching this pane — I'll summarize it when it quiets or exits".into()
+        let watching = w.watched;
+        self.status_msg = Some(if watching {
+            if agent::AgentConfig::from_env().is_configured() {
+                "Watching this pane — I'll summarize it when it quiets (~20s) or exits".into()
+            } else {
+                "Watching — but set GROQ_API_KEY/GEMINI_API_KEY for the AI summary".into()
+            }
         } else {
             "Stopped watching this pane".into()
         });

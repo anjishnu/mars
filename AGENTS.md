@@ -82,6 +82,6 @@ a recorded tradeoff actually changes.
 
 ## Git
 
-This repository is not yet a git repository as of this writing. Before assuming git
-commands will work, check (`git status`) — if uninitialized, ask before running
-`git init`, since that's a first-time repository decision the user should make.
+This is a git repository; `main` is the only branch and the PR target. Commit
+messages: imperative mood, one-line summary, body explains *why*. Commit or push
+only when asked.

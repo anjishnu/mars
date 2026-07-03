@@ -12,6 +12,19 @@
 - Splash: MARS block logo + tagline + starter hints in the empty scratch until first
   key (app.show_splash). Selfcheck asserts "mission control" appears then vanishes.
 
+## GOTCHA: bg_busy leak wedged all background AI (2026-07, FIXED)
+- Symptom: watch (W6) never produced a summary. Cause: agent::watch_summary/auto_name/
+  name_session only sent their AgentEvent inside `if let Ok(chat)…` — on ANY LLM failure
+  (rate limit/timeout/bad key) they sent nothing, so bg_busy (set true before the call in
+  maybe_fire_watches/maybe_auto_name*) was NEVER cleared → maybe_fire_watches' `if bg_busy
+  { return }` gate blocked every future watch + auto-name permanently. One failed bg call
+  wedged all background AI. FIX: AgentEvent::BgDone sent unconditionally at the end of every
+  bg thread (tick: BgDone→bg_busy=false); watch_summary now also sends an error verdict on
+  Err so failures are visible ("⚠ watch couldn't summarize — …"); toggle_watch_pane warns
+  if no key. Refresh cadence: tick every poll_interval_ms(16ms); watch fires on TermEvent::
+  Exited (shell exit) OR quiet = frame_tick-last_output_tick > watch_quiet_secs(20s)*1000/
+  poll_ms. Verified live with GROQ + watch_quiet_secs=3.
+
 ## AI workflows W6/W7/W5/W4 shipped (workflows_eng.md, 2026-07)
 - Trigger/Watch framework (daemon-resident, in app.rs:tick). W6 (commit 3183471): WatchState
   per TermId fed by term_rx drain (Output resets last_output_tick+triggered; Exit queues
