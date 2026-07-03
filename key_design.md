@@ -207,16 +207,16 @@ the substrates listed in §6.
 `--resume`/`--list`, takeover, and shell-survival are shipped):
 
 - *P0 — daily-driver blockers:* ~~terminal scrollback~~, ~~dead-shell lifecycle~~,
-  ~~crash-safety~~ (all three shipped 2026-07: 10k-line scrollback with wheel /
-  Shift+PgUp/PgDn and snap-back-on-input; exited shells show a dismissal notice and
-  recycle their pane; autosave of path-backed buffers on a timer + on detach, and
-  daemons log to `~/.local/state/mars/<name>.log`). Still open: **pane resizing**
-  (splits are hardcoded 50/50 — ratios on the layout tree + travel-mode resize keys)
-  and **pane zoom** (travel `z` fullscreen toggle).
+  ~~crash-safety~~, ~~pane resizing~~, ~~pane zoom~~ (all shipped 2026-07: 10k-line
+  scrollback with wheel / Shift+PgUp/PgDn and snap-back-on-input; exited shells show a
+  dismissal notice and recycle their pane; autosave of path-backed buffers on a timer +
+  on detach with a failure notice, daemons log to `~/.local/state/mars/<name>.log`;
+  layout-tree split ratios with travel `> < + =` resize; travel `z` zoom toggle).
 - *P1 — comfort parity:* copy-mode-lite (keyboard select/yank from scrollback);
-  `C-t T` new-tab-as-terminal + cwd inheritance; session verbs inside the editor
-  (`C-x s`: rename/switch/kill, session list in the bar); `$MARS_SESSION` exported to
-  spawned shells (prevents nesting); OSC-52 clipboard for SSH-remote attach.
+  ~~cwd inheritance~~ (shipped: terminals open in the first file's dir / launch dir);
+  ~~session verbs inside the editor~~ (shipped: `RenameSession` + `C-t D` detach as
+  actions; `mars new/attach/ls/kill/rename` CLI); `$MARS_SESSION` exported to spawned
+  shells (prevents nesting); OSC-52 clipboard for SSH-remote attach.
 - *P2:* multi-client mirroring; layout restore across daemon crash; Windows named
   pipes; status-line customization.
 

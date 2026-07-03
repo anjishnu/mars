@@ -1248,10 +1248,18 @@ impl App {
     /// Crash-safety: quietly save every modified buffer that has a real path.
     /// Scratch buffers are never touched. Called on a timer and on detach.
     pub fn autosave(&mut self) {
+        let mut failed: Vec<String> = Vec::new();
         for buf in self.buffers.values_mut() {
             if buf.modified && buf.path.is_some() {
-                let _ = buf.save();
+                if buf.save().is_err() {
+                    failed.push(buf.name.clone());
+                }
             }
+        }
+        // Autosave is silent when it works — but a failing write (disk full,
+        // permission, path gone) must not be swallowed: surface it.
+        if !failed.is_empty() {
+            self.status_msg = Some(format!("⚠ autosave FAILED: {}", failed.join(", ")));
         }
     }
 
@@ -2670,10 +2678,14 @@ impl App {
             return;
         };
         self.refactor_target = None;
+        // Clamp both endpoints to the current buffer length — the range was
+        // captured at query time and the buffer may have changed since.
+        let len = self.buffers.get(&buf_id).map(|b| b.rope.len_chars()).unwrap_or(0);
+        let (s, e) = (s.min(len), e.min(len));
         if let Some(buf) = self.buffers.get_mut(&buf_id) {
             buf.checkpoint(); // one reversible chunk
             buf.rope.remove(s..e);
-            buf.rope.insert(s.min(buf.rope.len_chars()), &code);
+            buf.rope.insert(s, &code);
             buf.modified = true;
         }
         let (r, c) = self.rowcol_of(buf_id, s + code.chars().count());
@@ -2886,6 +2898,7 @@ impl App {
             Action::NextPane           => self.focus_next_pane(),
             Action::PrevPane           => self.focus_prev_pane(),
             Action::SwapPane           => self.swap_pane(),
+            Action::ZoomPane           => self.toggle_zoom(),
             Action::NewTab             => self.new_tab(),
             Action::CloseTab           => self.close_tab(),
             Action::NextTab            => self.next_tab(),
@@ -2918,6 +2931,15 @@ impl App {
                 self.ensure_project_index();
                 if self.tree_open { self.refresh_tree_rows(); }
                 self.status_msg = Some("File index refreshed".into());
+            }
+            Action::RestoreKeybindings => {
+                match config::reset_keys() {
+                    Ok(_) => {
+                        self.keys = config::load(); // apply immediately, no restart
+                        self.status_msg = Some("Default keybindings restored (old file → keys.json.bak)".into());
+                    }
+                    Err(e) => self.status_msg = Some(format!("Reset failed: {e}")),
+                }
             }
             Action::KillBuffer         => self.kill_buffer(),
             Action::Undo               => self.do_undo(),

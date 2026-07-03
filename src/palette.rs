@@ -15,6 +15,7 @@ pub enum Action {
     NextPane,
     PrevPane,
     SwapPane,
+    ZoomPane,
     RenamePane,
     // tabs
     NewTab,
@@ -31,6 +32,7 @@ pub enum Action {
     QuickOpen,
     ToggleFileTree,
     RefreshIndex,
+    RestoreKeybindings,
     SwitchBuffer,
     KillBuffer,
     // edit
@@ -87,6 +89,7 @@ impl Action {
             Action::NextPane           => "other pane",
             Action::PrevPane           => "prev pane",
             Action::SwapPane           => "move pane",
+            Action::ZoomPane           => "zoom pane",
             Action::RenamePane         => "rename pane",
             Action::NewTab             => "new tab",
             Action::CloseTab           => "close tab",
@@ -101,6 +104,7 @@ impl Action {
             Action::QuickOpen          => "go to file",
             Action::ToggleFileTree     => "toggle file tree",
             Action::RefreshIndex       => "refresh file index",
+            Action::RestoreKeybindings => "restore default keybindings",
             Action::SwitchBuffer       => "switch buffer",
             Action::KillBuffer         => "kill buffer",
             Action::Undo               => "undo",
@@ -178,6 +182,7 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Redo",          Action::Redo,         "Redo the undone edit"),
         MenuItem::run_desc("Paste",         Action::Paste,        "Paste from the system clipboard"),
         MenuItem::run_desc("Select all",    Action::SelectAll,    "Select the whole buffer"),
+        MenuItem::sub("Edit ▸",             "edit"),
         MenuItem::sub("Window ▸",           "window"),
         MenuItem::sub("Tab ▸",              "tab"),
         MenuItem::sub("Go ▸",               "go"),
@@ -188,7 +193,21 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Watch this pane", Action::WatchPane, "Summarize this terminal when it goes quiet or exits (even detached)"),
         MenuItem::run_desc("Detach session", Action::Detach,      "Disconnect; the session keeps running (reattach: mars attach)"),
         MenuItem::run_desc("Rename session", Action::RenameSession, "Rename this session (also: mars rename <old> <new>)"),
+        MenuItem::run_desc("Refresh file index", Action::RefreshIndex, "Re-scan the project for the file tree/picker"),
+        MenuItem::run_desc("Restore default keys", Action::RestoreKeybindings, "Reset keybindings to defaults (backs up keys.json)"),
         MenuItem::run_desc("Quit",          Action::Quit,         "Quit the editor (ends the session)"),
+    ]
+}
+
+fn edit_menu() -> Vec<MenuItem> {
+    vec![
+        MenuItem::run_desc("Cut / kill region", Action::KillRegion,     "Cut the selection to the kill-ring"),
+        MenuItem::run_desc("Copy region",       Action::CopyRegion,     "Copy the selection (or line) to the kill-ring + clipboard"),
+        MenuItem::run_desc("Yank (paste)",      Action::Yank,           "Paste the last kill from the kill-ring"),
+        MenuItem::run_desc("Yank-pop",          Action::YankPop,        "Cycle to an earlier kill after a yank"),
+        MenuItem::run_desc("Kill to line end",  Action::KillLine,       "Cut from the cursor to the end of the line"),
+        MenuItem::run_desc("Kill word forward", Action::KillWordForward, "Cut the word after the cursor"),
+        MenuItem::run_desc("Kill word back",    Action::KillWordBackward, "Cut the word before the cursor"),
     ]
 }
 
@@ -196,7 +215,9 @@ fn window_menu() -> Vec<MenuItem> {
     vec![
         MenuItem::run_desc("Split below ─",  Action::SplitHorizontal,    "Split the pane below"),
         MenuItem::run_desc("Split right │",  Action::SplitVertical,      "Split the pane right"),
-        MenuItem::run_desc("Other window",   Action::NextPane,           "Focus the next pane (also M-arrows)"),
+        MenuItem::run_desc("Other window",   Action::NextPane,           "Focus the next pane (also Ctrl-arrows)"),
+        MenuItem::run_desc("Previous window", Action::PrevPane,          "Focus the previous pane"),
+        MenuItem::run_desc("Zoom pane",      Action::ZoomPane,           "Maximize this pane / restore (also C-t z)"),
         MenuItem::run_desc("Move pane",      Action::SwapPane,           "Swap this pane with the next"),
         MenuItem::run_desc("Rename pane",    Action::RenamePane,         "Set a custom title for this pane"),
         MenuItem::run_desc("Only this",      Action::DeleteOtherWindows, "Close the other panes"),
@@ -232,6 +253,7 @@ fn go_menu() -> Vec<MenuItem> {
 
 pub fn menu_for(name: &str) -> Vec<MenuItem> {
     match name {
+        "edit"   => edit_menu(),
         "window" => window_menu(),
         "tab"    => tab_menu(),
         "go"     => go_menu(),

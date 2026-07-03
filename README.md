@@ -56,7 +56,7 @@ Warp the OS eats `⌘` — use `⌥` there (enable "Use Option as Meta" if offer
 
 | Do this | Keys | Also |
 |---|---|---|
-| Jump by code token (`foo·.·bar·(·baz·)`) | `⌘←`/`⌘→` or `⌥←`/`⌥→` | `M-b` / `M-f` |
+| Jump by code token (`foo·.·bar·(·baz·)`) | `⌘←`/`⌘→` or `⌥←`/`⌥→` | `M-b` / `M-f` (word) |
 | Page up / down | `⌘↑`/`⌘↓` or `⌥↑`/`⌥↓` | `PageUp` / `PageDown` |
 | Extend selection while jumping | add `Shift` (`⌥⇧→`) | `Shift`+`PageUp/Down` |
 | Next/prev blank-line block | `C-x ]` / `C-x [` | |

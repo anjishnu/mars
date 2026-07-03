@@ -207,6 +207,30 @@ fn tuning_path() -> Option<std::path::PathBuf> {
     crate::config::state_path().map(|p| p.with_file_name("tuning.json"))
 }
 
+/// Write the annotated default knobs to `path` (used on first run and reset).
+fn write_default_knobs(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let map: serde_json::Map<String, serde_json::Value> = default_knobs()
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Restore tuning.json to defaults, backing up the current file.
+pub fn reset() {
+    if let Some(p) = tuning_path() {
+        if p.exists() {
+            let _ = std::fs::rename(&p, p.with_extension("json.bak"));
+        }
+        write_default_knobs(&p);
+    }
+}
+
 pub fn load() -> Tuning {
     let path = tuning_path();
     let user: Option<HashMap<String, Knob>> = path
@@ -217,16 +241,7 @@ pub fn load() -> Tuning {
     if user.is_none() {
         // First run: write the annotated defaults so they're discoverable/editable.
         if let Some(p) = &path {
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let map: serde_json::Map<String, serde_json::Value> = default_knobs()
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))
-                .collect();
-            if let Ok(json) = serde_json::to_string_pretty(&map) {
-                let _ = std::fs::write(p, json);
-            }
+            write_default_knobs(p);
         }
     }
 

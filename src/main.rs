@@ -70,6 +70,7 @@ INSIDE THE EDITOR
 MORE
   mars help                      this text          (aliases: -h, --help)
   mars version                   version            (aliases: -V, --version)
+  mars reset                     restore default keybindings + tuning (backs up old)
   mars --selfcheck               run the built-in test suite
 
   Config: ~/.config/mars/keys.json (bindings), tuning.json (behavior knobs)
@@ -136,6 +137,17 @@ fn main() -> Result<()> {
                 anyhow::bail!("usage: mars rename <old> <new>   (see: mars ls)");
             };
             return session::rename_main(&old, &new);
+        }
+        // Factory reset: restore default keybindings + tuning (backs up the old files).
+        Some("reset") | Some("--reset") => {
+            let path = config::reset_keys()?;
+            tuning::reset();
+            println!(
+                "Restored default keybindings and tuning.\n  {}\n  (your previous files were \
+                 backed up alongside as *.bak)",
+                path.display()
+            );
+            return Ok(());
         }
         // Quick standalone edit — no daemon (scripts, throwaway).
         Some("-s") | Some("--standalone") => {} // handled below
@@ -585,6 +597,12 @@ fn selfcheck() -> Result<()> {
     sh.scroll_to_live();
     assert_eq!(sh.view_offset(), 0, "snap-back failed");
     assert_eq!(sh.screen().contents(), live, "live view changed after snap-back");
+    // W5: history_tail pages the scrollback (below the viewport) and restores the
+    // live view — must reach early lines the live screen scrolled past.
+    let tail = sh.history_tail(60);
+    assert!(tail.contains("100"), "history_tail missing recent output");
+    assert!(tail.lines().count() > 24, "history_tail did not exceed one screen");
+    assert_eq!(sh.view_offset(), 0, "history_tail left the view scrolled back");
     println!("[selfcheck] terminal scrollback ........ PASS");
 
     // 15c. Dead-shell lifecycle: exit → Exited event → Enter recycles the pane.
@@ -1150,6 +1168,18 @@ fn selfcheck() -> Result<()> {
     app.tick();
     assert!(!app.bg_busy, "BgDone did not release the bg_busy gate");
     println!("[selfcheck] watch pane + notice (W6) ... PASS");
+
+    // 26l2. The quiet-timer actually fires: an old last_output_tick + a zero
+    //       threshold trips maybe_fire_watches (no key → sets `triggered`, no LLM).
+    {
+        let mut app = App::new(None)?;
+        app.tuning.watch_quiet_secs = 0;
+        app.watches.insert(4242, app::WatchState { watched: true, last_output_tick: 0, ..Default::default() });
+        app.tick();
+        assert!(app.watches.get(&4242).map(|w| w.triggered).unwrap_or(false),
+            "quiet timer did not fire maybe_fire_watches");
+    }
+    println!("[selfcheck] watch quiet-timer fires .... PASS");
 
     // 26m. W7 reattach briefing: detach snapshot → change while away → attach diff
     //      pushes one "while away — …" notice; nothing changed → no notice.

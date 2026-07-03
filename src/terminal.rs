@@ -144,7 +144,7 @@ impl Term {
     /// The last `lines` lines of scrollback + live screen, oldest-first (W5).
     /// Pages back through history under the lock and restores the live view.
     pub fn history_tail(&self, lines: usize) -> String {
-        let mut p = self.parser.lock().unwrap();
+        let Ok(mut p) = self.parser.lock() else { return String::new() };
         let rows = p.screen().size().0 as usize;
         let saved = self.view_offset;
         let mut pages: Vec<String> = Vec::new();

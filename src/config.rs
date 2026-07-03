@@ -1,5 +1,5 @@
-/// Config-driven keybindings — loaded from ~/.config/ares/keys.json
-/// or .ares/keys.json; defaults written on first run.
+/// Config-driven keybindings — loaded from ~/.config/mars/keys.json
+/// or .mars/keys.json; defaults written on first run. `mars reset` restores them.
 ///
 /// Bindings are **sequences** of chords, so Emacs prefixes like `C-x C-s`
 /// work. Emacs notation (`C-x`, `M-x`, `S-tab`) and long form (`ctrl-x`) both parse.
@@ -259,7 +259,13 @@ impl RawBindings {
                 prefixes.insert(seq[0].clone());
             }
         }
-        let bar_open = self.bar_open.iter().filter_map(|s| parse_key(s)).collect();
+        // bar_open is the command bar's opener — the recovery hatch. If a
+        // hand-edited config empties or breaks it, fall back to defaults so the
+        // bar (and thus Quit / reset) is never unreachable.
+        let mut bar_open: Vec<KeyChord> = self.bar_open.iter().filter_map(|s| parse_key(s)).collect();
+        if bar_open.is_empty() {
+            bar_open = RawBindings::defaults().bar_open.iter().filter_map(|s| parse_key(s)).collect();
+        }
         KeyBindings { edit, prefixes, bar_open }
     }
 }
@@ -319,6 +325,19 @@ fn config_dir() -> Option<std::path::PathBuf> {
 fn try_read(path: &std::path::Path) -> Option<RawBindings> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Restore keys.json to the compiled defaults, backing up the current file to
+/// `keys.json.bak`. Returns the config path (for a status/CLI message).
+pub fn reset_keys() -> anyhow::Result<std::path::PathBuf> {
+    let path = app_config_dir()
+        .map(|d| d.join("keys.json"))
+        .ok_or_else(|| anyhow::anyhow!("no config directory"))?;
+    if path.exists() {
+        let _ = std::fs::rename(&path, path.with_extension("json.bak"));
+    }
+    write_defaults(&path, &RawBindings::defaults())?;
+    Ok(path)
 }
 
 fn write_defaults(path: &std::path::Path, raw: &RawBindings) -> anyhow::Result<()> {

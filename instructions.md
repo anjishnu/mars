@@ -5,7 +5,7 @@ Build & launch:
 ```bash
 source ~/.cargo/env && cargo build
 ./target/debug/mars            # new session, opens a terminal + the MARS banner
-=```
+```
 
 > **Terminal note for fast movement:** fast motion is bound to **both `⌘` and `⌥` (Option)**.
 > `⌘` reaches Mars only on **kitty-protocol terminals** (Ghostty, Kitty, WezTerm, recent
@@ -43,17 +43,13 @@ In a file, press **`C-s`** and start typing a word you can see:
   key** — the search commits at the current match and your key applies. (Type target → go.)
 - `C-s`/`C-r` cycle matches · `Enter` accept · `C-g` cancel (restores where you started).
 
-## 4. One-key terminal composeCtrl+Space
-Focus a terminal pane, press Ctrl+Space once. You get one composer:
-
-- Type a **Mars command** (e.g. `split`, `new tab`) → it appears as a suggestion → `Enter`
-  runs it.
-- Type something that's **not** a command (e.g. `find big files here`) → `Enter` treats it
-  as a **shell command**: with an agent key set it's **LLM-translated and shown for you to
-  confirm** before running; with no key it runs directly.
-
-No need to press `Ctrl+Space` twice anymore. (`!` still forces shell mode, `?` asks the
-agent, `@` opens the file tree.)
+## 4. One-key shell composer — `Ctrl+Space`
+Focus a terminal pane and press **`Ctrl+Space`** once → the inline **shell composer** opens
+right at your cursor, and the **terminal stays fully visible** (small overlay, not the big
+menu). Type an **English request** ("find the 10 biggest files here"): with an agent key,
+**Enter** LLM-translates it to a shell command shown for a confirming **second Enter**; with
+no key, Enter runs what you typed. This is the `!` behavior in one keystroke. Press
+**`Ctrl+Space` again** for the full command bar; `?` asks the agent, `@` opens the file tree.
 
 ## 5. Left file tree (`@` / `C-x d`)
 Press **`@`** in the command bar (or **`C-x d`**) to open the left sidebar:
