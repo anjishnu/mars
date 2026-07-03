@@ -1140,6 +1140,25 @@ fn selfcheck() -> Result<()> {
     assert!(app.notices.is_empty(), "Esc did not dismiss the notice");
     println!("[selfcheck] watch pane + notice (W6) ... PASS");
 
+    // 26m. W7 reattach briefing: detach snapshot → change while away → attach diff
+    //      pushes one "while away — …" notice; nothing changed → no notice.
+    {
+        let mut app = App::new(None)?;
+        app.open_file("/tmp/mars-w7-fixture.txt").ok(); // a buffer to dirty (may not exist → skip)
+        app.on_detach();
+        app.on_attach();
+        assert!(app.notices.is_empty(), "briefing appeared when nothing changed");
+        // Now simulate a watched task finishing while detached.
+        app.on_detach();
+        app.watches.insert(7, app::WatchState { watched: true, verdict: Some("failed: tests red".into()), ..Default::default() });
+        app.on_attach();
+        assert_eq!(app.notices.len(), 1, "reattach did not brief the new verdict");
+        assert!(app.notices[0].text.contains("while away") && app.notices[0].text.contains("tests red"),
+            "briefing text missing the verdict");
+        assert!(matches!(app.notices[0].kind, app::NoticeKind::Failure), "failing briefing not a Failure");
+    }
+    println!("[selfcheck] reattach briefing (W7) .... PASS");
+
     // 27. Session daemon: detach → state + shells survive → reattach; takeover;
     //     version handshake; quit removes the socket. Fully headless.
     {

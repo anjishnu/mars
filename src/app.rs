@@ -103,6 +103,15 @@ pub struct Notice {
 #[derive(PartialEq, PartialOrd, Eq, Ord)]
 pub enum NoticeKind { Failure, Info }
 
+/// A cheap counts-and-flags snapshot taken at detach; diffed at reattach (W7).
+/// Deterministic — the facts (what exited, what changed) are the value; no LLM.
+#[derive(Default)]
+pub struct Snapshot {
+    exited: std::collections::HashSet<TermId>,
+    dirty: std::collections::HashSet<String>,
+    verdicts: HashMap<TermId, String>,
+}
+
 pub struct App {
     pub buffers: HashMap<BufferId, Buffer>,
     pub panes: HashMap<PaneId, Pane>,
@@ -187,6 +196,8 @@ pub struct App {
     pub notices: Vec<Notice>,
     /// An exit trigger queued from the term_rx drain, fired next tick.
     pending_watch: Option<(TermId, WatchReason)>,
+    /// State captured at detach; diffed on reattach for the "where was I?" briefing (W7).
+    detach_snapshot: Option<Snapshot>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
     pub agent_history: Vec<(String, String)>,
     /// Ask-panel scroll: lines scrolled up from the bottom of the transcript.
@@ -273,6 +284,7 @@ impl App {
             watches: HashMap::new(),
             notices: Vec::new(),
             pending_watch: None,
+            detach_snapshot: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
             bg_busy: false,
@@ -3191,6 +3203,64 @@ impl App {
         } else {
             "Stopped watching this pane".into()
         });
+    }
+
+    /// W7: capture a cheap snapshot when the last client detaches, so reattach can
+    /// tell you what changed while you were gone.
+    pub fn on_detach(&mut self) {
+        self.detach_snapshot = Some(Snapshot {
+            exited: self.terms.iter().filter(|(_, t)| t.exited).map(|(id, _)| *id).collect(),
+            dirty: self.buffers.values().filter(|b| b.modified).map(|b| b.name.clone()).collect(),
+            verdicts: self
+                .watches
+                .iter()
+                .filter_map(|(id, w)| w.verdict.clone().map(|v| (*id, v)))
+                .collect(),
+        });
+    }
+
+    /// W7: diff the live state against the detach snapshot and, if anything changed,
+    /// push one "while away — …" briefing notice (deterministic; absent when idle).
+    pub fn on_attach(&mut self) {
+        let Some(snap) = self.detach_snapshot.take() else { return };
+        let mut items: Vec<String> = Vec::new();
+        let mut failed = false;
+        // Watched tasks that produced a NEW verdict while away (the top signal).
+        for (id, w) in &self.watches {
+            if let Some(v) = &w.verdict {
+                if snap.verdicts.get(id) != Some(v) {
+                    items.push(v.clone());
+                    let lv = v.to_lowercase();
+                    if lv.contains("fail") || lv.contains("error") {
+                        failed = true;
+                    }
+                }
+            }
+        }
+        let exited = self
+            .terms
+            .iter()
+            .filter(|(id, t)| t.exited && !snap.exited.contains(id))
+            .count();
+        if exited > 0 {
+            items.push(format!("{exited} shell{} exited", if exited == 1 { "" } else { "s" }));
+        }
+        let dirty = self
+            .buffers
+            .values()
+            .filter(|b| b.modified && !snap.dirty.contains(&b.name))
+            .count();
+        if dirty > 0 {
+            items.push(format!("{dirty} file{} modified", if dirty == 1 { "" } else { "s" }));
+        }
+        if items.is_empty() {
+            return; // nothing changed — no briefing
+        }
+        self.notices.push(Notice {
+            text: format!("while away — {}", items.join(" · ")),
+            kind: if failed { NoticeKind::Failure } else { NoticeKind::Info },
+        });
+        self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
     }
 
     /// Dismiss the front (highest-priority) notice, if any. Returns true if one popped.

@@ -296,6 +296,7 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                 client = Some((stream.try_clone()?, gen));
                 term = Some(make_terminal(stream, cols, rows)?);
                 attached.store(true, Ordering::SeqCst);
+                app.on_attach(); // W7: "where was I?" briefing from the detach diff
                 if let Some(t) = term.as_mut() {
                     if let Err(e) = t.clear() {
                         debug_log(&format!("srv: clear error: {e}"));
@@ -318,6 +319,7 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                     client = None;
                     term = None; // keep running headless
                     attached.store(false, Ordering::SeqCst);
+                    app.on_detach(); // W7: snapshot for the reattach briefing
                     app.autosave(); // the window may have been closed for good
                 }
             }
