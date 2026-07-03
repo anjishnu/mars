@@ -71,6 +71,12 @@ pub enum PromptKind {
     RenameSession,
     /// Live incremental search (C-s / C-r navigate, Enter accepts, C-g restores).
     Search,
+    /// Query-replace, stage 1: the string to find.
+    ReplaceFrom,
+    /// Query-replace, stage 2: the replacement string.
+    ReplaceTo,
+    /// Query-replace, stage 3: interactive y/n/! all/q stepping through matches.
+    QueryReplace,
     /// Quit with modified buffers: s = save all & quit, q = quit anyway.
     ConfirmQuit,
     /// Confirm a destructive agent-proposed action: y runs it, anything else cancels.
@@ -222,6 +228,13 @@ pub struct App {
     session_name_attempted: bool,
     /// Undo coalescing: the kind of edit run currently in progress.
     edit_run: EditRun,
+    // ── Query-replace (M-%) ──
+    replace_from: String,
+    replace_to: String,
+    /// Char index of the match currently being offered.
+    replace_idx: Option<usize>,
+    /// Whether the one undo checkpoint for this replace has been taken.
+    replace_checkpointed: bool,
     pub frame_tick: u64,
     // ── Terminal panes ──
     pub terms: HashMap<TermId, Term>,
@@ -306,6 +319,10 @@ impl App {
             shell_ready: false,
             session_name_attempted: false,
             edit_run: EditRun::None,
+            replace_from: String::new(),
+            replace_to: String::new(),
+            replace_idx: None,
+            replace_checkpointed: false,
             frame_tick: 0,
             terms: HashMap::new(),
             term_tx,
@@ -1269,7 +1286,7 @@ impl App {
             .map(|b| b.undo_depth())
             .unwrap_or((0, 0));
         self.status_msg =
-            Some(format!("UNDO ◂ {back} back · {fwd} forward ▸   ←/→ step · Home/End all · Esc done"));
+            Some(format!("TIME-TRAVEL ◂ {back} back · {fwd} forward ▸   ←/→ step · Home/End all · Esc done"));
     }
 
     fn handle_undo_mode(&mut self, key: KeyEvent) {
@@ -1727,10 +1744,15 @@ impl App {
                 self.auto_indent(); // carry the previous line's leading whitespace
             }
             KeyCode::Tab   => {
-                if prev_run != EditRun::Insert { self.focused_buf_mut().checkpoint(); }
-                for _ in 0..4 { self.insert_char_at_cursor(' '); }
-                self.edit_run = EditRun::Insert;
+                if self.focused_pane().selection_anchor.is_some() {
+                    self.indent_region(false); // Tab indents the selected lines
+                } else {
+                    if prev_run != EditRun::Insert { self.focused_buf_mut().checkpoint(); }
+                    for _ in 0..4 { self.insert_char_at_cursor(' '); }
+                    self.edit_run = EditRun::Insert;
+                }
             }
+            KeyCode::BackTab => self.indent_region(true), // Shift-Tab dedents
             KeyCode::Char(c) if !ctrl && !alt => {
                 if self.delete_selection() {
                     // replace: the delete checkpointed; typing joins that step
@@ -1740,6 +1762,134 @@ impl App {
                 self.insert_char_at_cursor(c);
                 self.edit_run = EditRun::Insert;
             }
+            _ => {}
+        }
+    }
+
+    /// Indent (+4 spaces) or dedent (≤4 leading spaces / one tab) every line the
+    /// selection touches, or the current line if there's no selection. One undo
+    /// step; the selection is preserved so Tab/Shift-Tab can repeat.
+    fn indent_region(&mut self, dedent: bool) {
+        let sel = self.selection_range();
+        let (buf_id, start_row, end_row) = match sel {
+            Some((id, s, e)) => {
+                let (sr, _) = self.rowcol_of(id, s);
+                let (er, ec) = self.rowcol_of(id, e);
+                // A selection ending at column 0 doesn't include that trailing line.
+                let er = if ec == 0 && er > sr { er - 1 } else { er };
+                (id, sr, er)
+            }
+            None => match self.editor_pos() {
+                Some((row, _, id)) => (id, row, row),
+                None => return,
+            },
+        };
+        self.focused_buf_mut().checkpoint();
+        self.edit_run = EditRun::None;
+        for row in start_row..=end_row {
+            let line_start = self.buffers[&buf_id].char_at(row, 0);
+            if dedent {
+                let head: String = self.buffers[&buf_id].rope.line(row).chars().take(4).collect();
+                let n = if head.starts_with('\t') { 1 } else { head.chars().take_while(|c| *c == ' ').count() };
+                if n > 0 {
+                    self.buffers.get_mut(&buf_id).unwrap().rope.remove(line_start..line_start + n);
+                }
+            } else {
+                self.buffers.get_mut(&buf_id).unwrap().rope.insert(line_start, "    ");
+            }
+        }
+        self.buffers.get_mut(&buf_id).unwrap().modified = true;
+        if sel.is_some() {
+            // Re-select the affected lines so the block stays highlighted for repeats.
+            let end_len = self.buffers[&buf_id].line_len(end_row);
+            self.focused_pane_mut().selection_anchor = Some((start_row, 0));
+            let p = self.focused_pane_mut();
+            p.cursor_row = end_row;
+            p.cursor_col = end_len;
+            p.col_affinity = end_len;
+        } else {
+            self.clamp_cursor_after_edit();
+        }
+    }
+
+    // ── Query-replace (M-%) ──────────────────────────────────────────────────
+
+    fn begin_query_replace(&mut self) {
+        self.replace_checkpointed = false;
+        self.replace_idx = None;
+        // Scan the whole buffer from the top (the "search & replace" expectation).
+        if self.qr_show_next(0) {
+            let label = format!("Replace '{}' → '{}'?  y / n / ! (all) / q ", self.replace_from, self.replace_to);
+            self.start_prompt(PromptKind::QueryReplace, &label);
+        } else {
+            self.status_msg = Some(format!("No matches for '{}'", self.replace_from));
+        }
+    }
+
+    /// Find the next match at/after `from_idx`; move the cursor there + highlight.
+    fn qr_show_next(&mut self, from_idx: usize) -> bool {
+        let from = self.replace_from.clone();
+        let buf_id = match self.editor_pos() { Some((_, _, id)) => id, None => return false };
+        match self.find_matches(buf_id, &from).into_iter().find(|&m| m >= from_idx) {
+            Some(idx) => {
+                self.replace_idx = Some(idx);
+                let (r, c) = self.rowcol_of(buf_id, idx);
+                self.set_cursor(r, c);
+                self.search_hl = vec![(r, c, from.chars().count())];
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn qr_replace_at(&mut self, idx: usize, flen: usize, to: &str) {
+        let buf_id = match self.editor_pos() { Some((_, _, id)) => id, None => return };
+        if !self.replace_checkpointed {
+            self.focused_buf_mut().checkpoint(); // one undo step for the whole replace
+            self.replace_checkpointed = true;
+        }
+        let buf = self.buffers.get_mut(&buf_id).unwrap();
+        buf.rope.remove(idx..idx + flen);
+        buf.rope.insert(idx, to);
+        buf.modified = true;
+    }
+
+    fn qr_finish(&mut self) {
+        self.replace_idx = None;
+        self.search_hl.clear();
+        self.close_prompt();
+    }
+
+    fn handle_query_replace_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let to = self.replace_to.clone();
+        let flen = self.replace_from.chars().count();
+        let tlen = to.chars().count();
+        let Some(idx) = self.replace_idx else { self.qr_finish(); return };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char(' ') => {
+                self.qr_replace_at(idx, flen, &to);
+                if !self.qr_show_next(idx + tlen) {
+                    self.qr_finish();
+                    self.status_msg = Some("Replaced".into());
+                }
+            }
+            KeyCode::Char('n') => {
+                if !self.qr_show_next(idx + flen) { self.qr_finish(); }
+            }
+            KeyCode::Char('!') => {
+                let mut count = 0;
+                loop {
+                    let m = self.replace_idx.unwrap();
+                    self.qr_replace_at(m, flen, &to);
+                    count += 1;
+                    if !self.qr_show_next(m + tlen) { break; }
+                }
+                self.qr_finish();
+                self.status_msg = Some(format!("Replaced {count}"));
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.qr_finish(),
+            KeyCode::Char('g') if ctrl => self.qr_finish(),
             _ => {}
         }
     }
@@ -1798,6 +1948,7 @@ impl App {
             PromptKind::Search => self.handle_isearch_key(key),
             PromptKind::ConfirmQuit => self.handle_confirm_quit_key(key),
             PromptKind::ConfirmAction(action) => self.handle_confirm_action_key(key, action),
+            PromptKind::QueryReplace => self.handle_query_replace_key(key),
             _ => self.handle_line_prompt_key(key),
         }
     }
@@ -1958,6 +2109,17 @@ impl App {
 
     fn finish_prompt(&mut self, p: Prompt) {
         match p.kind {
+            PromptKind::ReplaceFrom => {
+                self.replace_from = p.input;
+                if self.replace_from.is_empty() {
+                    return;
+                }
+                self.start_prompt(PromptKind::ReplaceTo, "Replace with: ");
+            }
+            PromptKind::ReplaceTo => {
+                self.replace_to = p.input;
+                self.begin_query_replace();
+            }
             PromptKind::GotoLine => {
                 match p.input.trim().parse::<usize>() {
                     Ok(n) if n >= 1 => {
@@ -2005,8 +2167,9 @@ impl App {
                     self.status_msg = Some("Session names cannot contain '/'".into());
                 }
             }
-            // Search / confirms are handled key-by-key, never via finish.
-            PromptKind::Search | PromptKind::ConfirmQuit | PromptKind::ConfirmAction(_) => {}
+            // Search / confirms / query-replace are handled key-by-key, never via finish.
+            PromptKind::Search | PromptKind::ConfirmQuit
+            | PromptKind::ConfirmAction(_) | PromptKind::QueryReplace => {}
         }
     }
 
@@ -3062,6 +3225,7 @@ impl App {
             Action::MatchBracket       => self.match_bracket(),
             Action::Recenter           => self.recenter(),
             Action::Search             => self.start_isearch(),
+            Action::QueryReplace       => self.start_prompt(PromptKind::ReplaceFrom, "Query replace: "),
             Action::SearchBackward     => self.start_isearch(),
             Action::OpenTerminal       => self.open_terminal(),
             Action::AskAgent           => self.open_bar(BarMode::Ask),

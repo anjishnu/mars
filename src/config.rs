@@ -195,6 +195,8 @@ impl RawBindings {
             // terminal
             ("M-`",     Action::OpenTerminal),
             ("C-x C-t", Action::OpenTerminal),
+            // session
+            ("C-x C-d", Action::Detach), // detach (also: C-t D travel mode)
             // edit / kill-ring
             ("C-k",     Action::KillLine),
             ("C-w",     Action::KillRegion),
@@ -219,7 +221,8 @@ impl RawBindings {
             ("C-x C-u", Action::Redo),
             ("cmd-z",   Action::Undo), // Mac muscle memory (kitty-class terminals)
             ("cmd-Z",   Action::Redo), // ⌘⇧Z
-            ("M-u",     Action::UndoMode), // time-travel: ←/→ through history
+            ("C-u",     Action::UndoMode), // time-travel: ←/→ scrub through history
+            ("M-%",     Action::QueryReplace),
             // navigation targets that are commands (not raw motions)
             ("M-<",     Action::GoTop),
             ("M->",     Action::GoBottom),

@@ -25,7 +25,7 @@ impl Mode {
             Mode::Tab      => "C-t",
             Mode::Terminal => "TERM",
             Mode::Tree     => "TREE",
-            Mode::Undo     => "UNDO",
+            Mode::Undo     => "TIME",
         }
     }
 

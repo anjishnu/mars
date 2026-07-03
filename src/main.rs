@@ -535,6 +535,41 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] auto-indent on newline .... PASS");
 
+    let text_of = |a: &App| -> String {
+        match a.focused_pane().content {
+            pane::PaneContent::Editor(id) => a.buffers[&id].rope.to_string(),
+            _ => String::new(),
+        }
+    };
+
+    // 6g. Tab indents / Shift-Tab dedents the selected lines (one undo step).
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "aa")?; app.handle_key(k(KeyCode::Enter))?; typ(&mut app, "bb")?;
+        app.handle_key(kc(KeyCode::Char('x')))?; app.handle_key(k(KeyCode::Char('h')))?; // C-x h select all
+        app.handle_key(k(KeyCode::Tab))?;
+        assert_eq!(text_of(&app), "    aa\n    bb", "Tab did not indent the block");
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+        assert_eq!(text_of(&app), "aa\nbb", "Shift-Tab did not dedent the block");
+    }
+    println!("[selfcheck] indent/dedent selection ... PASS");
+
+    // 6h. Query-replace: from/to prompts, then y replaces one, ! replaces the rest.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "foo bar foo")?;
+        app.run_action(palette::Action::QueryReplace);
+        assert!(app.mode == mode::Mode::Prompt, "query-replace did not prompt");
+        typ(&mut app, "foo")?; app.handle_key(k(KeyCode::Enter))?; // from
+        typ(&mut app, "XYZ")?; app.handle_key(k(KeyCode::Enter))?; // to → begins stepping
+        assert!(app.mode == mode::Mode::Prompt, "query-replace stepping prompt missing");
+        app.handle_key(k(KeyCode::Char('y')))?; // replace first
+        app.handle_key(k(KeyCode::Char('!')))?; // replace the rest
+        assert_eq!(text_of(&app), "XYZ bar XYZ", "query-replace did not replace all matches");
+        assert!(app.mode == mode::Mode::Edit, "query-replace did not finish");
+    }
+    println!("[selfcheck] query-replace (y/n/!/q) ... PASS");
+
     // 7. which-key: a pending prefix pops the continuation panel after a beat;
     //    C-x C-s on a pathless buffer opens Save-As (no ghost `:w` advice).
     app.handle_key(kc(KeyCode::Char('x')))?;
