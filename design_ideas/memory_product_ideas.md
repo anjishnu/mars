@@ -7,7 +7,7 @@ retrieved as a `ContextSource`). Read those first; this doc does not re-derive t
 one argument they each imply but neither states: **the tunnel that carries your key is the same
 tunnel that carries your memory, and together they make your terminal a thing you carry — one
 identity, everywhere, zero footprint.** Sibling to [`strategy.md`](./strategy.md) (the
-sight × persistence thesis, scenario #2), [`key_design.md`](./key_design.md),
+sight × persistence thesis, scenario #2), [`key_design.md`](../key_design.md),
 [`workflows_eng.md`](./workflows_eng.md), and [`agentic_inline.md`](./agentic_inline.md).*
 
 ---

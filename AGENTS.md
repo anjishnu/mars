@@ -10,7 +10,13 @@ bar, LLM agent integration, and tmux/zellij-style session persistence. Read
 [`DESIGN.md`](./DESIGN.md) for the architecture and [`key_design.md`](./key_design.md)
 for the UX/interaction philosophy and product vision before making non-trivial
 changes — both are living documents, not historical records, and should be updated
-alongside code changes that affect what they describe.
+alongside code changes that affect what they describe. [`architecture_overview.md`](./architecture_overview.md)
+is a file-by-file tour of the code.
+
+**Root `.md` files describe the system as it exists; forward-looking proposals and
+product visions live in [`design_ideas/`](./design_ideas/)** (see its README). A doc under
+`design_ideas/` may be unbuilt or partially built — don't read it as a description of the
+shipped system, and when one ships, fold its durable rationale into the root docs.
 
 ## Build, run, verify
 
