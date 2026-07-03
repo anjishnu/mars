@@ -501,6 +501,15 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] cross-line arrow wrap ..... PASS");
 
+    // 6f. Auto-indent: Enter carries the previous line's leading whitespace.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "    x")?; // 4-space indent
+        app.handle_key(k(KeyCode::Enter))?;
+        assert_eq!(app.focused_pane().cursor_col, 4, "Enter did not auto-indent to match");
+    }
+    println!("[selfcheck] auto-indent on newline .... PASS");
+
     // 7. which-key: a pending prefix pops the continuation panel after a beat;
     //    C-x C-s on a pathless buffer opens Save-As (no ghost `:w` advice).
     app.handle_key(kc(KeyCode::Char('x')))?;

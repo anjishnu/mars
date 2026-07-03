@@ -215,6 +215,8 @@ impl RawBindings {
             ("C-/",     Action::Undo),
             ("C-_",     Action::Undo), // many terminals send C-/ as C-_ (0x1f)
             ("C-x u",   Action::Undo),
+            ("M-/",     Action::Redo), // redo mirrors undo (also: C-x C-u style via menu)
+            ("C-x C-u", Action::Redo),
             // navigation targets that are commands (not raw motions)
             ("M-<",     Action::GoTop),
             ("M->",     Action::GoBottom),

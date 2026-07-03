@@ -561,6 +561,24 @@ impl App {
         p.col_affinity = p.cursor_col;
     }
 
+    /// After a newline, copy the previous line's leading whitespace so the cursor
+    /// lands at the same indent (the near-universal editor expectation).
+    fn auto_indent(&mut self) {
+        let (row, buf_id) = match self.editor_pos() { Some((r, _, id)) => (r, id), None => return };
+        if row == 0 {
+            return;
+        }
+        let indent: String = self.buffers[&buf_id]
+            .rope
+            .line(row - 1)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        for c in indent.chars() {
+            self.insert_char_at_cursor(c);
+        }
+    }
+
     fn delete_before_cursor(&mut self) {
         let pane = self.focused_pane();
         let buf_id = match pane.content { PaneContent::Editor(id) => id, _ => return };
@@ -1672,6 +1690,7 @@ impl App {
                 self.focused_buf_mut().checkpoint();
                 self.delete_selection();
                 self.insert_char_at_cursor('\n');
+                self.auto_indent(); // carry the previous line's leading whitespace
             }
             KeyCode::Tab   => {
                 if prev_run != EditRun::Insert { self.focused_buf_mut().checkpoint(); }
