@@ -3017,12 +3017,14 @@ impl App {
     }
 
     fn handle_terminal(&mut self, key: KeyEvent) {
-        // Ctrl+Space from a terminal opens ONE composer: type to fuzzy-match Mars
-        // commands; if the text matches no command, Enter treats it as a shell
-        // command (LLM-translated + confirmed). No double-press.
+        // Ctrl+Space from a terminal opens the inline shell composer directly
+        // (the `!` behavior, one keystroke): type an English request, Enter
+        // LLM-translates it to a command shown for a confirming second Enter. It's
+        // a small overlay anchored at the cursor, so the terminal stays visible.
+        // A second Ctrl+Space switches to the full command bar.
         let chord = chord_of(&key);
         if self.keys.bar_open.contains(&chord) || matches!(key.code, KeyCode::Null) {
-            self.open_bar(BarMode::Command);
+            self.open_bar(BarMode::Shell);
             return;
         }
         // Ctrl+g detaches back to the editor.

@@ -1095,27 +1095,30 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Esc))?; // leave travel
     println!("[selfcheck] pane resize + zoom ........ PASS");
 
-    // 26k. Unified terminal composer: one Ctrl+Space opens the command bar; a
-    //      query matching a Mars command runs it, and a query matching NO command
-    //      runs as a shell command (no agent key here → executed directly).
+    // 26k. Terminal Ctrl+Space → the inline shell composer directly (the `!`
+    //      behavior in one keystroke); a second Ctrl+Space reaches the command bar;
+    //      with no agent key, Enter runs the typed command → terminal.
     let mut app = App::new(None)?;
     app.handle_key(kc(KeyCode::Char(' ')))?;
     app.handle_key(k(KeyCode::Char('!')))?; // open a terminal via bar `!`…
     typ(&mut app, "true")?;
     app.handle_key(k(KeyCode::Enter))?; // …now attached to a terminal pane
     assert!(app.mode == mode::Mode::Terminal, "not in a terminal");
-    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → command bar (no double-press)
+    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → shell composer (one keystroke)
+    assert!(
+        matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)),
+        "Ctrl+Space in terminal did not open the shell composer"
+    );
+    app.handle_key(kc(KeyCode::Char(' ')))?; // a second Ctrl+Space → the command bar
     assert!(
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Command)),
-        "Ctrl+Space in terminal did not open the command composer"
+        "second Ctrl+Space did not reach the command bar"
     );
-    // A phrase matching no Mars command falls through to the shell.
-    typ(&mut app, "echo composer_ok_xyz")?;
-    assert_eq!(app.palette.as_ref().map(|p| p.visible_items(&app.frecency).len()), Some(0),
-        "the shell phrase unexpectedly matched a command");
-    app.handle_key(k(KeyCode::Enter))?;
-    assert!(app.mode == mode::Mode::Terminal, "no-command query did not run as a shell command");
-    println!("[selfcheck] unified terminal composer .. PASS");
+    app.handle_key(k(KeyCode::Char('!')))?; // ! → back to shell mode
+    typ(&mut app, "echo composer_ok")?;
+    app.handle_key(k(KeyCode::Enter))?; // no key → runs the command directly
+    assert!(app.mode == mode::Mode::Terminal, "shell composer Enter did not run the command");
+    println!("[selfcheck] terminal shell composer .... PASS");
 
     // 26l. W6 watch: watching a pane + a verdict event → a failure notice that
     //      renders and is dismissed with Esc.
