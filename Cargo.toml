@@ -1,8 +1,7 @@
 [package]
-# NOTE: `mars` is taken on crates.io — this crate/package name must be unique.
-# Pick your final one (e.g. mars-tui / mars-term / marsh) and verify it's free.
+# `mars` is taken on crates.io, so the package/crate name is `mars-terminal`.
 # The installed binary stays `mars` regardless (see [[bin]] below).
-name = "mars-tui"
+name = "mars-terminal"
 version = "0.1.0"
 edition = "2021"
 description = "A terminal editor, multiplexer, and built-in AI agent in one binary — non-modal and Emacs-compatible, with tmux-style persistent sessions."
