@@ -93,6 +93,12 @@ pub struct WatchState {
 #[derive(Clone, Copy)]
 pub enum WatchReason { Exit, Quiet }
 
+/// Coalesces consecutive edits into one undo step: a run of typed characters is
+/// one undo, a run of backspaces another; any motion or command breaks the run so
+/// the next keystroke starts a fresh checkpoint.
+#[derive(Clone, Copy, PartialEq)]
+enum EditRun { None, Insert, Delete }
+
 /// A pull-rendered proactive notice — the agent's only path to the screen. The
 /// renderer reads it; the agent never pushes. Failures sort before info.
 pub struct Notice {
@@ -214,6 +220,8 @@ pub struct App {
     pub shell_ready: bool,
     /// Session auto-naming: fired once per still-numeric session.
     session_name_attempted: bool,
+    /// Undo coalescing: the kind of edit run currently in progress.
+    edit_run: EditRun,
     pub frame_tick: u64,
     // ── Terminal panes ──
     pub terms: HashMap<TermId, Term>,
@@ -297,6 +305,7 @@ impl App {
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
             session_name_attempted: false,
+            edit_run: EditRun::None,
             frame_tick: 0,
             terms: HashMap::new(),
             term_tx,
@@ -457,11 +466,19 @@ impl App {
     }
 
     pub fn move_left(&mut self) {
-        let col = self.focused_pane().cursor_col;
+        let (row, col) = { let p = self.focused_pane(); (p.cursor_row, p.cursor_col) };
         if col > 0 {
             let p = self.focused_pane_mut();
             p.cursor_col = col - 1;
             p.col_affinity = p.cursor_col;
+        } else if row > 0 {
+            // Wrap to the end of the previous line.
+            let buf_id = match self.focused_pane().content { PaneContent::Editor(id) => id, _ => return };
+            let prev_len = self.buffers[&buf_id].line_len(row - 1);
+            let p = self.focused_pane_mut();
+            p.cursor_row = row - 1;
+            p.cursor_col = prev_len;
+            p.col_affinity = prev_len;
         }
     }
 
@@ -474,6 +491,15 @@ impl App {
             let p = self.focused_pane_mut();
             p.cursor_col = col + 1;
             p.col_affinity = p.cursor_col;
+        } else {
+            // Wrap to the start of the next line, if there is one.
+            let last = self.buffers[&buf_id].line_count().saturating_sub(1);
+            if row < last {
+                let p = self.focused_pane_mut();
+                p.cursor_row = row + 1;
+                p.cursor_col = 0;
+                p.col_affinity = 0;
+            }
         }
     }
 
@@ -1583,6 +1609,10 @@ impl App {
         let cmd   = key.modifiers.contains(KeyModifiers::SUPER);
 
         self.last_yank = None; // any primitive key breaks a C-y / M-y chain
+        // Undo coalescing: remember the run in progress, then default to breaking
+        // it — only the insert/backspace arms below renew it.
+        let prev_run = self.edit_run;
+        self.edit_run = EditRun::None;
 
         match key.code {
             // Emacs cursor chords
@@ -1627,8 +1657,13 @@ impl App {
             KeyCode::PageDown => self.page_down(),
 
             // Editing — an active selection is replaced/deleted (Mac contract).
+            // Consecutive backspaces / typed chars coalesce into ONE undo step.
             KeyCode::Backspace => {
-                if !self.delete_selection() { self.delete_before_cursor(); }
+                if !self.delete_selection() {
+                    if prev_run != EditRun::Delete { self.focused_buf_mut().checkpoint(); }
+                    self.delete_before_cursor();
+                    self.edit_run = EditRun::Delete;
+                }
             }
             KeyCode::Delete => {
                 if !self.delete_selection() { self.delete_char_forward(); }
@@ -1638,10 +1673,19 @@ impl App {
                 self.delete_selection();
                 self.insert_char_at_cursor('\n');
             }
-            KeyCode::Tab   => { for _ in 0..4 { self.insert_char_at_cursor(' '); } }
+            KeyCode::Tab   => {
+                if prev_run != EditRun::Insert { self.focused_buf_mut().checkpoint(); }
+                for _ in 0..4 { self.insert_char_at_cursor(' '); }
+                self.edit_run = EditRun::Insert;
+            }
             KeyCode::Char(c) if !ctrl && !alt => {
-                self.delete_selection();
+                if self.delete_selection() {
+                    // replace: the delete checkpointed; typing joins that step
+                } else if prev_run != EditRun::Insert {
+                    self.focused_buf_mut().checkpoint();
+                }
                 self.insert_char_at_cursor(c);
+                self.edit_run = EditRun::Insert;
             }
             _ => {}
         }
@@ -2881,6 +2925,7 @@ impl App {
 
     /// Execute a palette action.
     pub fn run_action(&mut self, action: Action) {
+        self.edit_run = EditRun::None; // a command breaks the typing/backspace undo run
         // Track frecency
         let key = format!("{:?}", action);
         *self.frecency.entry(key).or_insert(0) += 1;

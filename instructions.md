@@ -2,8 +2,7 @@
 
 Build & launch:
 
-```bash
-source ~/.cargo/env && cargo build
+```bashsource ~/.cargo/env && cargo build
 ./target/debug/mars            # new session, opens a terminal + the MARS banner
 ```
 

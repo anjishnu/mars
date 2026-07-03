@@ -461,6 +461,46 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] token/bracket/symbol jumps . PASS");
 
+    // 6d. Undo MVP: a run of typed chars is ONE undo step (typing was previously
+    //     invisible to undo); a motion breaks the run into separate steps.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "hello")?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("hello"), "typing did not appear");
+        app.handle_key(kc(KeyCode::Char('_')))?; // C-_ → Undo (whole run)
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(!screen_text(&term).contains("hello"), "undo did not reverse a typed run");
+
+        let mut app = App::new(None)?;
+        typ(&mut app, "AAA")?;
+        app.handle_key(kc(KeyCode::Char('a')))?; // C-a (line start) breaks the run
+        typ(&mut app, "BBB")?; // inserts before AAA → "BBBAAA", a second run
+        app.handle_key(kc(KeyCode::Char('_')))?; // undo removes only the BBB run
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("AAA") && !t.contains("BBB"), "undo did not stop at the run boundary");
+    }
+    println!("[selfcheck] undo (coalesced runs) ..... PASS");
+
+    // 6e. Horizontal motion wraps across lines: → at line end → next line start;
+    //     ← at line start → previous line end.
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "ab")?;
+        app.handle_key(k(KeyCode::Enter))?;
+        typ(&mut app, "cd")?; // buffer "ab\ncd"
+        app.handle_key(k(KeyCode::Up))?;   // row 0
+        app.handle_key(k(KeyCode::End))?;  // (0, 2) end of "ab"
+        let pos = |a: &App| (a.focused_pane().cursor_row, a.focused_pane().cursor_col);
+        assert_eq!(pos(&app), (0, 2), "End did not reach line end");
+        app.handle_key(k(KeyCode::Right))?;
+        assert_eq!(pos(&app), (1, 0), "→ at line end did not wrap to the next line");
+        app.handle_key(k(KeyCode::Left))?;
+        assert_eq!(pos(&app), (0, 2), "← at line start did not wrap to the previous line");
+    }
+    println!("[selfcheck] cross-line arrow wrap ..... PASS");
+
     // 7. which-key: a pending prefix pops the continuation panel after a beat;
     //    C-x C-s on a pathless buffer opens Save-As (no ghost `:w` advice).
     app.handle_key(kc(KeyCode::Char('x')))?;
