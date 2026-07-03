@@ -652,17 +652,18 @@ fn selfcheck() -> Result<()> {
     assert_eq!(app.active_tab, 0, "M-1 did not jump to tab 1");
     println!("[selfcheck] tab movement ............... PASS");
 
-    // 17. Panes: C-\ splits; M-arrows focus directionally; M-o cycles; C-x x moves.
+    // 17. Panes: C-\ splits; Ctrl-arrows focus directionally (Alt-arrows now move
+    //     by token/page); M-o cycles; C-x x moves.
     let mut app = App::new(None)?;
     app.handle_key(kc(KeyCode::Char('\\')))?; // C-\ → split right
     assert_eq!(app.tab().layout.count(), 2, "C-\\ did not split");
     let right = app.focused_pane_id();
     term.draw(|f| ui::render(f, &mut app))?; // populate pane geometry
-    app.handle_key(alt(KeyCode::Left))?; // M-← → focus left pane
+    app.handle_key(kc(KeyCode::Left))?; // C-← → focus left pane
     let left = app.focused_pane_id();
-    assert_ne!(left, right, "M-Left did not move focus");
-    app.handle_key(alt(KeyCode::Right))?; // M-→ → back right
-    assert_eq!(app.focused_pane_id(), right, "M-Right did not move focus back");
+    assert_ne!(left, right, "C-Left did not move focus");
+    app.handle_key(kc(KeyCode::Right))?; // C-→ → back right
+    assert_eq!(app.focused_pane_id(), right, "C-Right did not move focus back");
     app.handle_key(alt(KeyCode::Char('o')))?; // M-o → cycle
     assert_eq!(app.focused_pane_id(), left, "M-o did not cycle panes");
     // Move (swap): give the focused pane its own buffer, then C-x x.

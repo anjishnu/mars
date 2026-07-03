@@ -5,12 +5,13 @@ Build & launch:
 ```bash
 source ~/.cargo/env && cargo build
 ./target/debug/mars            # new session, opens a terminal + the MARS banner
-```
+=```
 
-> **Terminal note for fast movement:** the `⌘`/Cmd shortcuts below only reach Mars on
-> **kitty-protocol terminals** (Ghostty, Kitty, WezTerm, recent iTerm2). On **Terminal.app
-> or Warp** the OS eats ⌘, so use the **fallbacks** listed with each one. Everything else
-> works everywhere.
+> **Terminal note for fast movement:** fast motion is bound to **both `⌘` and `⌥` (Option)**.
+> `⌘` reaches Mars only on **kitty-protocol terminals** (Ghostty, Kitty, WezTerm, recent
+> iTerm2); on **Terminal.app / Warp** the OS eats ⌘ — use **`⌥` (Option)** there, which is
+> the universal binding (enable "Use Option as Meta" if your terminal has it). The `M-…`
+> chords and `PageUp/Down` also work everywhere.
 
 ---
 
@@ -21,11 +22,11 @@ screen (even though it opens into a terminal). **Press any key** to dismiss it.
 ## 2. Fast cursor movement (editor)
 Open a code file: `./target/debug/mars src/app.rs`
 
-| Do this | Keys | Fallback (any terminal) |
+| Do this | Keys (⌘ on kitty terminals, ⌥ everywhere) | Also |
 |---|---|---|
-| Jump by **code token** (`foo·.·bar·(·baz·)`) | `⌘←` / `⌘→` | `M-b` / `M-f` (word) |
-| **Page** up / down | `⌘↑` / `⌘↓` | `PageUp` / `PageDown` |
-| Extend selection while jumping | add `Shift` (`⌘⇧→`) | `Shift`+`PageUp/Down` |
+| Jump by **code token** (`foo·.·bar·(·baz·)`) | `⌘←`/`⌘→` or `⌥←`/`⌥→` | `M-b` / `M-f` (word) |
+| **Page** up / down | `⌘↑`/`⌘↓` or `⌥↑`/`⌥↓` | `PageUp` / `PageDown` |
+| Extend selection while jumping | add `Shift` (`⌥⇧→`) | `Shift`+`PageUp/Down` |
 | Jump to next/prev **blank-line block** | `C-x ]` / `C-x [` | (same) |
 | Jump to next/prev **definition** (`fn`/`def`/`class`…) | `C-x }` / `C-x {` | (same) |
 | Jump to the **matching bracket** `()[]{}` | `C-x m` | (same) |
@@ -42,8 +43,8 @@ In a file, press **`C-s`** and start typing a word you can see:
   key** — the search commits at the current match and your key applies. (Type target → go.)
 - `C-s`/`C-r` cycle matches · `Enter` accept · `C-g` cancel (restores where you started).
 
-## 4. One-key terminal composer (no more double-press)
-Focus a terminal pane, press **`Ctrl+Space`** once. You get **one** composer:
+## 4. One-key terminal composeCtrl+Space
+Focus a terminal pane, press Ctrl+Space once. You get one composer:
 
 - Type a **Mars command** (e.g. `split`, `new tab`) → it appears as a suggestion → `Enter`
   runs it.
@@ -81,7 +82,7 @@ automatically. (Gemini also works: `export GEMINI_API_KEY=...` → gemini-3.1-fl
 2. `Ctrl+Space`, type `open file`, Enter → open the file tree; type `app` → jump to
    `src/app.rs`; `Enter`.
 3. In the file: `C-s`, type `fn `, press `Tab`, press a label → teleported.
-4. `⌘→` a few times (kitty terminal) or `M-f` — hop by token. `C-x }` — jump to the next fn.
+4. `⌥→` (Option, any terminal) or `⌘→` (kitty) a few times — hop by token. `C-x }` — next fn.
 5. Back to a terminal pane, `Ctrl+Space`, type `list files by size`, Enter → (with a key) a
    translated command to confirm.
 

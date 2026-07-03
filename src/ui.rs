@@ -937,6 +937,12 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
         None => return,
     };
 
+    // Terminal composer: keep the shell visible — don't cover it with the root
+    // menu on an empty query. Command suggestions appear only once you type.
+    if app.bar_return == Mode::Terminal && palette.query.is_empty() {
+        return;
+    }
+
     let items = palette.visible_items(&app.frecency);
     if items.is_empty() {
         return;

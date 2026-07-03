@@ -141,7 +141,7 @@ pub struct App {
     pub search_pick: bool,
     // ── Command bar ──
     /// Mode to return to when the bar closes (Terminal keeps its focus).
-    bar_return: Mode,
+    pub bar_return: Mode,
     /// Per-action bar-invocation counts — drives the graduation nudge.
     pub bar_uses: HashMap<String, u32>,
     // ── Mouse ──
@@ -1594,20 +1594,19 @@ impl App {
                 self.goto_tab((c as u8 - b'0') as usize);
             }
 
-            // Cmd+arrows — fast motion (⌘ arrives only on kitty-protocol
-            // terminals; M-f/M-b + PageUp/Down are the universal fallback).
-            // ⌘←/→ = code-token, ⌘↑/↓ = page; Shift extends the selection.
-            KeyCode::Left  if cmd => self.move_token_sel(false, shift),
-            KeyCode::Right if cmd => self.move_token_sel(true, shift),
-            KeyCode::Up    if cmd => self.page_up(),
-            KeyCode::Down  if cmd => self.page_down(),
+            // Fast motion — ⌘ (kitty terminals) OR Option/Alt (the universal
+            // fallback where the OS eats ⌘): ⌥←/→ = code-token, ⌥↑/↓ = page;
+            // Shift extends the selection.
+            KeyCode::Left  if cmd || alt => self.move_token_sel(false, shift),
+            KeyCode::Right if cmd || alt => self.move_token_sel(true, shift),
+            KeyCode::Up    if cmd || alt => self.page_up(),
+            KeyCode::Down  if cmd || alt => self.page_down(),
 
-            // M-arrows / Ctrl+arrows — directional pane focus (Ctrl needs no
-            // Meta setup on mac terminals).
-            KeyCode::Left  if alt || ctrl => self.focus_direction(-1, 0),
-            KeyCode::Right if alt || ctrl => self.focus_direction(1, 0),
-            KeyCode::Up    if alt || ctrl => self.focus_direction(0, -1),
-            KeyCode::Down  if alt || ctrl => self.focus_direction(0, 1),
+            // Ctrl+arrows — directional pane focus (C-o and C-t travel also work).
+            KeyCode::Left  if ctrl => self.focus_direction(-1, 0),
+            KeyCode::Right if ctrl => self.focus_direction(1, 0),
+            KeyCode::Up    if ctrl => self.focus_direction(0, -1),
+            KeyCode::Down  if ctrl => self.focus_direction(0, 1),
 
             // Arrows / nav (Shift extends the selection, Mac-style)
             KeyCode::Left  => self.move_left_sel(shift),
