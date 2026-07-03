@@ -599,7 +599,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mars"
+name = "mars-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
