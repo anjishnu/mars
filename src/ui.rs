@@ -1257,6 +1257,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
                 format!(" ▶ Enter to type into terminal: {cmd} ")
             }
             crate::agent::AgentDirective::Open(loc) => format!(" ▶ Enter to open: {loc} "),
+            crate::agent::AgentDirective::Need(_) => String::new(), // auto-satisfied, never shown
         };
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(

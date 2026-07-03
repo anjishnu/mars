@@ -13,6 +13,18 @@ pub enum AgentDirective {
     Type(String),
     /// `OPEN: path:line` — open a file at a line (cited from a stack trace).
     Open(String),
+    /// `NEED: <what>` — a read-side request for more context (W4/W5). Never gated;
+    /// Mars re-asks once with the extra source. Not shown to the user.
+    Need(NeedKind),
+}
+
+/// What extra context the model asked for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NeedKind {
+    /// Full terminal scrollback of the focused pane (W5).
+    Scrollback,
+    /// Another tab's panes, by tab name (W4).
+    Tab(String),
 }
 
 pub enum AgentEvent {
@@ -62,6 +74,20 @@ fn match_directive(line: &str) -> Option<AgentDirective> {
             let name = name.trim_end_matches(['.', ',', ':']);
             if !name.is_empty() {
                 return Some(AgentDirective::Run(name.to_string()));
+            }
+        }
+    }
+    // NEED: read-side context request (W4/W5).
+    if let Some(rest) = l.strip_prefix("NEED:") {
+        let arg = rest.trim().trim_matches('`').trim();
+        let low = arg.to_lowercase();
+        if low.starts_with("scrollback") || low.starts_with("history") {
+            return Some(AgentDirective::Need(NeedKind::Scrollback));
+        }
+        if let Some(tab) = low.strip_prefix("tab") {
+            let name = tab.trim().to_string();
+            if !name.is_empty() {
+                return Some(AgentDirective::Need(NeedKind::Tab(name)));
             }
         }
     }
@@ -168,6 +194,12 @@ fn system_prompt(registry: &str, screen: &str) -> String {
          (e.g. TYPE: git status). Prefer TYPE for anything a shell does.\n\
          OPEN: path:line        — open a file at a line, e.g. OPEN: src/main.rs:42. \
          Use this to jump to the exact line a stack trace or error points at.\n\
+         If the visible screen is not enough, ask for more instead of guessing, using \
+         EXACTLY one of:\n\
+         NEED: scrollback       — the focused terminal's full history (e.g. \"when did \
+         this first fail?\").\n\
+         NEED: tab <name>       — another tab's panes. You'll be re-asked automatically \
+         with it; do not apologize, just request.\n\
          Available editor actions:\n{registry}\n\n\
          LIVE SCREEN (what the user is looking at right now — ground your answers \
          in it; you may reference file contents, terminal output, errors):\n{screen}"

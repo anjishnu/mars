@@ -141,6 +141,31 @@ impl Term {
         }
     }
 
+    /// The last `lines` lines of scrollback + live screen, oldest-first (W5).
+    /// Pages back through history under the lock and restores the live view.
+    pub fn history_tail(&self, lines: usize) -> String {
+        let mut p = self.parser.lock().unwrap();
+        let rows = p.screen().size().0 as usize;
+        let saved = self.view_offset;
+        let mut pages: Vec<String> = Vec::new();
+        let (mut off, mut got) = (0usize, 0usize);
+        loop {
+            p.set_scrollback(off);
+            pages.push(p.screen().contents());
+            got += rows;
+            if got >= lines || off >= self.scrollback_limit {
+                break;
+            }
+            off += rows;
+        }
+        p.set_scrollback(saved); // restore the live view before releasing the lock
+        pages.reverse(); // oldest screenful first
+        let joined = pages.join("\n");
+        let all: Vec<&str> = joined.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        all[start..].join("\n")
+    }
+
     /// Snap back to the live screen (any keystroke does this).
     pub fn scroll_to_live(&mut self) {
         if self.view_offset != 0 {

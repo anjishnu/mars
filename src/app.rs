@@ -189,6 +189,10 @@ pub struct App {
     pub refactor_target: Option<(BufferId, usize, usize)>,
     /// A code-block the agent returned to replace `refactor_target` (confirm-gated).
     pub refactor_replacement: Option<String>,
+    /// The last question asked, replayed verbatim when the model emits a `NEED:`.
+    last_question: String,
+    /// How many `NEED:` expansions this ask has done (hard cap 1 — never a loop).
+    need_depth: u8,
     // ── Watch / notices (W6) ──
     /// Per-terminal watch state, keyed by TermId.
     pub watches: HashMap<TermId, WatchState>,
@@ -281,6 +285,8 @@ impl App {
             agent_directive: None,
             refactor_target: None,
             refactor_replacement: None,
+            last_question: String::new(),
+            need_depth: 0,
             watches: HashMap::new(),
             notices: Vec::new(),
             pending_watch: None,
@@ -2184,6 +2190,8 @@ impl App {
                         self.close_bar();
                         self.open_at(&loc);
                     }
+                    // NEED is auto-satisfied in tick and never surfaced here.
+                    Some(agent::AgentDirective::Need(_)) => { self.agent_directive = None; }
                     None => self.submit_agent_query(),
                 }
             }
@@ -2629,6 +2637,8 @@ impl App {
         self.agent_answer = None;
         self.agent_directive = None;
         self.refactor_replacement = None;
+        self.last_question = question.clone();
+        self.need_depth = 0;
         self.ask_scroll = 0; // snap to the newest turn
         let history = self.agent_history.clone();
         self.agent_history.push(("user".into(), question.clone()));
@@ -2673,6 +2683,67 @@ impl App {
         self.set_cursor(r, c);
         self.mode = Mode::Edit;
         self.status_msg = Some("Refactor applied — C-/ to undo".into());
+    }
+
+    /// W4/W5: replay the last question with an extra context source the model asked
+    /// for via `NEED:`. One expansion per ask (capped in `tick`), never surfaced.
+    fn reask_with_need(&mut self, kind: agent::NeedKind) {
+        let mut cfg = agent::AgentConfig::from_env();
+        cfg.max_tokens = self.tuning.agent_max_tokens;
+        cfg.temperature = self.tuning.agent_temperature;
+        if !cfg.is_configured() {
+            self.agent_pending = false;
+            return;
+        }
+        let extra = self.expand_context(&kind);
+        let context = format!("{}\n\n### expanded ###\n{}", self.screen_context(), extra);
+        let history = self.agent_history.clone();
+        let q = self.last_question.clone();
+        self.agent_pending = true; // keep the spinner; the re-ask is the same turn
+        agent::ask(cfg, q, palette::registry_context(), context, history, self.agent_tx.clone());
+    }
+
+    /// Render the extra source a `NEED:` asked for (full scrollback, or another tab).
+    fn expand_context(&self, kind: &agent::NeedKind) -> String {
+        match kind {
+            agent::NeedKind::Scrollback => {
+                if let PaneContent::Terminal(id) = self.focused_pane().content {
+                    if let Some(t) = self.terms.get(&id) {
+                        let cap = self.tuning.terminal_scrollback_lines.min(2000);
+                        return format!("FULL TERMINAL SCROLLBACK:\n{}", t.history_tail(cap));
+                    }
+                }
+                String::new()
+            }
+            agent::NeedKind::Tab(name) => {
+                let low = name.to_lowercase();
+                let Some(tab) = self.tabs.iter().find(|t| t.name.to_lowercase().contains(&low)) else {
+                    return format!("(no tab matching '{name}')");
+                };
+                let mut out = format!("TAB {}:\n", tab.name);
+                for pid in tab.layout.pane_ids() {
+                    let Some(p) = self.panes.get(&pid) else { continue };
+                    match p.content {
+                        PaneContent::Terminal(tid) => {
+                            if let Some(t) = self.terms.get(&tid) {
+                                out.push_str(t.screen().contents().trim_end());
+                                out.push('\n');
+                            }
+                        }
+                        PaneContent::Editor(bid) => {
+                            if let Some(b) = self.buffers.get(&bid) {
+                                out.push_str(&format!("[{}]\n", b.name));
+                                for line in b.rope.to_string().lines().take(120) {
+                                    out.push_str(line);
+                                    out.push('\n');
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            }
+        }
     }
 
     /// The highlighted code as a labeled context block, telling the model that a
@@ -3111,6 +3182,15 @@ impl App {
         for ev in events {
             match ev {
                 AgentEvent::Answer { text, directive } => {
+                    // W4/W5: a NEED: request re-asks once with the extra source and
+                    // is never surfaced (no history push, spinner keeps spinning).
+                    if let Some(agent::AgentDirective::Need(kind)) = &directive {
+                        if self.need_depth < 1 {
+                            self.need_depth += 1;
+                            self.reask_with_need(kind.clone());
+                            continue;
+                        }
+                    }
                     self.agent_pending = false;
                     // If the query targeted a selection and the reply carries a code
                     // block, offer it as a confirm-gated replacement (a refactor).

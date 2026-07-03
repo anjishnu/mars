@@ -104,7 +104,22 @@ the "Watch this pane" command). When the command **exits** or its output **goes 
 `✗ failed: linker error · build`. **`Esc`** dismisses it. This fires **even while you're
 detached** (the daemon keeps watching), so you can `mars attach` later to a waiting verdict.
 
+## 9. Reattach briefing (W7)
+Start a session (`mars` or `mars new work`), kick off some work, **detach** (`C-t D`), and
+later **`mars attach`**. If anything changed while you were gone — a shell exited, a watched
+task finished, files got modified — you're greeted with one **`while away — …`** line
+(failures first). Nothing changed → no briefing. Deterministic; no key needed.
+
+## 10. Ask beyond the visible screen (W5 / W4) — needs an agent key
+Ask the agent (`?`) a question that needs more than what's on screen:
+- **Scrollback archaeology (W5):** with a terminal focused, ask *"when did this first start
+  failing?"* — the model can request the pane's **full history** (`NEED: scrollback`) and
+  Mars silently re-asks with it, then answers.
+- **Cross-tab (W4):** *"does the error in the api tab match this code?"* — the model can pull
+  **another tab** (`NEED: tab api`). (Panes in your *current* tab were already always sent.)
+You don't do anything special — the model asks for what it needs and Mars supplies it once.
+
 ## Not yet wired (coming next)
-- **W7 reattach briefing** ("where was I?" on `mars attach`), **W5 scrollback archaeology**,
-  **W4 cross-tab** — in progress.
+- **Context Bus registry** (formalize `screen_context` into consented sources) and
+  **parameterized actions** (`RUN: FindFile("x")`) — designed in `workflows_eng.md`, deferred.
 - **Subword motion** (`⌘⌥←/→` for `get·User·Name`) — planned fast-follow.

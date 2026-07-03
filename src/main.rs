@@ -240,6 +240,7 @@ fn ask_cli(question: String) -> Result<()> {
                     println!("[would type into terminal: {cmd}]")
                 }
                 Some(agent::AgentDirective::Open(loc)) => println!("[would open: {loc}]"),
+                Some(agent::AgentDirective::Need(_)) => {}
                 None => {}
             }
             Ok(())
@@ -1158,6 +1159,34 @@ fn selfcheck() -> Result<()> {
         assert!(matches!(app.notices[0].kind, app::NoticeKind::Failure), "failing briefing not a Failure");
     }
     println!("[selfcheck] reattach briefing (W7) .... PASS");
+
+    // 26n. W4/W5: NEED: parses; the first NEED re-asks (not surfaced), a second
+    //      (depth capped) is surfaced normally.
+    {
+        assert_eq!(
+            agent::parse_directive("looking…\nNEED: scrollback").1,
+            Some(agent::AgentDirective::Need(agent::NeedKind::Scrollback)),
+            "NEED: scrollback did not parse"
+        );
+        assert_eq!(
+            agent::parse_directive("NEED: tab api").1,
+            Some(agent::AgentDirective::Need(agent::NeedKind::Tab("api".into()))),
+            "NEED: tab did not parse"
+        );
+        let mut app = App::new(None)?;
+        let base = app.agent_history.len();
+        let need = || agent::AgentEvent::Answer {
+            text: "need more".into(),
+            directive: Some(agent::AgentDirective::Need(agent::NeedKind::Scrollback)),
+        };
+        app.agent_tx.send(need())?;
+        app.tick(); // depth 0→1, re-asks (no key → no-op), NOT surfaced
+        assert_eq!(app.agent_history.len(), base, "first NEED should not reach the transcript");
+        app.agent_tx.send(need())?;
+        app.tick(); // depth capped → surfaced as a normal answer
+        assert_eq!(app.agent_history.len(), base + 1, "capped NEED should surface");
+    }
+    println!("[selfcheck] NEED: expansion (W4/W5) ... PASS");
 
     // 27. Session daemon: detach → state + shells survive → reattach; takeover;
     //     version handshake; quit removes the socket. Fully headless.
