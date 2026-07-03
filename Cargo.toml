@@ -1,0 +1,30 @@
+[package]
+name = "mars"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mars"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["bracketed-paste", "serde"] }
+ropey = "1.6"
+anyhow = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+portable-pty = "0.8"
+vt100 = "0.15"
+arboard = "3"
+libc = "0.2"
+base64 = "0.22"
+
+# vt100 0.15 has a debug-only integer underflow when the scrollback view is
+# deeper than one screen (grid.rs visible_rows: `rows_len - scrollback_offset`).
+# Release builds wrap and render the correct view; this matches that behavior
+# in dev builds for vt100 only. (0.16 fixes it but conflicts with ratatui's
+# pinned unicode-width.) Our own crate keeps overflow checks on.
+[profile.dev.package.vt100]
+overflow-checks = false

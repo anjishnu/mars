@@ -1,0 +1,335 @@
+# Mars (formerly Ares) development notes
+
+## Rebrand (2026-07)
+- Binary/crate = `mars` (repo dir still Ares/ on disk). Config ~/.config/mars/ with
+  one-time auto-migration from ~/.config/ares/. Sockets $TMPDIR/mars-<uid>/. Env:
+  MARS_LLM_KEY/URL/MODEL, MARS_NO_SYSTEM_CLIPBOARD, MARS_DEBUG_LOG — all fall back to
+  the old ARES_* names. Tagline: "mission control for your terminal".
+- Palette (theme_* knobs in tuning.json): accent #D97757 terracotta (Claude Code clay),
+  bright #E9A178 sand (teaching surfaces), dark #B7410E rust (splash gradient),
+  chip fg #1F1410; selection bg #4A2A1F; search bg #8A5414. Rule: brand in chrome,
+  not meaning (terminal panes stay green; danger stays red-only-in-confirms).
+- Splash: MARS block logo + tagline + starter hints in the empty scratch until first
+  key (app.show_splash). Selfcheck asserts "mission control" appears then vanishes.
+
+## GOTCHA: tree selection highlight must be full-width + high-contrast (2026-07)
+- Bug report "can't move up/down in the tree, can't type, right opens the file": the tree
+  was WORKING (Mode::Tree correct, keys routed) — the SELECTION HIGHLIGHT was just invisible.
+  Cause: bg=Color::DarkGray applied only to the short label span (not full row width), and
+  the `../` row was DarkGray-fg-on-DarkGray-bg = invisible. Fix in render_file_tree: selected
+  row uses bg=theme_accent (terracotta) with fg=theme_chip_fg, and pads a trailing spaces span
+  to inner.width so the band spans the WHOLE row (like render_bar_dropdown's selected row).
+- DEBUG METHOD that cracked it: python pty.fork + pyte emulator to drive the REAL binary
+  (headless TestBackend couldn't show it). Two pitfalls: (1) must answer the DA1/kitty query
+  (`\x1b[c`/`\x1b[?u`) with `\x1b[?62;c` or crossterm's supports_keyboard_enhancement blocks
+  startup forever; (2) must set pty winsize via ioctl TIOCSWINSZ (struct winsize) or ratatui
+  renders to a 0x0 area (blank). pyte's screen.buffer[y][x].bg exposes cell bg to verify
+  highlights. Script pattern saved mentally: fork → set winsize → drain+answer-DA → write
+  keys → snapshot screen.buffer. Raw-byte grep for typed text FAILS (ratatui interleaves
+  cursor moves — the AGENTS.md gotcha); use pyte/vt100.
+
+## speed_design.md (2026-07, PROPOSAL — not built, under review)
+- Laser-fast editor+terminal movement & the anchored query. KEY BLOCKER: Ctrl/Alt+arrow
+  are currently PANE nav (focus_direction, app.rs ~1347), word-jump only on M-f/M-b — so
+  the intuitive "hold key + skip token" gesture is blocked; proposal reclaims Option+arrow
+  for token movement, panes → C-o + C-t. Three granularities: word / code-token / subword
+  (CamelHumps). Adds half-page (C-d/C-u), block/blank-line jump, symbol jump (col-0 fn/def
+  heuristic), matching-bracket, and TELEPORT (avy/easymotion labels) = highest ROI. Part B:
+  editor Ctrl+Space = anchored query over the SELECTION (explain/generate/tests/refactor/fix
+  /review) — ship read-only+insert now, refactor-replace gated on undo checkpoint/journal.
+  Part C: terminal ONE Ctrl+Space composer, shell-first with command suggestions (no more
+  double-press), + prompt-jump in scrollback + copy-last-command/output + select-output→query.
+  Unifying: Ctrl+Space = "do something here now" in both editor & terminal. 5 decisions to
+  confirm before building (see doc). Current editor motions live in handle_edit (app.rs
+  ~1333-1360), NOT the keymap; word=move_word_forward/backward, page_up/page_down exist.
+
+## Tree reset-on-close + terminal cwd (2026-07)
+- Closing the tree (close_tree(): used by the toggle-hide branch AND handle_tree Esc) now
+  sets file_tree=None + clears tree_rows, so reopening rebuilds fresh at the project root
+  (forgets any `../` wandering). Opening a FILE keeps the tree open (not a close) so it
+  doesn't reset then.
+- Terminal cwd: portable-pty's CommandBuilder with NO cwd lands the shell at `/` (not the
+  process cwd — confirmed the daemon cwd was correct but the shell still went to root).
+  Fix: App.run_cwd = std::env::current_dir() at App::new; open_terminal passes
+  startup_cwd.or(run_cwd) so a no-file session's terminal opens where `mars` was launched.
+  (startup_cwd = first opened file's dir still wins when a file was opened.)
+
+## GOTCHA: tree root MUST be absolute (2026-07)
+- Bug "blank sidebar after Enter on ../": the tree root was the relative "." (from
+  startup_cwd=None → project_index root "."), and "." .parent() is an empty PathBuf →
+  read_dir("") fails → blank tree + header shows "/". FIX: canonicalize the root to
+  absolute in toggle_file_tree when creating the FileTree
+  (std::fs::canonicalize(&root).unwrap_or(root)). Now `../` (parent) navigation works.
+- Also `../` was invisible: fg was Color::DarkGray. Now theme_accent_bright + a "↑ " glyph.
+
+## Left file-tree sidebar (2026-07, REPLACED the `@` bottom picker)
+- User pivoted the `@` bottom fuzzy dropdown → a LEFT sidebar file tree (Mode::Tree).
+  BarMode::File + render_file_dropdown + file_matches + longest_common_prefix ALL REMOVED.
+- FileTree{root, expanded:HashSet<PathBuf>, selected, filter} + App.tree_open + App.tree_rows
+  (Vec<TreeRow>{path,label,depth,is_dir,expanded,updir}). compute_tree_rows(&self):
+  filter empty → browse (../ row if root has parent, then push_dir_rows recursing into
+  expanded dirs, read_dir_entries reads fs live + skips dotfiles/project_ignore, dirs-first);
+  filter non-empty → flat fuzzy shortlist over project_index. refresh_tree_rows() recomputes
+  after every mutation + clamps selected. Browse reads fs live (only expanded dirs, cheap) —
+  no dir cache.
+- Entry: `@` (in bar → close_bar + toggle_file_tree) OR C-x d / C-x C-f / C-x p / C-x b
+  (all → Action::ToggleFileTree/FindFile/etc → toggle_file_tree). toggle is tri-state:
+  closed→open+focus(Mode::Tree); open+Tree→close; open+Edit→focus. GOTCHA: C-x is an
+  Edit-only prefix so you CANNOT press C-x d from inside the focused tree — close via Esc
+  (handle_tree Esc: clear filter else close). Opening a file (Enter on file row) → Mode::Edit
+  but tree STAYS open (persistent sidebar); re-focus with C-x d from Edit.
+- Nav (handle_tree): ↑↓/C-p/C-n move; Right = tree_activate(false), Enter = tree_activate(true)
+  — folders/`../` behave the same for both (expand / re-root); for a FILE, Right PREVIEWS
+  (show_file_in_pane(commit=false): shows it in the pane, stays Mode::Tree, reversible) while
+  Enter COMMITS (commit=true: Mode::Edit). show_file_in_pane reuses an already-open buffer
+  (find by path) so repeated previews don't pile up duplicate buffers. ← collapse-or-parent;
+  typing filters; Backspace pops filter. Layout: render() carves a left Constraint::Length(tree_width)
+  column (knob, default 30, capped at width-20) when tree_open; render_file_tree draws a
+  bordered box, folders bold+accent with ▾/▸ carets, `../` dim, indent by depth, selection
+  bg only when focused. tree_width knob in tuning.rs.
+- Groq/qwen setup (still current): see below block.
+
+## `@` Groq/qwen agent (2026-07)
+- Agent providers: Groq default model is now qwen/qwen3-32b (was llama-3.1-8b-instant);
+  Gemini = gemini-3.1-flash-lite. Reasoning models (qwen3/R1) emit <think>…</think> —
+  chat() strips them via strip_reasoning() before display+parse. RUN: parsing now takes
+  only the FIRST token (qwen appends prose to the directive line); TYPE/OPEN keep the
+  full rest. agent_max_tokens default bumped 512→1024 (reasoning needs headroom).
+  Validated live with the user's Groq key: RUN/OPEN directives clean, triage answers well.
+
+## Sessions-by-default + launch (user rev, 2026-07)
+- `mars [file]` is now a SESSION by default (auto-numbered, next_auto_name = lowest free
+  int). No file → server/standalone opens a terminal pane (not scratch). `mars -s/
+  --standalone [file]` = old no-daemon path (also opens terminal if no file). Terminal
+  open in the daemon is gated by env MARS_OPEN_TERMINAL (set by session_main when
+  file.is_none()) so selfcheck's server_main(None) stays scratch.
+- Session naming: numbered → AI (agent::name_session → AgentEvent::SessionName →
+  rename_session_to only if still numeric) → explicit (mars rename / RenameSession wins).
+  maybe_auto_name_session in tick, fires once (session_name_attempted), 2× the
+  auto_name_secs cadence. Reuses the socket-rename infra.
+- terminal::spawn gained a cwd param; App.startup_cwd = parent of first opened file
+  (set in App::new from launch file, or open_file first-file-wins); open_terminal uses it.
+- Status bar line/col fix: the position readout ("<buf>  Ln N, Col N  ⚡session" for
+  editors, "terminal ⚡session" for terminals) is now a SEPARATE right-aligned Paragraph
+  drawn over the status area in theme_accent_bright bold — never truncated by left hints
+  or hidden by a status_msg (which now trails the hints on the left). Was: single
+  right_info string that got hidden by status_msg / truncated when narrow.
+
+## Grounded agent + renames (2026-07)
+- Agent is conversational (agent_history, last 12 turns sent; C-l = new chat) and
+  screen-grounded: app.screen_context() (~6KB cap) = session/tabs/pane contents
+  (editor visible lines + terminal vt100 contents) — the first context-bus slice.
+- Directives: RUN: <ActionName> + TYPE: <shell cmd> (agent::AgentDirective, parsed
+  by pub agent::parse_directive, unit-tested). TYPE → run_shell_command on explicit
+  Enter. Ask panel renders the transcript (you ›/mars ›), adaptive to 60% height,
+  Up/Down scroll (ask_scroll = lines up from bottom).
+- Renames: RenameTab (travel r), RenamePane (Pane.title override), RenameSession
+  (live socket fs::rename — bound listener follows the inode, verified; CLI
+  `mars rename <old> <new>` via ClientFrame::Rename). Attached clients survive.
+- Auto-naming: tabs with default numeric names only; agent::auto_name kebab-labels
+  from screen context every auto_name_secs (45; 0=off); manual rename opts out
+  permanently (auto_name_attempted set); user wins races (numeric-name check on
+  apply). Gutter now opt-in (line_numbers knob, default false — ui::gutter_width);
+  terminal chrome is theme_terminal dark teal #0D7377.
+
+## Phase 1 agentic workflows SHIPPED (2026-07, per workflows_design.md)
+- W1 ExplainThis (C-x e) + W2 ExplainFailure (C-x ?, travel ?) → ask_prefilled()
+  opens Ask, seeds a canned question, auto-submits (grounded in screen_context).
+- OPEN: directive added to AgentDirective (Run/Type/Open); parse_directive now
+  lenient (scans last 4 non-empty lines, strips backticks/list markers). app.open_at()
+  parses path:line, splits if a terminal is focused, opens + goto line + recenter.
+  System prompt gained OPEN + a no-essays rule. Live-verified: triage → OPEN: app.py:87.
+- W3 shell Tab-translate: in bar shell mode (Ctrl+Space !), Tab → agent::translate_shell
+  → ShellTranslation event replaces the query. Rendered as render_shell_overlay
+  anchored at app.cursor_screen (captured in render_panes) — cursor-anchored, no
+  eye-jump. Tab is special-cased in handle_bar BEFORE the CMD/ASK toggle.
+- Pane resize + zoom: layout.rs HSplit/VSplit carry a `ratio` (15-85, clamped);
+  PaneLayout::resize(focused, delta) nudges the innermost split. Tab.zoomed:
+  Option<PaneId>; ui render zooms to one pane and auto-clears when focus moves away.
+  Travel keys: z zoom, < > resize (- is split-below, can't reuse).
+- Banner: src/banner.rs = raw truecolor-ANSI BANNER_LINES (user-supplied planet art)
+  + print_banner() for `mars version`. TUI splash (ui::render_splash) parses them via
+  ui::ansi_to_line (handles \x1b[38;2;r;g;bm + \x1b[0m only), uniform left-pad to keep
+  art aligned, fallback "M A R S" when narrow. GOTCHA: ratatui shows styled Spans not
+  raw ANSI — must parse escapes to Spans or you get literal escape codes on screen.
+  Splash selfcheck matches "control for your terminal" (banner is capital "Mission").
+- 44 selfchecks pass. Phase 2 (W4/W5 context selectors + NEED: expansion) and Phase 3
+  (W6/W7 triggers/notices/reattach-brief) still per workflows_design.md, not built.
+- Shell composer activation (user rev 2): Ctrl+Space in Mode::Terminal opens the
+  INLINE shell composer (BarMode::Shell) directly — no `!` needed; second Ctrl+Space
+  (in the bar) → full command bar (BarMode::Command). Editor Ctrl+Space still → command
+  bar. `!` from the command bar still enters shell mode (editor path). Translation is
+  now Enter-driven: Enter with a key translates NL→command via agent::translate_shell
+  (shell_ready flag; command lands in the pill, 2nd Enter runs); Enter with NO key runs
+  the text literally; typing/backspace clears shell_ready. Tab still translates (alias).
+  "does nothing" was: no GEMINI_API_KEY, or user pressed Enter (ran literal English) —
+  fixed by Enter-translates-when-key-present.
+- Translate STUCK bug fixed: translate_shell now ALWAYS sends one event (Error if the
+  command comes back empty — Gemini thinking models can return ""); chat() got a 30s
+  ureq timeout so stalls surface instead of hanging the spinner. chat() also extracts
+  real API error messages — GOTCHA: Gemini's OpenAI-compat error body is a JSON ARRAY
+  [{"error":{"message"}}], not an object; handle j.is_array() → j[0]. Shell overlay
+  shows the error in its hint line (cleared on edit / on successful translation).
+- Gutter (user feedback rev): default is now a 1-glyph POINTER gutter (▸ on cursor
+  line, POINTER_W=2) not line numbers; line_numbers knob still gives the 6-col number
+  column. Status bar shows "Ln N, Col N" (sole position readout). Shell overlay
+  repositioned: input row sits ON the cursor row (was cy+1), no [SH !] prefix (text
+  starts where the cursor was), accent-pill styling, hint line shows
+  "needs GEMINI_API_KEY" when unconfigured. Tab-translate does nothing without a key —
+  that's expected; user must export GEMINI_API_KEY and press Tab (not Enter) in shell
+  mode (Ctrl+Space then !).
+
+## strategy.md (2026-07, strategy doc — review artifact)
+- AI product strategy: sight×persistence thesis; 8 scenarios ranked by ownability×freq
+  (1 triage = wedge, 2 remote/SSH, 3 watch-detached, 4 reattach-brief, 5 cross-pane…);
+  before/after workflows with time-saved (~45-75 min/day for terminal-heavy dev); 6
+  primitives w/ engineering designs (Context Bus, Trigger framework, Parameterized
+  actions, Session-as-artifact, Transaction journal, Project index); anti-scenarios
+  (no ghost-text, no context-free chat, no head-on Cursor competition — invert: be the
+  substrate code-agents run IN); recommendation = own triage, build Trigger framework
+  next (turns sight into vigilance, the moat-widener). Companion to agentic_inline.md
+  (brief) / workflows_design.md (build spec) / delighters_design.md (nav+polish).
+
+## delighters_design.md (2026-07, APPROVED-PENDING spec, NOT built)
+- Navigation + polish delighters. Two substrates: (A) reusable fuzzy Picker (generalize
+  the minibuffer Prompt + render_bar_dropdown, reuse fuzzy_score, Tab=longest-common-prefix
+  NOT a trie), (B) Project index (lazy, session-cached, skip-list not .gitignore v1, git-root
+  or startup_cwd, cap project_index_max=20k). Tier1: file finder (C-x C-f), quick-open
+  (C-x p, file_frecency in state.json), buffer switcher (C-x b). Tier2: git gutter (shell
+  `git diff -U0` async, marker in the 2nd gutter col, git_gutter knob), autosave ✓ pulse.
+  Deferred: cmd-bar starter set (fixed-order ruling), smart paste, dashboard splash
+  (terminal-default makes splash rare). User reviewing before implementation.
+
+## Roadmap docs (2026-07, superseded for Phase 1 by the section above)
+- `agentic_inline.md` = product brief (10 non-commoditized AI workflows, personas,
+  wedge, retention loop). `workflows_design.md` = build spec for the first 7 (W1-W7)
+  with enables/disables per choice. Both are DESIGN, no code written yet — user
+  reviewing offline before implementation. Phase 1 = W1/W2/W3 (OPEN: directive,
+  ExplainThis/ExplainFailure actions, shell Tab-translate + cursor-anchored overlay,
+  no-essays prompt) + pane resize/zoom. Phase 2 = W4/W5 (context selectors, NEED:
+  expansion). Phase 3 = W6/W7 (trigger framework, notices queue, detach/attach diff).
+- Key design decisions to preserve when building: directive vocabulary stays
+  trailing-line text (portability + readable confirm gate; parse_directive is the
+  seam); one global agent_busy in-flight gate; proactive output is pull-rendered
+  (notices queue, never pushed — enforces interruption budget structurally); OPEN:
+  is line-only. Reuse the (cx,cy) that render_editor_pane/render_terminal_pane
+  already return for the cursor-anchored overlay.
+
+## CLI surface (2026-07)
+- Subcommands (with long-flag aliases): mars new/session <name> [file], attach/a/
+  resume [name], ls/list, kill <name>, ask "<q>", help/-h/--help, version/-V.
+  Unknown -/-- args exit 2 with help (previously they were treated as FILENAMES —
+  `mars --help` opened a buffer named --help). README.md = the user instructions.
+- `mars ls` shows attached/detached via ClientFrame::Status → ServerFrame::Status
+  (connection thread answers from an Arc<AtomicBool> the server loop maintains — no
+  server-loop round trip, so it can't hang on a busy session). `mars kill` sends
+  ClientFrame::Kill → SrvEvent::Kill → autosave + forced quit (skips dirty guard).
+
+## TTY hygiene (2026-07, user hit this in Warp)
+- Killed clients (SIGKILL) can't restore termios → the shell's tty stays raw →
+  staircase output (`\n` without `\r`) for everything after, incl. `mars help`.
+  Fix: session::sanitize_tty() runs first thing in main() — repairs OPOST/ONLCR/
+  ICANON/ECHO on stdout if it's a tty. Doubly important BEFORE enable_raw_mode:
+  otherwise crossterm snapshots the broken state as "original" and faithfully
+  restores brokenness on exit. session::install_panic_restore() wraps the panic
+  hook for both TUI paths (standalone + client) so panics leave a readable message
+  and a working shell. Verified in a real pty: `stty -opost` → run mars → `opost`.
+  Never verify this with mars stdout redirected (isatty=false → sanitize skips).
+
+## P0 tmux-parity features (2026-07)
+- Terminal scrollback: vt100::Parser now created with tuning.terminal_scrollback_lines
+  (10k default). Term.scroll_view(delta)/scroll_to_live()/view_offset(); wheel scrolls
+  terminal panes, Shift+PgUp/PgDn page, any keystroke snaps to live; title shows
+  " terminal ^N " while scrolled. GOTCHA: vt100 0.15 grid.rs has a DEBUG-ONLY integer
+  underflow when scroll offset > screen rows (release wraps to correct behavior) —
+  worked around with [profile.dev.package.vt100] overflow-checks=false in Cargo.toml.
+  vt100 0.16 fixes it but conflicts with ratatui 0.29's pinned unicode-width =0.2.0.
+- Dead-shell lifecycle: reader EOF sends TermEvent::Exited -> Term.exited flag (set in
+  App::tick) -> pane border rust + "process exited — Enter closes" overlay; Enter/q
+  closes pane (close_terminal_pane recycles the last pane into an editor).
+- Crash safety: App::autosave() silently saves modified path-backed buffers every
+  tuning.autosave_secs (0=off, ticked in App::tick) AND on session detach/disconnect
+  (session.rs). Daemon stdout/stderr -> ~/.local/state/mars/<name>.log with
+  RUST_BACKTRACE=1 (startup/end/crash lines from main.rs --server arm).
+
+## Build & verify
+- Cargo is not on the default PATH: `source ~/.cargo/env && cargo build`.
+- Headless verification: `./target/debug/ares --selfcheck` (ratatui TestBackend, 15
+  checks incl. a live PTY). Extend it whenever key handling changes — synthesized
+  KeyEvents can't catch raw terminal byte encodings, so eyeball real-terminal passes
+  for new chords.
+- Not a git repository (cloud handoffs that need git will fail).
+
+## Terminal key-encoding gotchas (cost real debugging)
+- `C-/` arrives as `C-_` (0x1f) in many terminals → Undo is bound to both.
+- `C-@` IS NUL — the same byte legacy terminals send for `Ctrl+Space` → a C-@ set-mark
+  alias is physically impossible; selection is Shift+arrows/mouse.
+- `M-<` arrives as ALT|SHIFT+'<' → `config::chord_of` strips SHIFT from non-alphabetic
+  chars so bindings parse-match; keep that invariant when touching chord code.
+- Ctrl+Space may arrive as `KeyCode::Null`; both `handle_edit` and `handle_terminal`
+  check for it.
+
+## Doc roles
+- `key_design.md` is a VISION document (what should exist + evolution horizons), not a
+  status report — user ruling 2026-07-01. Don't rewrite it to describe current code.
+
+## Design invariants (from the approved v2 review plan)
+- Every hint surface derives from `KeyBindings::binding_for` — never hardcode a
+  keybinding string in menus/hints (remaps would make the UI lie).
+- Empty-query bar menu is fixed-order; frecency is a search-result tiebreaker only.
+- Destructive actions (quit/close/kill) always confirm; quit passes the dirty-buffer
+  guard. Agent `RUN:` of a destructive action requires y/n.
+- Frecency + nudge counters persist in `~/.config/ares/state.json`; user keybindings in
+  `~/.config/ares/keys.json` are layered OVER defaults (new defaults appear in old
+  configs; user entries win).
+- Movement rulings (2026-07, rev 2): C-t = TRAVEL MODE (one-char verbs + cheat panel;
+  new tab = C-t t; creation exits, navigation stays); C-c = copy (line if no
+  selection), C-v = system paste (Emacs C-c prefix and page-down gone by ruling);
+  M-o/M-arrows = panes; C-{ C-} (kitty-protocol) + M-{ M-} M-1..9 C-PgUp/PgDn = tabs;
+  C-| / C-- splits (kitty) with C-\ / M-- universal twins; M-g = goto-line;
+  C-x x = swap pane. Shifted punctuation can't be a chord on legacy terminals —
+  kitty keyboard protocol (crossterm PushKeyboardEnhancementFlags, gated on
+  supports_keyboard_enhancement) unlocks it; every modern chord has an Alt twin.
+- Clipboard: arboard crate; kills/copies also set OS clipboard; crossterm needs the
+  "bracketed-paste" feature for Event::Paste. ARES_NO_SYSTEM_CLIPBOARD=1 disables
+  clipboard init (selfcheck sets it — keeps tests off the user's real clipboard).
+- Round-3 rulings (2026-07): C-o + Ctrl+arrows = pane nav (Alt isn't Meta on stock mac
+  terminals — that's why M-o felt broken); chrome layer = navigation chords work inside
+  terminal panes (is_chrome_action set in app.rs), editing chords never intercepted;
+  cmd-/super- parse to SUPER (cmd-c/v/s/a bound; only super-reporting terminals
+  deliver them); tuning.json = all behavioral knobs as {value, description}
+  (src/tuning.rs, layered like keys.json); agent env precedence ARES_LLM_KEY >
+  GROQ_API_KEY > GEMINI_API_KEY (Gemini via its OpenAI-compatible endpoint
+  generativelanguage.googleapis.com/v1beta/openai, model gemini-flash-latest —
+  use the alias: pinned versions age out of the free tier, 2.0-flash hit quota 0).
+  Verified live 2026-07-01 with the user's key. `ares --ask "<question>"` = headless
+  end-to-end agent test (prints provider/model/answer/RUN directive). Newer Gemini
+  flash models think by default — keep max_tokens ≥512 or answers come back empty
+  (finish_reason: length, all budget spent on reasoning).
+- Selfcheck isolates config via XDG_CONFIG_HOME=temp dir (immune to user remaps and
+  proves default-file writing for keys.json + tuning.json).
+- Session daemon (2026-07, src/session.rs): thin client, server renders — daemon runs
+  the same App the selfcheck already proved works headless; input = deserialized
+  crossterm events over a unix socket (`$TMPDIR/ares-<uid>/<name>.sock`, mode 0700);
+  output = ratatui's own ANSI bytes captured by pointing CrosstermBackend at a
+  socket-backed Write sink (FrameWriter) instead of stdout. `ares --session <name>`
+  spawns `ares --server <name>` detached (setsid via libc::setsid in pre_exec) and
+  attaches; `--resume [name]` reattaches (most-recent socket mtime if unnamed);
+  `--list` pings each socket, prunes dead ones. One client per session; new attach
+  sends the old one an Exit frame (takeover). Detach (C-t D / bar row) leaves the
+  session running; C-x C-c ends it (dirty-guard still applies) and removes the socket.
+  `App::run` was refactored to take an `InputEvent` receiver instead of reading
+  crossterm directly (`app.rs` step/tick split) — standalone mode spawns a TTY-reader
+  thread feeding the same channel type the server consumes from sockets.
+  GOTCHA (cost ~1hr): don't write ad-hoc test helpers that re-`try_clone()`+drop a
+  socket per call — works fine, was a red herring. The REAL bug: ratatui's incremental
+  cell-diffing interleaves cursor-repositioning escape codes BETWEEN individual
+  changed characters (one draw per keystroke), so typed text never appears as a
+  contiguous substring in the raw ANSI byte stream. Test/verify session output through
+  a real ANSI parser (vt100 — already a project dep) and check the INTERPRETED screen
+  contents, never raw-byte-contains() on accumulated Output frames.
+  Verified manually end-to-end via `script -q /dev/null ares --session/--resume` +
+  `ps`/`--list` (headless client_main can't be exercised without a real/pty TTY).
+  `ARES_DEBUG_LOG=<path>` env var (session.rs `debug_log`) writes timestamped
+  diagnostics for hello/parse/read errors — zero-cost when unset, useful for future
+  daemon debugging since a detached daemon has no visible stderr.
