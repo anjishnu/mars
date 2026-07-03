@@ -97,5 +97,14 @@ Needs an agent key (`GROQ_API_KEY` / `GEMINI_API_KEY`). In a code file:
    (N lines)`**. Press **Enter** to apply it — as **one undo step**, so **`C-/` reverts the
    entire AI edit** at once. `C-l` cancels instead.
 
+## 8. Watch a pane (W6) — needs an agent key
+Kick off a long command in a terminal, then **`C-t`** (travel mode) **`w`** to watch it (or
+the "Watch this pane" command). When the command **exits** or its output **goes quiet**
+(~20s), Mars summarizes it in **one line at the bottom** — failures first, e.g.
+`✗ failed: linker error · build`. **`Esc`** dismisses it. This fires **even while you're
+detached** (the daemon keeps watching), so you can `mars attach` later to a waiting verdict.
+
 ## Not yet wired (coming next)
+- **W7 reattach briefing** ("where was I?" on `mars attach`), **W5 scrollback archaeology**,
+  **W4 cross-tab** — in progress.
 - **Subword motion** (`⌘⌥←/→` for `get·User·Name`) — planned fast-follow.

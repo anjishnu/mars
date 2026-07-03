@@ -24,6 +24,8 @@ pub enum AgentEvent {
     AutoName { tab_id: usize, name: String },
     /// Background session-naming reply (proposed name).
     SessionName { name: String },
+    /// W6: one-line verdict on a watched terminal (term id, verdict).
+    WatchSummary { term_id: usize, verdict: String },
     /// W3 shell translate: English → one shell command (fills the SH bar).
     ShellTranslation { command: String },
     Error(String),
@@ -228,6 +230,36 @@ pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Send
             let name = kebab(&text);
             if !name.is_empty() {
                 let _ = tx.send(AgentEvent::AutoName { tab_id, name });
+            }
+        }
+    });
+}
+
+/// W6: one-line verdict on a watched terminal that went quiet or exited. Runs on
+/// a background thread (even inside the detached daemon) and delivers a Notice.
+pub fn watch_summary(
+    cfg: AgentConfig,
+    term_id: usize,
+    reason: crate::app::WatchReason,
+    tail: String,
+    tx: mpsc::Sender<AgentEvent>,
+) {
+    std::thread::spawn(move || {
+        let hint = match reason {
+            crate::app::WatchReason::Exit => "The process just exited.",
+            crate::app::WatchReason::Quiet => "The output has gone quiet (it may still be running).",
+        };
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": format!(
+                "You watch a terminal for the user. {hint} In ONE short line, say whether it \
+                 succeeded or failed and the single most important reason. Start with a verb \
+                 or 'failed:'/'done:'. No preamble, no markdown.") }),
+            serde_json::json!({ "role": "user", "content": tail }),
+        ];
+        if let Ok(text) = chat(&cfg, messages) {
+            let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
+            if !verdict.is_empty() {
+                let _ = tx.send(AgentEvent::WatchSummary { term_id, verdict });
             }
         }
     });

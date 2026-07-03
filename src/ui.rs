@@ -70,6 +70,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_splash {
         render_splash(frame, app, pane_area);
     }
+    // Proactive notice (W6): one dim line at the bottom of the workspace, the
+    // agent's only path to the screen. Failures first; Esc dismisses.
+    if !app.notices.is_empty() && !app.show_splash {
+        render_notice(frame, app, pane_area);
+    }
     render_status(frame, app, status_area);
     render_control_bar(frame, app, bar_area);
 
@@ -118,6 +123,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         ("q / 0",   "close pane"),
         ("",        ""),
         ("?",       "why did this fail? (triage)"),
+        ("w",       "watch this pane (summarize when done)"),
         ("D",       "detach session (keeps running)"),
         ("Esc ⏎",   "done  ·  creation exits, navigation stays"),
     ];
@@ -1017,6 +1023,30 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+// ── Proactive notice line (W6 watch verdicts) ────────────────────────────────
+
+fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
+    let Some(n) = app.notices.first() else { return };
+    if pane_area.height == 0 {
+        return;
+    }
+    let row = Rect { x: pane_area.x, y: pane_area.bottom() - 1, width: pane_area.width, height: 1 };
+    let (glyph, fg) = match n.kind {
+        crate::app::NoticeKind::Failure => ("✗", rgb(app.tuning.theme_accent_bright)),
+        crate::app::NoticeKind::Info => ("✓", rgb(app.tuning.theme_terminal)),
+    };
+    let more = if app.notices.len() > 1 { format!("  (+{} more)", app.notices.len() - 1) } else { String::new() };
+    let text = format!(" {glyph} {}{more}   Esc dismiss ", n.text);
+    frame.render_widget(Clear, row);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Black).bg(fg).add_modifier(Modifier::BOLD),
+        ))),
+        row,
+    );
 }
 
 // ── Left file-tree sidebar (@ / C-x d) ───────────────────────────────────────

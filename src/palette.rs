@@ -63,6 +63,8 @@ pub enum Action {
     ExplainThis,
     /// Triage: "why did this fail?" grounded in the focused terminal.
     ExplainFailure,
+    /// W6: watch this terminal — summarize it when it goes quiet or exits.
+    WatchPane,
     /// Leave the session running and disconnect this client.
     Detach,
     RenameSession,
@@ -127,6 +129,7 @@ impl Action {
             Action::AskAgent           => "ask agent",
             Action::ExplainThis        => "explain this",
             Action::ExplainFailure     => "why did this fail?",
+            Action::WatchPane          => "watch this pane",
             Action::Detach             => "detach session",
             Action::RenameSession      => "rename session",
             Action::Quit               => "quit",
@@ -182,6 +185,7 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Ask agent",     Action::AskAgent,     "Ask the LLM how to do something"),
         MenuItem::run_desc("Explain this",  Action::ExplainThis,  "Explain what's on screen at the cursor"),
         MenuItem::run_desc("Why did this fail?", Action::ExplainFailure, "Triage the error in the focused terminal"),
+        MenuItem::run_desc("Watch this pane", Action::WatchPane, "Summarize this terminal when it goes quiet or exits (even detached)"),
         MenuItem::run_desc("Detach session", Action::Detach,      "Disconnect; the session keeps running (reattach: mars attach)"),
         MenuItem::run_desc("Rename session", Action::RenameSession, "Rename this session (also: mars rename <old> <new>)"),
         MenuItem::run_desc("Quit",          Action::Quit,         "Quit the editor (ends the session)"),

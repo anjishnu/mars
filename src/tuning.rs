@@ -46,6 +46,8 @@ pub struct Tuning {
     pub project_index_max: usize,
     pub project_ignore: Vec<String>,
     pub tree_width: u16,
+    pub watch_quiet_secs: u64,
+    pub agent_scrollback_context: usize,
 }
 
 impl Default for Tuning {
@@ -85,6 +87,8 @@ impl Default for Tuning {
                 .map(|s| s.to_string())
                 .collect(),
             tree_width: 30,
+            watch_quiet_secs: 20,
+            agent_scrollback_context: 200,
         }
     }
 }
@@ -187,6 +191,13 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
              read a repo's .gitignore.")),
         ("tree_width", knob(json!(d.tree_width),
             "Column width of the left file-tree sidebar (@ / C-x d).")),
+        ("watch_quiet_secs", knob(json!(d.watch_quiet_secs),
+            "Seconds a watched terminal (C-t w) must be silent before Mars summarizes it \
+             (W6). Also fires immediately on process exit. Generous by design — a false \
+             'done' costs more than the feature earns.")),
+        ("agent_scrollback_context", knob(json!(d.agent_scrollback_context),
+            "Lines of a watched/focused terminal's screen sent to the agent for a summary \
+             or triage.")),
     ]
 }
 
@@ -273,6 +284,9 @@ pub fn load() -> Tuning {
         t.autosave_secs = get_u64(&map, "autosave_secs", t.autosave_secs);
         t.project_index_max = get_u64(&map, "project_index_max", t.project_index_max as u64) as usize;
         t.tree_width = get_u64(&map, "tree_width", t.tree_width as u64) as u16;
+        t.watch_quiet_secs = get_u64(&map, "watch_quiet_secs", t.watch_quiet_secs);
+        t.agent_scrollback_context =
+            get_u64(&map, "agent_scrollback_context", t.agent_scrollback_context as u64) as usize;
         if let Some(list) = map.get("project_ignore").and_then(|e| e.value.as_array()) {
             let dirs: Vec<String> =
                 list.iter().filter_map(|v| v.as_str().map(String::from)).collect();

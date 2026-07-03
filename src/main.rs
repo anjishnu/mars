@@ -246,6 +246,7 @@ fn ask_cli(question: String) -> Result<()> {
         }
         agent::AgentEvent::AutoName { .. }
         | agent::AgentEvent::SessionName { .. }
+        | agent::AgentEvent::WatchSummary { .. }
         | agent::AgentEvent::ShellTranslation { .. } => Ok(()),
         agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
     }
@@ -1113,6 +1114,31 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Enter))?;
     assert!(app.mode == mode::Mode::Terminal, "no-command query did not run as a shell command");
     println!("[selfcheck] unified terminal composer .. PASS");
+
+    // 26l. W6 watch: watching a pane + a verdict event → a failure notice that
+    //      renders and is dismissed with Esc.
+    let mut app = App::new(None)?;
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    app.handle_key(k(KeyCode::Char('!')))?;
+    typ(&mut app, "true")?;
+    app.handle_key(k(KeyCode::Enter))?; // attached to a terminal pane
+    let tid = match app.focused_pane().content {
+        pane::PaneContent::Terminal(id) => id,
+        _ => panic!("focused pane is not a terminal"),
+    };
+    app.run_action(palette::Action::WatchPane);
+    assert!(app.watches.get(&tid).map(|w| w.watched).unwrap_or(false), "pane not marked watched");
+    // Simulate the background summary landing (the hermetic auto-name pattern).
+    app.agent_tx.send(agent::AgentEvent::WatchSummary { term_id: tid, verdict: "failed: linker error".into() })?;
+    app.tick();
+    assert_eq!(app.notices.len(), 1, "verdict did not queue a notice");
+    assert!(matches!(app.notices[0].kind, app::NoticeKind::Failure), "verdict not classified as failure");
+    term.draw(|f| ui::render(f, &mut app))?;
+    assert!(screen_text(&term).contains("linker error"), "notice not rendered");
+    app.mode = mode::Mode::Edit; // Esc is a shell key in terminal mode; dismiss from edit
+    app.handle_key(k(KeyCode::Esc))?;
+    assert!(app.notices.is_empty(), "Esc did not dismiss the notice");
+    println!("[selfcheck] watch pane + notice (W6) ... PASS");
 
     // 27. Session daemon: detach → state + shells survive → reattach; takeover;
     //     version handshake; quit removes the socket. Fully headless.

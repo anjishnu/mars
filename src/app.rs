@@ -77,6 +77,32 @@ pub enum PromptKind {
     ConfirmAction(Action),
 }
 
+/// Per-terminal watch state (W6): the daemon summarizes a watched pane when it
+/// goes quiet or its process exits — even while you're detached.
+#[derive(Default)]
+pub struct WatchState {
+    pub watched: bool,
+    pub last_output_tick: u64,
+    /// Quiet/exit already fired → don't re-fire until new output arrives.
+    pub triggered: bool,
+    /// The last one-line verdict (kept for the W7 reattach diff later).
+    pub verdict: Option<String>,
+}
+
+/// Why a watch fired.
+#[derive(Clone, Copy)]
+pub enum WatchReason { Exit, Quiet }
+
+/// A pull-rendered proactive notice — the agent's only path to the screen. The
+/// renderer reads it; the agent never pushes. Failures sort before info.
+pub struct Notice {
+    pub text: String,
+    pub kind: NoticeKind,
+}
+
+#[derive(PartialEq, PartialOrd, Eq, Ord)]
+pub enum NoticeKind { Failure, Info }
+
 pub struct App {
     pub buffers: HashMap<BufferId, Buffer>,
     pub panes: HashMap<PaneId, Pane>,
@@ -154,12 +180,19 @@ pub struct App {
     pub refactor_target: Option<(BufferId, usize, usize)>,
     /// A code-block the agent returned to replace `refactor_target` (confirm-gated).
     pub refactor_replacement: Option<String>,
+    // ── Watch / notices (W6) ──
+    /// Per-terminal watch state, keyed by TermId.
+    pub watches: HashMap<TermId, WatchState>,
+    /// Proactive notices the renderer reads (failures first). The agent can only append.
+    pub notices: Vec<Notice>,
+    /// An exit trigger queued from the term_rx drain, fired next tick.
+    pending_watch: Option<(TermId, WatchReason)>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
     pub agent_history: Vec<(String, String)>,
     /// Ask-panel scroll: lines scrolled up from the bottom of the transcript.
     pub ask_scroll: usize,
     /// Auto-naming state: one request in flight; tabs already tried.
-    auto_name_inflight: bool,
+    bg_busy: bool,
     auto_name_attempted: std::collections::HashSet<TabId>,
     /// Shell composer: the query is a ready-to-run command (translated or
     /// typed literally with no key) — the next Enter runs it.
@@ -237,9 +270,12 @@ impl App {
             agent_directive: None,
             refactor_target: None,
             refactor_replacement: None,
+            watches: HashMap::new(),
+            notices: Vec::new(),
+            pending_watch: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
-            auto_name_inflight: false,
+            bg_busy: false,
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
             session_name_attempted: false,
@@ -1472,6 +1508,13 @@ impl App {
         if (ctrl && matches!(key.code, KeyCode::Char('g')))
             || (matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE)
         {
+            // Esc dismisses a proactive notice first (nothing else pending).
+            if self.pending_prefix.is_empty()
+                && self.focused_pane().selection_anchor.is_none()
+                && self.dismiss_notice()
+            {
+                return;
+            }
             let had_state = !self.pending_prefix.is_empty()
                 || self.focused_pane().selection_anchor.is_some();
             self.pending_prefix.clear();
@@ -1868,6 +1911,7 @@ impl App {
             KeyCode::Char('d') => self.close_tab(),
             KeyCode::Char('r') => self.run_action(Action::RenameTab), // → prompt, exits mode
             KeyCode::Char('?') => self.run_action(Action::ExplainFailure), // triage → Ask
+            KeyCode::Char('w') => self.toggle_watch_pane(), // W6: watch this pane
             KeyCode::Char('h') | KeyCode::Left if !shift => self.prev_tab(),
             KeyCode::Char('l') | KeyCode::Right if !shift => self.next_tab(),
             KeyCode::Char('H') => self.move_tab(-1),
@@ -2825,6 +2869,7 @@ impl App {
                 "Why did this fail? Name the cause, cite the exact file:line if there is one, \
                  and give the fix. Be terse.",
             ),
+            Action::WatchPane          => self.toggle_watch_pane(),
             Action::Detach             => {
                 if self.session_name.is_some() {
                     self.detach_requested = true;
@@ -3013,11 +3058,26 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
 
-        // Drain terminal signals (repaint happens next frame); mark dead shells.
+        // Drain terminal signals (repaint next frame); mark dead shells and feed
+        // the watch clock (W6: output resets quiet, exit queues a verdict).
+        let now = self.frame_tick;
         while let Ok(ev) = self.term_rx.try_recv() {
-            if let TermEvent::Exited(id) = ev {
-                if let Some(t) = self.terms.get_mut(&id) {
-                    t.exited = true;
+            match ev {
+                TermEvent::Output(id) => {
+                    if let Some(w) = self.watches.get_mut(&id) {
+                        w.last_output_tick = now;
+                        w.triggered = false;
+                    }
+                }
+                TermEvent::Exited(id) => {
+                    if let Some(t) = self.terms.get_mut(&id) {
+                        t.exited = true;
+                    }
+                    if let Some(w) = self.watches.get_mut(&id) {
+                        if w.watched && !w.triggered {
+                            self.pending_watch = Some((id, WatchReason::Exit));
+                        }
+                    }
                 }
             }
         }
@@ -3050,7 +3110,7 @@ impl App {
                     self.ask_scroll = 0; // show the new turn
                 }
                 AgentEvent::AutoName { tab_id, name } => {
-                    self.auto_name_inflight = false;
+                    self.bg_busy = false;
                     // Apply only if the tab still wears its default numeric
                     // name — a user rename always wins the race.
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -3060,7 +3120,7 @@ impl App {
                     }
                 }
                 AgentEvent::SessionName { name } => {
-                    self.auto_name_inflight = false;
+                    self.bg_busy = false;
                     // Rename only if still numeric (user/explicit names win).
                     let numeric = self
                         .session_name
@@ -3089,15 +3149,113 @@ impl App {
                 }
                 AgentEvent::Error(e) => {
                     self.agent_pending = false;
-                    self.auto_name_inflight = false;
+                    self.bg_busy = false;
                     self.agent_answer = Some(format!("⚠ {}", e));
                     self.agent_directive = None;
+                }
+                AgentEvent::WatchSummary { term_id, verdict } => {
+                    self.bg_busy = false;
+                    let failed = verdict.to_lowercase().contains("fail")
+                        || verdict.to_lowercase().contains("error");
+                    let tab = self.tab_label_of_term(term_id);
+                    if let Some(w) = self.watches.get_mut(&term_id) {
+                        w.verdict = Some(verdict.clone());
+                    }
+                    self.notices.push(Notice {
+                        text: format!("{verdict}{tab}"),
+                        kind: if failed { NoticeKind::Failure } else { NoticeKind::Info },
+                    });
+                    // Failures surface first.
+                    self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
                 }
             }
         }
 
         self.maybe_auto_name();
         self.maybe_auto_name_session();
+        self.maybe_fire_watches();
+    }
+
+    /// Toggle watching the focused terminal pane (W6).
+    fn toggle_watch_pane(&mut self) {
+        let PaneContent::Terminal(id) = self.focused_pane().content else {
+            self.status_msg = Some("Watch works on a terminal pane".into());
+            return;
+        };
+        let w = self.watches.entry(id).or_default();
+        w.watched = !w.watched;
+        w.last_output_tick = self.frame_tick;
+        w.triggered = false;
+        self.status_msg = Some(if w.watched {
+            "Watching this pane — I'll summarize it when it quiets or exits".into()
+        } else {
+            "Stopped watching this pane".into()
+        });
+    }
+
+    /// Dismiss the front (highest-priority) notice, if any. Returns true if one popped.
+    pub fn dismiss_notice(&mut self) -> bool {
+        if self.notices.is_empty() {
+            false
+        } else {
+            self.notices.remove(0);
+            true
+        }
+    }
+
+    /// W6: summarize a watched terminal that just went quiet or exited. One global
+    /// in-flight gate (`bg_busy`); a foreground ask always preempts. Runs inside the
+    /// daemon's `tick`, so it fires even while detached.
+    fn maybe_fire_watches(&mut self) {
+        if self.bg_busy || self.agent_pending {
+            return;
+        }
+        let quiet_ticks =
+            self.tuning.watch_quiet_secs * 1000 / self.tuning.poll_interval_ms.max(1);
+        let now = self.frame_tick;
+        // An exit trigger queued from term_rx wins; else the first quiet watched pane.
+        let fire = self.pending_watch.take().or_else(|| {
+            self.watches
+                .iter()
+                .find(|(_, w)| {
+                    w.watched && !w.triggered && now.saturating_sub(w.last_output_tick) > quiet_ticks
+                })
+                .map(|(id, _)| (*id, WatchReason::Quiet))
+        });
+        let Some((id, reason)) = fire else { return };
+        if let Some(w) = self.watches.get_mut(&id) {
+            w.triggered = true;
+        }
+        let cfg = agent::AgentConfig::from_env();
+        if !cfg.is_configured() {
+            return;
+        }
+        let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+        self.bg_busy = true;
+        agent::watch_summary(cfg, id, reason, tail, self.agent_tx.clone());
+    }
+
+    /// The last `lines` of a terminal pane's visible screen, for a watch summary.
+    fn terminal_tail(&self, id: TermId, lines: usize) -> String {
+        let Some(t) = self.terms.get(&id) else { return String::new() };
+        let contents = t.screen().contents();
+        let rows: Vec<&str> = contents.lines().collect();
+        let start = rows.len().saturating_sub(lines);
+        rows[start..].join("\n")
+    }
+
+    /// A " · <tab>/<n panes>" locator suffix for a watched terminal's notice.
+    fn tab_label_of_term(&self, id: TermId) -> String {
+        for tab in &self.tabs {
+            for pid in tab.layout.pane_ids() {
+                if let Some(p) = self.panes.get(&pid) {
+                    if matches!(p.content, PaneContent::Terminal(tid) if tid == id) {
+                        return format!("  · {}", tab.name);
+                    }
+                }
+            }
+        }
+        String::new()
     }
 
     /// One-shot AI naming of a still-numeric session (numbered → AI → explicit).
@@ -3116,7 +3274,7 @@ impl App {
         }
         // Give it a little longer than tab-naming so there's real activity.
         let ticks = (self.tuning.auto_name_secs * 2 * 1000 / self.tuning.poll_interval_ms.max(1)).max(1);
-        if self.frame_tick % ticks != 0 || self.auto_name_inflight {
+        if self.frame_tick % ticks != 0 || self.bg_busy {
             return;
         }
         let cfg = agent::AgentConfig::from_env();
@@ -3124,7 +3282,7 @@ impl App {
             return;
         }
         self.session_name_attempted = true;
-        self.auto_name_inflight = true;
+        self.bg_busy = true;
         agent::name_session(cfg, self.screen_context(), self.agent_tx.clone());
     }
 
@@ -3132,7 +3290,7 @@ impl App {
     /// content and is still called "1"/"2"/…. Manual renames opt a tab out.
     fn maybe_auto_name(&mut self) {
         let secs = self.tuning.auto_name_secs;
-        if secs == 0 || self.auto_name_inflight {
+        if secs == 0 || self.bg_busy {
             return;
         }
         let ticks = (secs * 1000 / self.tuning.poll_interval_ms.max(1)).max(1);
@@ -3163,7 +3321,7 @@ impl App {
             return;
         }
         self.auto_name_attempted.insert(tab_id);
-        self.auto_name_inflight = true;
+        self.bg_busy = true;
         agent::auto_name(cfg, tab_id, self.screen_context(), self.agent_tx.clone());
     }
 
