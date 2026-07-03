@@ -12,6 +12,26 @@
 - Splash: MARS block logo + tagline + starter hints in the empty scratch until first
   key (app.show_splash). Selfcheck asserts "mission control" appears then vanishes.
 
+## AI workflows W6/W7/W5/W4 shipped (workflows_eng.md, 2026-07)
+- Trigger/Watch framework (daemon-resident, in app.rs:tick). W6 (commit 3183471): WatchState
+  per TermId fed by term_rx drain (Output resets last_output_tick+triggered; Exit queues
+  pending_watch); maybe_fire_watches fires quiet/exit → agent::watch_summary (auto_name clone,
+  new AgentEvent::WatchSummary) under one bg_busy gate (renamed from auto_name_inflight; user
+  asks preempt via agent_pending). notices: Vec<Notice{text,kind:Failure|Info}> pull-rendered
+  by render_notice (bottom line, failures first, Esc=dismiss_notice). Action::WatchPane (C-t w).
+  knobs watch_quiet_secs=20, agent_scrollback_context=200.
+- W7 (commit 483e8c3): Snapshot{exited,dirty,verdicts} via on_detach/on_attach hooked into
+  session.rs server_main ClientGone/Attach arms. on_attach diffs → one "while away — …"
+  notice (deterministic, no key; absent if nothing changed). Pairs with W6 (detached verdicts).
+- W5/W4 (commit 74d1130): AgentDirective::Need(NeedKind{Scrollback,Tab(String)}) — read-side,
+  parsed by match_directive, taught in system_prompt. tick Answer arm: if Need && need_depth<1
+  → reask_with_need (rebuilds context via expand_context: Term::history_tail(paged vt100
+  scrollback, restores live view) OR named tab's panes) + continue (never surfaced); capped
+  at 1. last_question/need_depth set in submit_agent_query. Single-tab cross-pane already in
+  screen_context. GOTCHA: adding Need variant needs match arms in handle_bar_ask Enter, ui.rs
+  directive label, main.rs ask_cli. 54 selfchecks. DEFERRED: Context Bus registry +
+  parameterized actions (RunWith) — no W1-7 consumer, need transaction journal for plans.
+
 ## Speed features shipped (speed_design.md steps 1-4, 2026-07)
 - STEP 1 motion: KeyModifiers::SUPER detected in handle_edit_primitive; ⌘←/→=move_token_sel
   (code-token: class-run of word/punct, whitespace skipped — token_class helper), ⌘↑/↓=page,
