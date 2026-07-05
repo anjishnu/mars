@@ -28,6 +28,28 @@
 - GOTCHA: testing undo via screen_text() is flaky (empty-buffer render); assert on
   buffers[id].rope.to_string() directly instead.
 
+## GOTCHA: stale cargo fingerprint masked rebuilds (2026-07)
+- After `cargo publish --dry-run` (Jul 3), `cargo build` reported "Finished 0.2s" with NO
+  Compiling line even after source edits + touch — target/debug/mars stayed at the Jul 3
+  binary and selfchecks silently ran STALE code. Fix: `cargo clean && cargo build`.
+- LESSON: if `cargo build` shows no "Compiling mars-terminal" line after an edit, or a brand-new
+  selfcheck line doesn't appear in output, suspect the fingerprint cache — check
+  `stat -f "%Sm" target/debug/mars` against wall clock before trusting a PASS.
+
+## Away Digest (2026-07, shipped a1062f8)
+- away_log: bounded (200) Vec<AwayEvent{tick, pane, kind: NeedsYou|Done|Context, text, dur_ticks}>
+  on App; push_away() appends; ALSO the episodic Tier-1 substrate for the planned memory system.
+- Sources: WatchSummary arm (verdict + duration from WatchState.run_started_tick — stamped when
+  output resumes after triggered/first output), unwatched TermEvent::Exited ("shell exited"),
+  dirty-file names folded as Context at on_attach.
+- on_detach stamps detach_tick; on_attach builds ONE headline from events since detach_tick:
+  "while away <dur> — ✗ fails · ✓ dones (+N more) · context · <binding> digest", dedupes W6
+  notices it subsumes (retain on text equality), sets digest_from_tick. Quiet when empty.
+- show_away_digest(): sectioned render (needs you/done/context, relative "Xs ago", "ran Xs")
+  pushed into agent_history + open_bar(Ask) — deterministic, no key. Action::AwayDigest, C-x g.
+- Broker-ready: only LLM part is verdict TEXT via existing watch_summary→chat seam.
+- fmt_dur(ticks): secs = ticks*poll_interval_ms/1000 → "45s"/"4m12s"/"3h02m".
+
 ## GOTCHA: bg_busy leak wedged all background AI (2026-07, FIXED)
 - Symptom: watch (W6) never produced a summary. Cause: agent::watch_summary/auto_name/
   name_session only sent their AgentEvent inside `if let Ok(chat)…` — on ANY LLM failure
