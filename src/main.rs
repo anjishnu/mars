@@ -1290,24 +1290,35 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] watch quiet-timer fires .... PASS");
 
-    // 26m. W7 reattach briefing: detach snapshot → change while away → attach diff
-    //      pushes one "while away — …" notice; nothing changed → no notice.
+    // 26m. Away Digest (W7+): quiet when idle; a watched task finishing while
+    //      detached yields ONE duration-anchored headline (the W6 notice it
+    //      subsumes is deduped), and the digest view renders sections — all
+    //      deterministic, no API key (broker-ready: only verdict TEXT is LLM-made).
     {
         let mut app = App::new(None)?;
-        app.open_file("/tmp/mars-w7-fixture.txt").ok(); // a buffer to dirty (may not exist → skip)
         app.on_detach();
         app.on_attach();
         assert!(app.notices.is_empty(), "briefing appeared when nothing changed");
-        // Now simulate a watched task finishing while detached.
+        // A watched run finishes while detached: tick processes the verdict
+        // (W6 notice + away-log event), then reattach builds the headline.
         app.on_detach();
-        app.watches.insert(7, app::WatchState { watched: true, verdict: Some("failed: tests red".into()), ..Default::default() });
+        app.watches.insert(7, app::WatchState { watched: true, run_started_tick: 1, ..Default::default() });
+        for _ in 0..20 { app.frame_tick += 1; } // time passes while away
+        app.agent_tx.send(agent::AgentEvent::WatchSummary { term_id: 7, verdict: "failed: tests red".into() })?;
+        app.tick();
         app.on_attach();
-        assert_eq!(app.notices.len(), 1, "reattach did not brief the new verdict");
-        assert!(app.notices[0].text.contains("while away") && app.notices[0].text.contains("tests red"),
-            "briefing text missing the verdict");
-        assert!(matches!(app.notices[0].kind, app::NoticeKind::Failure), "failing briefing not a Failure");
+        assert_eq!(app.notices.len(), 1, "expected exactly one briefing (W6 dupe not subsumed?)");
+        let n = &app.notices[0];
+        assert!(n.text.contains("while away") && n.text.contains("tests red"),
+            "headline missing duration/verdict: {}", n.text);
+        assert!(matches!(n.kind, app::NoticeKind::Failure), "failing briefing not a Failure");
+        // The digest view: sectioned, with the run duration, rendered with no key.
+        app.run_action(palette::Action::AwayDigest);
+        let d = app.agent_history.last().map(|(_, t)| t.clone()).unwrap_or_default();
+        assert!(d.contains("needs you") && d.contains("tests red") && d.contains("ran "),
+            "digest sections/duration missing:\n{d}");
     }
-    println!("[selfcheck] reattach briefing (W7) .... PASS");
+    println!("[selfcheck] away digest (W7+) ......... PASS");
 
     // 26n. W4/W5: NEED: parses; the first NEED re-asks (not surfaced), a second
     //      (depth capped) is surfaced normally.

@@ -197,6 +197,7 @@ impl RawBindings {
             ("C-x C-t", Action::OpenTerminal),
             // session
             ("C-x C-d", Action::Detach), // detach (also: C-t D travel mode)
+            ("C-x g",   Action::AwayDigest), // what happened while I was gone
             // edit / kill-ring
             ("C-k",     Action::KillLine),
             ("C-w",     Action::KillRegion),

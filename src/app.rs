@@ -93,6 +93,9 @@ pub struct WatchState {
     pub triggered: bool,
     /// The last one-line verdict (kept for the W7 reattach diff later).
     pub verdict: Option<String>,
+    /// `frame_tick` when the current run's output first began (0 = idle) — for the
+    /// away-digest duration ("build took 4m12s").
+    pub run_started_tick: u64,
 }
 
 /// Why a watch fired.
@@ -123,6 +126,26 @@ pub struct Snapshot {
     dirty: std::collections::HashSet<String>,
     verdicts: HashMap<TermId, String>,
 }
+
+/// One notable thing the daemon observed — accumulated always, rendered as the
+/// reattach "Away Digest" (the events since detach). Deterministic by
+/// construction; the LLM only ever fills a watch verdict's `text`, via the
+/// existing `watch_summary → chat → AgentConfig` seam — so a keyless (or future
+/// broker-proxied) box still produces the full digest. This is also the episodic
+/// Tier-1 log the memory system will later read.
+#[derive(Clone)]
+pub struct AwayEvent {
+    pub tick: u64,
+    pub pane: Option<TermId>,
+    pub kind: AwayKind,
+    pub text: String,
+    /// Run duration in ticks, when known (verdict events).
+    pub dur_ticks: Option<u64>,
+}
+
+/// Digest section — failures first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AwayKind { NeedsYou, Done, Context }
 
 pub struct App {
     pub buffers: HashMap<BufferId, Buffer>,
@@ -214,6 +237,12 @@ pub struct App {
     pending_watch: Option<(TermId, WatchReason)>,
     /// State captured at detach; diffed on reattach for the "where was I?" briefing (W7).
     detach_snapshot: Option<Snapshot>,
+    /// Append-only ring of notable events (bounded) — the Away Digest source.
+    pub away_log: Vec<AwayEvent>,
+    /// `frame_tick` at the last detach — the start of the "while away" window.
+    detach_tick: Option<u64>,
+    /// Window start for a re-summonable digest ("away digest" action).
+    pub digest_from_tick: Option<u64>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
     pub agent_history: Vec<(String, String)>,
     /// Ask-panel scroll: lines scrolled up from the bottom of the transcript.
@@ -312,6 +341,9 @@ impl App {
             notices: Vec::new(),
             pending_watch: None,
             detach_snapshot: None,
+            away_log: Vec::new(),
+            detach_tick: None,
+            digest_from_tick: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
             bg_busy: false,
@@ -3237,6 +3269,7 @@ impl App {
                  and give the fix. Be terse.",
             ),
             Action::WatchPane          => self.toggle_watch_pane(),
+            Action::AwayDigest         => self.show_away_digest(),
             Action::Detach             => {
                 if self.session_name.is_some() {
                     self.detach_requested = true;
@@ -3434,6 +3467,11 @@ impl App {
             match ev {
                 TermEvent::Output(id) => {
                     if let Some(w) = self.watches.get_mut(&id) {
+                        // A fresh run begins when output resumes after a quiet/fired
+                        // gap (or on the very first output) — stamp its start.
+                        if w.triggered || w.run_started_tick == 0 {
+                            w.run_started_tick = now;
+                        }
                         w.last_output_tick = now;
                         w.triggered = false;
                     }
@@ -3442,10 +3480,12 @@ impl App {
                     if let Some(t) = self.terms.get_mut(&id) {
                         t.exited = true;
                     }
-                    if let Some(w) = self.watches.get_mut(&id) {
-                        if w.watched && !w.triggered {
-                            self.pending_watch = Some((id, WatchReason::Exit));
-                        }
+                    let watched = self.watches.get(&id).map(|w| w.watched && !w.triggered).unwrap_or(false);
+                    if watched {
+                        self.pending_watch = Some((id, WatchReason::Exit)); // gets an LLM verdict
+                    } else {
+                        // An unwatched shell ending is a deterministic away-event.
+                        self.push_away(AwayKind::Done, Some(id), "shell exited".into(), None);
                     }
                 }
             }
@@ -3539,6 +3579,9 @@ impl App {
                     let failed = verdict.to_lowercase().contains("fail")
                         || verdict.to_lowercase().contains("error");
                     let tab = self.tab_label_of_term(term_id);
+                    let dur = self.watches.get(&term_id).and_then(|w| {
+                        (w.run_started_tick > 0).then(|| now.saturating_sub(w.run_started_tick))
+                    });
                     if let Some(w) = self.watches.get_mut(&term_id) {
                         w.verdict = Some(verdict.clone());
                     }
@@ -3548,6 +3591,13 @@ impl App {
                     });
                     // Failures surface first.
                     self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
+                    // Also record it for the Away Digest (with the run's duration).
+                    self.push_away(
+                        if failed { AwayKind::NeedsYou } else { AwayKind::Done },
+                        Some(term_id),
+                        format!("{verdict}{tab}"),
+                        dur,
+                    );
                 }
             }
         }
@@ -3555,6 +3605,34 @@ impl App {
         self.maybe_auto_name();
         self.maybe_auto_name_session();
         self.maybe_fire_watches();
+    }
+
+    /// Append an event to the bounded away-log ring (the Away Digest source).
+    fn push_away(&mut self, kind: AwayKind, pane: Option<TermId>, text: String, dur_ticks: Option<u64>) {
+        self.away_log.push(AwayEvent {
+            tick: self.frame_tick,
+            pane,
+            kind,
+            text,
+            dur_ticks,
+        });
+        const CAP: usize = 200;
+        if self.away_log.len() > CAP {
+            let drop = self.away_log.len() - CAP;
+            self.away_log.drain(0..drop);
+        }
+    }
+
+    /// Human duration from a tick span ("45s" / "4m12s" / "3h02m").
+    fn fmt_dur(&self, ticks: u64) -> String {
+        let secs = ticks * self.tuning.poll_interval_ms.max(1) / 1000;
+        if secs < 60 {
+            format!("{secs}s")
+        } else if secs < 3600 {
+            format!("{}m{:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+        }
     }
 
     /// Toggle watching the focused terminal pane (W6).
@@ -3583,6 +3661,7 @@ impl App {
     /// W7: capture a cheap snapshot when the last client detaches, so reattach can
     /// tell you what changed while you were gone.
     pub fn on_detach(&mut self) {
+        self.detach_tick = Some(self.frame_tick);
         self.detach_snapshot = Some(Snapshot {
             exited: self.terms.iter().filter(|(_, t)| t.exited).map(|(id, _)| *id).collect(),
             dirty: self.buffers.values().filter(|b| b.modified).map(|b| b.name.clone()).collect(),
@@ -3594,48 +3673,105 @@ impl App {
         });
     }
 
-    /// W7: diff the live state against the detach snapshot and, if anything changed,
-    /// push one "while away — …" briefing notice (deterministic; absent when idle).
+    /// W7 → Away Digest: on reattach, summarize everything logged since detach as
+    /// one duration-anchored headline (failures first); `↵` opens the full digest.
+    /// Deterministic — verdict text is the only LLM-derived part, and it was
+    /// produced earlier through the normal `watch_summary` seam (broker-proxied in
+    /// the future); a keyless box still gets the full digest. Quiet when idle.
     pub fn on_attach(&mut self) {
         let Some(snap) = self.detach_snapshot.take() else { return };
-        let mut items: Vec<String> = Vec::new();
-        let mut failed = false;
-        // Watched tasks that produced a NEW verdict while away (the top signal).
-        for (id, w) in &self.watches {
-            if let Some(v) = &w.verdict {
-                if snap.verdicts.get(id) != Some(v) {
-                    items.push(v.clone());
-                    let lv = v.to_lowercase();
-                    if lv.contains("fail") || lv.contains("error") {
-                        failed = true;
-                    }
-                }
-            }
-        }
-        let exited = self
-            .terms
-            .iter()
-            .filter(|(id, t)| t.exited && !snap.exited.contains(id))
-            .count();
-        if exited > 0 {
-            items.push(format!("{exited} shell{} exited", if exited == 1 { "" } else { "s" }));
-        }
-        let dirty = self
+        let from = self.detach_tick.take().unwrap_or(0);
+        // Fold file changes since detach into the log as Context events, so the
+        // digest owns the whole story (names, not just a count).
+        let dirty: Vec<String> = self
             .buffers
             .values()
             .filter(|b| b.modified && !snap.dirty.contains(&b.name))
-            .count();
-        if dirty > 0 {
-            items.push(format!("{dirty} file{} modified", if dirty == 1 { "" } else { "s" }));
+            .map(|b| b.name.clone())
+            .collect();
+        if !dirty.is_empty() {
+            let text = format!(
+                "{} file{} modified ({})",
+                dirty.len(),
+                if dirty.len() == 1 { "" } else { "s" },
+                dirty.join(", ")
+            );
+            self.push_away(AwayKind::Context, None, text, None);
+        }
+        // Headline items from the away window: failures lead, then the rest.
+        let events: Vec<&AwayEvent> = self.away_log.iter().filter(|e| e.tick >= from).collect();
+        let mut items: Vec<String> = Vec::new();
+        let mut failed = false;
+        for e in events.iter().filter(|e| e.kind == AwayKind::NeedsYou) {
+            items.push(format!("✗ {}", e.text));
+            failed = true;
+        }
+        let done = events.iter().filter(|e| e.kind == AwayKind::Done).count();
+        for e in events.iter().filter(|e| e.kind == AwayKind::Done).take(2) {
+            items.push(format!("✓ {}", e.text));
+        }
+        if done > 2 {
+            items.push(format!("+{} more done", done - 2));
+        }
+        for e in events.iter().filter(|e| e.kind == AwayKind::Context) {
+            items.push(e.text.clone());
         }
         if items.is_empty() {
-            return; // nothing changed — no briefing
+            return; // nothing happened — no briefing
         }
+        // The headline subsumes watch notices queued while detached — drop the
+        // duplicates so reattach greets with ONE line, not a stack.
+        self.notices.retain(|n| !events.iter().any(|e| n.text == e.text));
+        self.digest_from_tick = Some(from); // the "away digest" action re-summons details
+        let away = self.fmt_dur(self.frame_tick.saturating_sub(from));
+        // Honesty invariant: the digest hint shows the live binding, never a literal.
+        let hint = self
+            .keys
+            .binding_for(&Action::AwayDigest)
+            .map(|b| format!(" · {b} digest"))
+            .unwrap_or_default();
         self.notices.push(Notice {
-            text: format!("while away — {}", items.join(" · ")),
+            text: format!("while away {away} — {}{hint}", items.join(" · ")),
             kind: if failed { NoticeKind::Failure } else { NoticeKind::Info },
         });
         self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
+    }
+
+    /// Render the Away Digest (events since the last detach window — or the whole
+    /// log if never detached) into the ask transcript: sectioned, timestamped
+    /// relative ("12m ago"), scrollable, re-summonable. Fully deterministic.
+    fn show_away_digest(&mut self) {
+        let from = self.digest_from_tick.unwrap_or(0);
+        let events: Vec<AwayEvent> =
+            self.away_log.iter().filter(|e| e.tick >= from).cloned().collect();
+        if events.is_empty() {
+            self.status_msg = Some("Away digest: nothing notable recorded".into());
+            return;
+        }
+        let now = self.frame_tick;
+        let mut out = String::from("While you were away\n");
+        for (kind, title) in [
+            (AwayKind::NeedsYou, "✗ needs you"),
+            (AwayKind::Done, "✓ done"),
+            (AwayKind::Context, "· context"),
+        ] {
+            let section: Vec<&AwayEvent> = events.iter().filter(|e| e.kind == kind).collect();
+            if section.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n{title}\n"));
+            for e in section {
+                let ago = self.fmt_dur(now.saturating_sub(e.tick));
+                let dur = e
+                    .dur_ticks
+                    .map(|d| format!(", ran {}", self.fmt_dur(d)))
+                    .unwrap_or_default();
+                out.push_str(&format!("  {ago} ago — {}{dur}\n", e.text));
+            }
+        }
+        self.agent_history.push(("assistant".into(), out));
+        self.ask_scroll = 0;
+        self.open_bar(BarMode::Ask);
     }
 
     /// Dismiss the front (highest-priority) notice, if any. Returns true if one popped.
