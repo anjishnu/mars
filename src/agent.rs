@@ -141,6 +141,9 @@ pub struct AgentConfig {
     pub provider: &'static str,
     pub max_tokens: u32,
     pub temperature: f64,
+    /// Set on a remote box behind an `ssh -R` auth socket: the agent proxies the
+    /// LLM call home instead of holding a key. `None` = call the provider directly.
+    pub broker_sock: Option<String>,
 }
 
 /// Read `MARS_<name>`, falling back to the pre-rename `ARES_<name>`.
@@ -150,6 +153,25 @@ fn env_var(name: &str) -> Result<String, std::env::VarError> {
 
 impl AgentConfig {
     pub fn from_env() -> Self {
+        // Highest precedence: a forwarded auth socket (we're on a remote box).
+        // Proxy the call home — the key never lands here. An explicit MARS_LLM_KEY
+        // still wins over this, so a box you deliberately keyed keeps working.
+        if std::env::var("MARS_LLM_KEY").is_err()
+            && std::env::var("ARES_LLM_KEY").is_err()
+        {
+            if let Some(sock) = crate::broker::detect_broker_sock() {
+                return AgentConfig {
+                    url: String::new(),
+                    key: String::new(),
+                    // None-equivalent: empty → the broker picks its own model.
+                    model: env_var("LLM_MODEL").unwrap_or_default(),
+                    provider: "broker",
+                    max_tokens: 512,
+                    temperature: 0.3,
+                    broker_sock: Some(sock),
+                };
+            }
+        }
         // Provider detection: explicit MARS_LLM_KEY wins, then Groq, then Gemini.
         let (key, provider, default_url, default_model) =
             if let Ok(k) = env_var("LLM_KEY") {
@@ -176,10 +198,18 @@ impl AgentConfig {
         // Explicit URL/model overrides apply to any provider.
         let url = env_var("LLM_URL").unwrap_or_else(|_| default_url.to_string());
         let model = env_var("LLM_MODEL").unwrap_or_else(|_| default_model.to_string());
-        AgentConfig { url, key, model, provider, max_tokens: 512, temperature: 0.3 }
+        AgentConfig { url, key, model, provider, max_tokens: 512, temperature: 0.3, broker_sock: None }
     }
 
     pub fn is_configured(&self) -> bool {
+        if self.provider == "broker" {
+            // Honest on the remote: "configured" iff the tunnel is actually up.
+            return self
+                .broker_sock
+                .as_deref()
+                .map(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+                .unwrap_or(false);
+        }
         !self.key.is_empty()
     }
 }
@@ -393,7 +423,16 @@ fn strip_reasoning(text: &str) -> String {
     out.trim().to_string()
 }
 
-fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>) -> anyhow::Result<String> {
+pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>) -> anyhow::Result<String> {
+    // Remote box: proxy the whole call home over the forwarded socket. No key,
+    // no Authorization header, ever constructed here.
+    if cfg.provider == "broker" {
+        let sock = cfg
+            .broker_sock
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("broker mode with no socket"))?;
+        return crate::broker::chat_via_broker(sock, cfg, messages);
+    }
     let url = format!("{}/chat/completions", cfg.url);
     let body = serde_json::json!({
         "model": cfg.model,

@@ -3781,6 +3781,20 @@ impl App {
         let quiet_ticks =
             self.tuning.watch_quiet_secs * 1000 / self.tuning.poll_interval_ms.max(1);
         let now = self.frame_tick;
+        // Peek: is anything ready to fire? (don't consume the trigger yet.)
+        let candidate = self.pending_watch.is_some()
+            || self.watches.values().any(|w| {
+                w.watched && !w.triggered && now.saturating_sub(w.last_output_tick) > quiet_ticks
+            });
+        if !candidate {
+            return;
+        }
+        // Remote box, tunnel down (you're detached): HOLD every trigger — don't
+        // consume it — so the verdict fires on reattach instead of being lost.
+        let cfg = agent::AgentConfig::from_env();
+        if cfg.provider == "broker" && !cfg.is_configured() {
+            return;
+        }
         // An exit trigger queued from term_rx wins; else the first quiet watched pane.
         let fire = self.pending_watch.take().or_else(|| {
             self.watches
@@ -3794,9 +3808,8 @@ impl App {
         if let Some(w) = self.watches.get_mut(&id) {
             w.triggered = true;
         }
-        let cfg = agent::AgentConfig::from_env();
         if !cfg.is_configured() {
-            return;
+            return; // no key at all (not broker) — consumed, so we don't spin
         }
         let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
         self.bg_busy = true;

@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod banner;
+mod broker;
 mod buffer;
 mod config;
 mod layout;
@@ -63,6 +64,12 @@ AGENT
   mars ask \"<question>\"          one-shot answer from the LLM agent
                                  (needs GEMINI_API_KEY, GROQ_API_KEY,
                                   or MARS_LLM_KEY + MARS_LLM_URL)
+
+REMOTE  (the agent works on every box — the key never leaves home)
+  mars keyd                      run once on your machine: holds the key,
+                                 serves it over a forwarded socket
+  mars ssh <host> [ssh args]     ssh in with the auth socket forwarded;
+                                 the remote agent asks home, no key on the box
 
 INSIDE THE EDITOR
   Ctrl+Space   search every command        !   run a shell command
@@ -127,6 +134,16 @@ fn main() -> Result<()> {
             return session::resume_main(args.next());
         }
         Some("ls") | Some("list") | Some("--list") => return session::list_main(),
+        // The key-never-leaves-home broker: run once on your machine.
+        Some("keyd") => return broker::keyd_main(),
+        // SSH to a host with the auth socket forwarded — the agent works there
+        // with no key on the box.
+        Some("ssh") => {
+            let host = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("usage: mars ssh <host> [ssh args…]   (needs: mars keyd)"))?;
+            return broker::ssh_main(host, args.collect());
+        }
         Some("kill") | Some("--kill") => {
             let name = args
                 .next()
@@ -1593,6 +1610,66 @@ fn selfcheck() -> Result<()> {
     assert!(cfg.model.starts_with("gemini"), "wrong Gemini model: {}", cfg.model);
     std::env::remove_var("GEMINI_API_KEY");
     println!("[selfcheck] gemini provider ............ PASS");
+
+    // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
+    {
+        use std::io::{BufRead, BufReader};
+        for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                  "MARS_LLM_KEY", "ARES_LLM_KEY", "MARS_LLM_MODEL", "ARES_LLM_MODEL"] {
+            std::env::remove_var(v);
+        }
+        // A looping responder standing in for `mars keyd`.
+        let dir = std::env::temp_dir().join(format!("mars-broker-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let sock = dir.join("auth.sock");
+        let sock_s = sock.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock)?;
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(stream) = conn else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue; // a bare connect probe (is_configured) — no request
+                }
+                let mut w = stream;
+                let _ = session::write_frame(
+                    &mut w,
+                    &broker::BrokerResponse::Chat { text: "broker-ok".into() },
+                );
+            }
+        });
+
+        // Detection: a live forwarded socket ⇒ provider "broker", configured.
+        std::env::set_var("MARS_AUTH_SOCK", &sock_s);
+        let c = agent::AgentConfig::from_env();
+        assert_eq!(c.provider, "broker", "MARS_AUTH_SOCK not detected as broker");
+        assert!(c.is_configured(), "live broker socket should be configured");
+
+        // Precedence: an explicit key outranks the forwarded socket.
+        std::env::set_var("MARS_LLM_KEY", "explicit");
+        assert_ne!(agent::AgentConfig::from_env().provider, "broker",
+            "explicit key should outrank the broker socket");
+        std::env::remove_var("MARS_LLM_KEY");
+
+        // Honest availability: a dead socket path ⇒ not configured.
+        let dead = agent::AgentConfig {
+            url: String::new(), key: String::new(), model: String::new(),
+            provider: "broker", max_tokens: 512, temperature: 0.3,
+            broker_sock: Some("/tmp/mars-nope-does-not-exist.sock".into()),
+        };
+        assert!(!dead.is_configured(), "dead broker socket reported configured");
+
+        // Proxy round-trip: chat() in broker mode returns the broker's reply,
+        // and NEVER constructs a key/Authorization header on this side.
+        let out = agent::chat(&c, vec![]).unwrap_or_default();
+        assert_eq!(out, "broker-ok", "broker proxy did not return the reply: {out:?}");
+
+        std::env::remove_var("MARS_AUTH_SOCK");
+        let _ = std::fs::remove_file(&sock);
+    }
+    println!("[selfcheck] ssh broker (proxy/detect) . PASS");
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())
