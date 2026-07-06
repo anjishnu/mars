@@ -183,6 +183,104 @@ pub fn chat_via_broker(
     }
 }
 
+// ── Fleet cache: which hosts you've been on, for `mars ls` ───────────────────
+
+/// One host you've connected to — the home machine's view of the fleet. `cwd` /
+/// `last_status` are filled by a later status-push; today only `host`/`as_of`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FleetEntry {
+    pub host: String,
+    pub cwd: Option<String>,
+    pub session: Option<String>,
+    pub last_status: Option<String>,
+    /// Unix seconds of the last interaction.
+    pub as_of: u64,
+}
+
+fn fleet_path() -> Result<PathBuf> {
+    Ok(broker_socket_path()?.with_file_name("fleet.json"))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Load the fleet, most-recent first. Empty on any error (the cache is best-effort).
+pub fn fleet_load() -> Vec<FleetEntry> {
+    let mut v: Vec<FleetEntry> = fleet_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.as_of.cmp(&a.as_of));
+    v
+}
+
+/// Record (upsert) a host interaction. Best-effort; never fails a connection.
+pub fn fleet_record(host: &str, cwd: Option<String>) {
+    let mut v = fleet_load();
+    match v.iter_mut().find(|e| e.host == host) {
+        Some(e) => {
+            e.as_of = now_secs();
+            if cwd.is_some() {
+                e.cwd = cwd;
+            }
+        }
+        None => v.push(FleetEntry {
+            host: host.to_string(),
+            cwd,
+            session: None,
+            last_status: None,
+            as_of: now_secs(),
+        }),
+    }
+    v.sort_by(|a, b| b.as_of.cmp(&a.as_of));
+    v.truncate(50);
+    if let Ok(p) = fleet_path() {
+        if let Ok(s) = serde_json::to_string_pretty(&v) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// A short "how long ago" for a unix timestamp: "just now" / "12m ago" / "3h ago" / "2d ago".
+pub fn ago(as_of: u64) -> String {
+    let secs = now_secs().saturating_sub(as_of);
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Resolve a `mars ls` follow-up (an ordinal like "2", or a host name / unique
+/// prefix) to a host from the numbered list. `None` = skip / no match.
+pub fn resolve_target(hosts: &[String], input: &str) -> Option<String> {
+    let t = input.trim();
+    if t.is_empty() || t == "q" {
+        return None;
+    }
+    if let Ok(n) = t.parse::<usize>() {
+        return hosts.get(n.checked_sub(1)?).cloned();
+    }
+    if let Some(h) = hosts.iter().find(|h| h.as_str() == t) {
+        return Some(h.clone());
+    }
+    let pre: Vec<&String> = hosts.iter().filter(|h| h.starts_with(t)).collect();
+    if pre.len() == 1 {
+        Some(pre[0].clone())
+    } else {
+        None
+    }
+}
+
 /// `mars ssh <host> [ssh args…]` — wraps system ssh so the auth socket is
 /// forwarded and `MARS_AUTH_SOCK` is set in the remote shell, with no reliance
 /// on server-side `AcceptEnv`.
@@ -194,10 +292,16 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
              start it first (in another terminal):  mars keyd"
         );
     }
+    fleet_record(&host, None); // remember this host for `mars ls`
     let remote_sock = remote_socket_path();
     let control = home_sock.with_file_name("cm-%r@%h:%p");
-    // Set the env via the remote command (not SetEnv), then hand over to a login shell.
-    let remote_cmd = format!("MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l");
+    // Set the env via the remote command (not SetEnv); nudge an install if mars is
+    // missing (never a dead end); then hand over to a login shell.
+    let remote_cmd = format!(
+        "command -v mars >/dev/null 2>&1 || \
+         echo '[mars] not installed on this host — install with:  cargo install mars-terminal'; \
+         MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
+    );
     let status = std::process::Command::new("ssh")
         .arg("-o").arg("StreamLocalBindUnlink=yes")
         .arg("-o").arg("ControlMaster=auto")

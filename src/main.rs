@@ -133,7 +133,10 @@ fn main() -> Result<()> {
         Some("attach") | Some("a") | Some("resume") | Some("--resume") => {
             return session::resume_main(args.next());
         }
-        Some("ls") | Some("list") | Some("--list") => return session::list_main(),
+        Some("ls") | Some("list") | Some("--list") => {
+            let interactive = !args.any(|a| a == "--no-prompt");
+            return session::list_main(interactive);
+        }
         // The key-never-leaves-home broker: run once on your machine.
         Some("keyd") => return broker::keyd_main(),
         // SSH to a host with the auth socket forwarded — the agent works there
@@ -1670,6 +1673,33 @@ fn selfcheck() -> Result<()> {
         let _ = std::fs::remove_file(&sock);
     }
     println!("[selfcheck] ssh broker (proxy/detect) . PASS");
+
+    // 31. Fleet cache + `mars ls` follow-up resolver (ordinal + name/prefix).
+    {
+        let hosts = vec!["gpubox".to_string(), "prod-7".to_string()];
+        assert_eq!(broker::resolve_target(&hosts, "2"), Some("prod-7".into()), "ordinal");
+        assert_eq!(broker::resolve_target(&hosts, "gpubox"), Some("gpubox".into()), "exact name");
+        assert_eq!(broker::resolve_target(&hosts, "prod"), Some("prod-7".into()), "unique prefix");
+        assert_eq!(broker::resolve_target(&hosts, ""), None, "empty skips");
+        assert_eq!(broker::resolve_target(&hosts, "9"), None, "out-of-range ordinal");
+        // Fleet round-trip under an isolated HOME (upsert dedupes, recency orders).
+        let saved = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!("mars-fleet-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)?;
+        std::env::set_var("HOME", &tmp);
+        broker::fleet_record("prod-7", None);
+        broker::fleet_record("gpubox", None); // touched last → most recent
+        broker::fleet_record("prod-7", None); // upsert, not a dup
+        let f = broker::fleet_load();
+        assert_eq!(f.len(), 2, "fleet upsert duplicated a host");
+        assert_eq!(f[0].host, "prod-7", "fleet not ordered most-recent-first");
+        match saved {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    println!("[selfcheck] fleet cache + ls resolver . PASS");
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())

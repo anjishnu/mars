@@ -686,20 +686,47 @@ pub fn resume_main(name: Option<String>) -> Result<()> {
 }
 
 /// `mars ls`
-pub fn list_main() -> Result<()> {
+pub fn list_main(prompt: bool) -> Result<()> {
     let sessions = list_sessions()?;
+    let fleet = crate::broker::fleet_load();
+
+    // Local sessions on this machine.
     if sessions.is_empty() {
-        println!("no sessions — start one with: mars new <name>");
-        return Ok(());
+        println!("no local sessions — start one with: mars new <name>");
+    } else {
+        println!("{:<20} {}", "SESSION", "STATUS");
+        for (name, alive, attached) in &sessions {
+            let status = match (alive, attached) {
+                (true, true) => "attached".to_string(),
+                (true, false) => format!("detached — reattach: mars attach {name}"),
+                (false, _) => "dead (cleaned up)".to_string(),
+            };
+            println!("{name:<20} {status}");
+        }
     }
-    println!("{:<20} {}", "SESSION", "STATUS");
-    for (name, alive, attached) in sessions {
-        let status = match (alive, attached) {
-            (true, true) => "attached".to_string(),
-            (true, false) => format!("detached — reattach: mars attach {name}"),
-            (false, _) => "dead (cleaned up)".to_string(),
-        };
-        println!("{name:<20} {status}");
+
+    // Remote hosts you've been on — numbered, so the follow-up can take an ordinal.
+    let hosts: Vec<String> = fleet.iter().map(|e| e.host.clone()).collect();
+    if !fleet.is_empty() {
+        println!("\nRECENT HOSTS");
+        for (i, e) in fleet.iter().enumerate() {
+            println!("  {}. {:<18} last seen {}", i + 1, e.host, crate::broker::ago(e.as_of));
+        }
+    }
+
+    // Interactive follow-up: type an ordinal or a host name to `mars ssh` there.
+    // Skipped by --no-prompt or when stdin isn't a TTY (scripts).
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    if prompt && is_tty && !hosts.is_empty() {
+        use std::io::Write;
+        print!("\n→ ssh (number/name, Enter to skip): ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_ok() {
+            if let Some(host) = crate::broker::resolve_target(&hosts, &line) {
+                return crate::broker::ssh_main(host, Vec::new());
+            }
+        }
     }
     Ok(())
 }
