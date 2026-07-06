@@ -740,7 +740,7 @@ fn status_hints(app: &App) -> Vec<(String, String)> {
         let mut v = vec![(bar_open_keys(app), "⌕ commands".to_string())];
         for (action, label) in [
             (Action::Save, "save"),
-            (Action::FindFile, "open"),
+            (Action::ToggleFileTree, "open"),
             (Action::Search, "search"),
         ] {
             if let Some(b) = app.keys.binding_for(&action) {
@@ -916,7 +916,7 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
         _ => {
             // Idle hint — derived from the live keymap, never hardcoded.
-            let open = app.keys.binding_for(&Action::FindFile).unwrap_or_default();
+            let open = app.keys.binding_for(&Action::ToggleFileTree).unwrap_or_default();
             let search = app.keys.binding_for(&Action::Search).unwrap_or_default();
             let hint = format!(
                 "  {}  commands    {}  open    {}  search    C-g  cancel",

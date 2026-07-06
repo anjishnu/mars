@@ -28,12 +28,9 @@ pub enum Action {
     TabMode,
     // files / buffers
     Save,
-    FindFile,
-    QuickOpen,
     ToggleFileTree,
     RefreshIndex,
     RestoreKeybindings,
-    SwitchBuffer,
     KillBuffer,
     // edit
     Undo,
@@ -60,7 +57,6 @@ pub enum Action {
     Recenter,
     // search / terminal / agent / app
     Search,
-    SearchBackward,
     QueryReplace,
     OpenTerminal,
     AskAgent,
@@ -103,12 +99,9 @@ impl Action {
             Action::RenameTab          => "rename tab",
             Action::TabMode            => "tab mode",
             Action::Save               => "save",
-            Action::FindFile           => "open file",
-            Action::QuickOpen          => "go to file",
-            Action::ToggleFileTree     => "toggle file tree",
+            Action::ToggleFileTree     => "find file (file tree)",
             Action::RefreshIndex       => "refresh file index",
             Action::RestoreKeybindings => "restore default keybindings",
-            Action::SwitchBuffer       => "switch buffer",
             Action::KillBuffer         => "kill buffer",
             Action::Undo               => "undo",
             Action::Redo               => "redo",
@@ -133,7 +126,6 @@ impl Action {
             Action::Recenter           => "recenter",
             Action::Search             => "search",
             Action::QueryReplace       => "search & replace",
-            Action::SearchBackward     => "search back",
             Action::OpenTerminal       => "terminal",
             Action::AskAgent           => "ask agent",
             Action::ExplainThis        => "explain this",
@@ -180,9 +172,7 @@ impl MenuItem {
 fn root_menu() -> Vec<MenuItem> {
     vec![
         MenuItem::run_desc("Save",          Action::Save,           "Save the current buffer"),
-        MenuItem::run_desc("File tree",     Action::ToggleFileTree, "Browse/filter project files in the left sidebar (also @)"),
-        MenuItem::run_desc("Open file…",    Action::FindFile,       "Open a file by path"),
-        MenuItem::run_desc("Switch buffer", Action::SwitchBuffer,   "Switch to another open buffer"),
+        MenuItem::run_desc("Find file…",    Action::ToggleFileTree, "Browse/filter project files in the left sidebar (also @)"),
         MenuItem::run_desc("Search",        Action::Search,       "Incremental search in this buffer"),
         MenuItem::run_desc("Search & replace…", Action::QueryReplace, "Find and replace, stepping y/n through each match"),
         MenuItem::run_desc("Undo",          Action::Undo,         "Undo the last edit"),
@@ -384,15 +374,6 @@ impl Palette {
 
     pub fn current_menu(&self) -> &'static str {
         self.stack.last().copied().unwrap_or("root")
-    }
-
-    pub fn title(&self) -> String {
-        if self.stack.len() <= 1 {
-            " ⌕  actions ".to_string()
-        } else {
-            let crumbs: Vec<&str> = self.stack.iter().copied().skip(1).collect();
-            format!(" {} ▸ ", crumbs.join(" ▸ ").to_uppercase())
-        }
     }
 
     /// Items to display given current menu level + query text.

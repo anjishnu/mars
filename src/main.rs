@@ -53,9 +53,11 @@ SESSIONS  (work survives closed windows and disconnects)
   mars rename <old> <new>        rename a running session
   mars kill <name>               end a session (autosaves first)
 
-  Inside a session:  C-t D  detaches (keeps everything running)
+  Inside a session:  C-t D or C-x C-d  detaches (keeps everything running)
                      C-x C-c  quits and ends the session
   Closing the terminal window just detaches — nothing is lost.
+  Reattach greets you with a \"while away\" line if anything happened;
+  C-x g opens the full Away Digest (timeline + durations).
 
 AGENT
   mars ask \"<question>\"          one-shot answer from the LLM agent

@@ -25,6 +25,13 @@ For the system **as it actually exists**, see the root-level docs instead:
 | `ssh_strategy.md` | Key-never-leaves-home SSH-tunnel proxy for the LLM key. |
 | `memory_ideas.md` | Augmenting Mars with memory (adaptive / explicit / episodic + RAG). |
 | `memory_product_ideas.md` | The synthesis — a memory-augmented terminal that travels securely across hosts. |
+| `memory_design_alternatives.md` | Four+ distinct memory architectures compared (decision aid). |
+| `future_directions.md` | What Mars should become — framings compared, Delegation-lead recommendation. |
+| `self_reflection.md` | The agent editing Mars itself (SET:/BIND:) + a capability knowledge repo. |
+
+**Historical records** (shipped-work artifacts, kept for the paper trail, will not be updated):
+`instructions.md` (the 2026-07 feature-wave tryout guide) and `final_report.md` (that cycle's
+build report).
 
 When a proposal here ships, fold its durable rationale into the root design docs and let
 the proposal stand as the historical "why we built it this way."

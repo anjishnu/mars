@@ -122,9 +122,7 @@ pub enum NoticeKind { Failure, Info }
 /// Deterministic — the facts (what exited, what changed) are the value; no LLM.
 #[derive(Default)]
 pub struct Snapshot {
-    exited: std::collections::HashSet<TermId>,
     dirty: std::collections::HashSet<String>,
-    verdicts: HashMap<TermId, String>,
 }
 
 /// One notable thing the daemon observed — accumulated always, rendered as the
@@ -136,7 +134,6 @@ pub struct Snapshot {
 #[derive(Clone)]
 pub struct AwayEvent {
     pub tick: u64,
-    pub pane: Option<TermId>,
     pub kind: AwayKind,
     pub text: String,
     /// Run duration in ticks, when known (verdict events).
@@ -442,7 +439,7 @@ impl App {
 
     fn alloc_pane(&mut self, buffer_id: BufferId) -> PaneId {
         let id = self.alloc_pane_id();
-        self.panes.insert(id, Pane::new(id, buffer_id));
+        self.panes.insert(id, Pane::new(buffer_id));
         id
     }
 
@@ -3217,8 +3214,7 @@ impl App {
             }
             Action::TabMode            => self.mode = Mode::Tab,
             Action::Save               => self.do_save(),
-            Action::FindFile | Action::QuickOpen | Action::ToggleFileTree
-            | Action::SwitchBuffer => self.toggle_file_tree(),
+            Action::ToggleFileTree     => self.toggle_file_tree(),
             Action::RefreshIndex       => {
                 self.project_index = None;
                 self.ensure_project_index();
@@ -3258,7 +3254,6 @@ impl App {
             Action::Recenter           => self.recenter(),
             Action::Search             => self.start_isearch(),
             Action::QueryReplace       => self.start_prompt(PromptKind::ReplaceFrom, "Query replace: "),
-            Action::SearchBackward     => self.start_isearch(),
             Action::OpenTerminal       => self.open_terminal(),
             Action::AskAgent           => self.open_bar(BarMode::Ask),
             Action::ExplainThis        => self.ask_prefilled(
@@ -3485,7 +3480,7 @@ impl App {
                         self.pending_watch = Some((id, WatchReason::Exit)); // gets an LLM verdict
                     } else {
                         // An unwatched shell ending is a deterministic away-event.
-                        self.push_away(AwayKind::Done, Some(id), "shell exited".into(), None);
+                        self.push_away(AwayKind::Done, "shell exited".into(), None);
                     }
                 }
             }
@@ -3594,7 +3589,6 @@ impl App {
                     // Also record it for the Away Digest (with the run's duration).
                     self.push_away(
                         if failed { AwayKind::NeedsYou } else { AwayKind::Done },
-                        Some(term_id),
                         format!("{verdict}{tab}"),
                         dur,
                     );
@@ -3608,10 +3602,9 @@ impl App {
     }
 
     /// Append an event to the bounded away-log ring (the Away Digest source).
-    fn push_away(&mut self, kind: AwayKind, pane: Option<TermId>, text: String, dur_ticks: Option<u64>) {
+    fn push_away(&mut self, kind: AwayKind, text: String, dur_ticks: Option<u64>) {
         self.away_log.push(AwayEvent {
             tick: self.frame_tick,
-            pane,
             kind,
             text,
             dur_ticks,
@@ -3658,18 +3651,12 @@ impl App {
         });
     }
 
-    /// W7: capture a cheap snapshot when the last client detaches, so reattach can
-    /// tell you what changed while you were gone.
+    /// Capture a cheap snapshot when the last client detaches; the away_log carries
+    /// events, the snapshot only what isn't event-shaped (which buffers were dirty).
     pub fn on_detach(&mut self) {
         self.detach_tick = Some(self.frame_tick);
         self.detach_snapshot = Some(Snapshot {
-            exited: self.terms.iter().filter(|(_, t)| t.exited).map(|(id, _)| *id).collect(),
             dirty: self.buffers.values().filter(|b| b.modified).map(|b| b.name.clone()).collect(),
-            verdicts: self
-                .watches
-                .iter()
-                .filter_map(|(id, w)| w.verdict.clone().map(|v| (*id, v)))
-                .collect(),
         });
     }
 
@@ -3696,7 +3683,7 @@ impl App {
                 if dirty.len() == 1 { "" } else { "s" },
                 dirty.join(", ")
             );
-            self.push_away(AwayKind::Context, None, text, None);
+            self.push_away(AwayKind::Context, text, None);
         }
         // Headline items from the away window: failures lead, then the rest.
         let events: Vec<&AwayEvent> = self.away_log.iter().filter(|e| e.tick >= from).collect();

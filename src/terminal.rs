@@ -17,7 +17,6 @@ pub enum TermEvent {
 }
 
 pub struct Term {
-    pub id: TermId,
     /// The shell has exited; the pane shows a notice until the user closes it.
     pub exited: bool,
     parser: Arc<Mutex<vt100::Parser>>,
@@ -87,7 +86,6 @@ pub fn spawn(
     });
 
     Ok(Term {
-        id,
         exited: false,
         parser,
         writer,

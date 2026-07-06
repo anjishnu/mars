@@ -4,7 +4,7 @@
 /// Bindings are **sequences** of chords, so Emacs prefixes like `C-x C-s`
 /// work. Emacs notation (`C-x`, `M-x`, `S-tab`) and long form (`ctrl-x`) both parse.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
@@ -92,16 +92,11 @@ pub fn parse_sequence(s: &str) -> Option<Vec<KeyChord>> {
 pub struct KeyBindings {
     /// Full chord-sequence → action map (Emacs prefixes included).
     pub edit: HashMap<Vec<KeyChord>, Action>,
-    /// First chords that begin a longer sequence (e.g. `C-x`) — pending-prefix set.
-    pub prefixes: HashSet<KeyChord>,
     /// Single chords that open the command bar (Ctrl+Space, M-x).
     pub bar_open: Vec<KeyChord>,
 }
 
 impl KeyBindings {
-    pub fn is_prefix(&self, c: &KeyChord) -> bool {
-        self.prefixes.contains(c)
-    }
     pub fn lookup(&self, seq: &[KeyChord]) -> Option<Action> {
         self.edit.get(seq).cloned()
     }
@@ -165,10 +160,12 @@ impl RawBindings {
             // files / buffers
             ("C-x C-s", Action::Save),
             ("C-x C-c", Action::Quit),
-            ("C-x C-f", Action::FindFile),
-            ("C-x p",   Action::QuickOpen),
+            // C-x C-f / C-x p / C-x b are muscle-memory aliases for the one
+            // find-file surface Mars actually has: the file tree.
+            ("C-x C-f", Action::ToggleFileTree),
+            ("C-x p",   Action::ToggleFileTree),
             ("C-x d",   Action::ToggleFileTree),
-            ("C-x b",   Action::SwitchBuffer),
+            ("C-x b",   Action::ToggleFileTree),
             ("C-x k",   Action::KillBuffer),
             // windows (panes) — the char IS the split direction: | right, - below
             ("C-x 2",   Action::SplitHorizontal),
@@ -241,7 +238,7 @@ impl RawBindings {
             ("C-x h",   Action::SelectAll),
             // search
             ("C-s",     Action::Search),
-            ("C-r",     Action::SearchBackward),
+            ("C-r",     Action::Search), // reverse-isearch is not implemented; C-r = search
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -262,12 +259,6 @@ impl RawBindings {
                 edit.insert(seq, v);
             }
         }
-        let mut prefixes = HashSet::new();
-        for seq in edit.keys() {
-            if seq.len() > 1 {
-                prefixes.insert(seq[0].clone());
-            }
-        }
         // bar_open is the command bar's opener — the recovery hatch. If a
         // hand-edited config empties or breaks it, fall back to defaults so the
         // bar (and thus Quit / reset) is never unreachable.
@@ -275,7 +266,7 @@ impl RawBindings {
         if bar_open.is_empty() {
             bar_open = RawBindings::defaults().bar_open.iter().filter_map(|s| parse_key(s)).collect();
         }
-        KeyBindings { edit, prefixes, bar_open }
+        KeyBindings { edit, bar_open }
     }
 }
 

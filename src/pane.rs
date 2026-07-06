@@ -11,7 +11,6 @@ pub enum PaneContent {
 
 #[derive(Debug, Clone)]
 pub struct Pane {
-    pub id: PaneId,
     /// Legacy field kept for compatibility — prefer `content`.
     pub buffer_id: BufferId,
     pub content: PaneContent,
@@ -29,9 +28,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn new(id: PaneId, buffer_id: BufferId) -> Self {
+    pub fn new(buffer_id: BufferId) -> Self {
         Pane {
-            id,
             buffer_id,
             content: PaneContent::Editor(buffer_id),
             cursor_row: 0,

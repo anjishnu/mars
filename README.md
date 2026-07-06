@@ -92,8 +92,10 @@ The daily rhythm:
 3. **Come back**: `mars attach` (or `mars attach work`). Your layout, buffers, and
    that build you left running in a terminal pane are exactly where you left them.
    If anything happened while you were gone — a shell exited, a watched task
-   finished, files changed — one **`while away — …`** line greets you, failures
-   first. Nothing changed → no briefing.
+   finished, files changed — one **`while away 3h20m — …`** line greets you, failures
+   first, duration up front. Press **`C-x g`** for the full **Away Digest**: a
+   sectioned timeline (✗ needs you / ✓ done / context) with each run's duration,
+   re-summonable anytime. Nothing changed → no briefing.
 4. **Finish for real**: `C-x C-c` inside the session quits it (with an
    are-you-sure prompt if anything is unsaved), or `mars kill work` from outside.
 
@@ -176,17 +178,26 @@ Mars speaks three dialects at once — whichever your fingers know:
   place (`←` collapses); on a file, `→` previews it (reversible) and `Enter` opens it;
   `../` at the top steps up a directory. Start **typing** to fuzzy-filter the whole
   project to a shortlist; `Esc` closes.
-- **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `C-k`/`C-y` kill/yank ·
-  `C-x 2`/`C-x 3`/`C-x o` windows · `M-x` command bar
+- **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `M-%` query-replace
+  (`y`/`n` step, `!` all) · `C-k`/`C-y` kill/yank · `C-x 2`/`C-x 3`/`C-x o` windows ·
+  `M-x` command bar
 - **Modern/Mac**: `C-c`/`C-v` copy/paste (system clipboard) · Shift+arrows select ·
-  typing replaces selection · mouse click/scroll/wheel · `⌘C/⌘V` on kitty-class terminals
+  typing replaces selection · `Tab`/`Shift-Tab` indent/dedent a selected block ·
+  mouse click/scroll/wheel · `⌘C/⌘V` on kitty-class terminals
 - **tmux/zellij**: `C-t` travel hub · `M-{`/`M-}` or `C-PgUp/PgDn` switch tabs ·
   `M-1..9` jump to tab · `C-o`/`Ctrl+arrows` move between panes · `C-|`/`C--` splits ·
   scrollback with the wheel or `Shift+PgUp/PgDn`
 
+**Undo, two ways.** `C-x u` (or `C-/`) undoes — a typed run coalesces into one step, and
+an applied AI refactor is always exactly one step. `M-/` redoes. For bigger jumps, **`C-u`
+opens time-travel**: `←`/`→` scrub back and forward through your edit history, `Home`
+rewinds to the very start, `End` returns to now, `Esc` done.
+
 Everything is remappable in `~/.config/mars/keys.json`; behavior knobs (autosave
 interval, scrollback depth, colors, timings, watch quiet threshold) live in
 `~/.config/mars/tuning.json`, each with a plain-English description of what it does.
+Broke your config experimenting? **`mars reset`** restores default keys + tuning (your
+old files are kept as `*.bak`).
 
 ## Troubleshooting
 
