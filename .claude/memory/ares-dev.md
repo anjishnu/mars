@@ -1,5 +1,31 @@
 # Mars (formerly Ares) development notes
 
+## SSH broker — agent works on keyless remote boxes (2026-07, shipped a55f108/e12d844)
+- `src/broker.rs` (new): `mars keyd` = home broker holding the key, binds `$HOME/.mars/auth.sock`
+  (0600 under 0700 dir), reuses `session::write_frame` + `read_line`. Protocol: `BrokerRequest::Chat
+  {version, model:Option, messages, max_tokens, temperature}` → `BrokerResponse::Chat{text}|Error`.
+  keyd `handle_conn` runs `agent::chat` (now `pub`) with a fresh `from_env()` per request.
+- Remote side: `AgentConfig` gained `broker_sock: Option<String>`. `from_env()` highest-precedence
+  branch: `detect_broker_sock()` (MARS_AUTH_SOCK, else well-known `/tmp/mars-auth-<uid>.sock` if it
+  exists) → provider "broker" — UNLESS an explicit MARS_LLM_KEY/ARES_LLM_KEY is set (that wins).
+  `chat()` forks to `broker::chat_via_broker` in broker mode (no Authorization header on the box).
+  `is_configured()` in broker mode = `UnixStream::connect(sock).is_ok()` (honest when tunnel down).
+- `mars ssh <host>`: wraps system ssh — `-R remote_sock:home_sock -o StreamLocalBindUnlink=yes
+  -o ControlMaster=auto/Persist=60s -t host "MARS_AUTH_SOCK=… exec $SHELL -l"`. NOT SetEnv (no
+  AcceptEnv dep). Records the host in fleet cache + nudges install if mars missing on remote.
+- Deferred watch: `maybe_fire_watches` peeks for a candidate first, and if provider=="broker" &&
+  !is_configured() (tunnel down) RETURNS WITHOUT consuming the trigger → verdict fires on reattach.
+- Fleet: `~/.mars/fleet.json` (FleetEntry{host,cwd,session,last_status,as_of}); `fleet_record` on
+  `mars ssh`; `mars ls` (now `list_main(prompt: bool)`) shows local sessions + numbered RECENT HOSTS
+  + interactive `→ ssh (number/name)` follow-up via `resolve_target` (ordinal/exact/unique-prefix);
+  `--no-prompt` or non-TTY skips. Live status-push from remote daemons = NOT built (next).
+- VERIFIED LIVE: `mars keyd` (real GROQ key) + `mars ask` with only MARS_AUTH_SOCK (no key in env)
+  returned the answer. 63 selfchecks (broker detect/precedence/availability/round-trip + fleet).
+- DESIGN: `design_ideas/ssh_strategy.md` §1.5 (transport: mosh rejected, OpenSSH v1 / russh v2,
+  Mode P shipped / Mode E next). DEFERRED: Mode E key-push, russh, Windows TCP fallback, keychain,
+  remote→home Status-frame push (needs-you-from-remotes in `mars ls`), bare-`mars` attach-or-create
+  (kept tmux-like "new" default; use `mars attach`).
+
 ## Rebrand (2026-07)
 - Binary/crate = `mars` (repo dir still Ares/ on disk). Config ~/.config/mars/ with
   one-time auto-migration from ~/.config/ares/. Sockets $TMPDIR/mars-<uid>/. Env:

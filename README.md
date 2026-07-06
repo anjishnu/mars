@@ -137,6 +137,24 @@ Then `?` in the command bar, or from the shell:
 mars ask "how do I move a pane to the other side?"
 ```
 
+### The agent works on every box — your key never leaves home
+
+You set your key **once**, on your own machine, and the agent works on every host you
+SSH into — without the key ever landing on a remote box (not in its env, not in its
+shell history, not on its disk).
+
+```bash
+mars keyd                 # once, at home: holds the key, serves it over a socket
+mars ssh gpubox           # ssh in — the auth socket is forwarded automatically
+                          # `mars` on gpubox → the agent just works. No key on the box.
+```
+
+The remote never makes the LLM call itself — it proxies the request home through the
+SSH tunnel, and the completion comes back. Compromise the box and there's nothing to
+steal; close your laptop and remote access ends with the tunnel. Jump hosts,
+`ProxyCommand`, and hardware keys all work (it wraps your real `ssh`). `mars ls` shows
+the hosts you've been on, newest first — type a number or a name to hop back.
+
 The agent **sees your screen** — editor buffers, terminal output, your layout — so
 "why did this build fail?" needs no copy-paste. It holds a conversation (`C-l`
 starts a fresh one), and it can *act*: `RUN:` fires an editor action, `TYPE:` types

@@ -67,6 +67,49 @@ the trusted core, and must not be scattered to the leaves.**
 
 ---
 
+## 1.5 Transport — what carries the channel (decided + shipped)
+
+*Added 2026-07 when Phase 1 shipped. The security architecture below (option b) was always
+the answer; this settles the wire it rides on.*
+
+**Ride an existing SSH framework — don't build one.** Two layers, sequenced:
+
+- **v1 (shipped): wrap the system `ssh` binary.** `mars ssh <host>` remote-forwards the broker
+  socket (`ssh -R … -o StreamLocalBindUnlink=yes`) and sets `MARS_AUTH_SOCK` via the *remote
+  command* (`MARS_AUTH_SOCK=… exec $SHELL -l`), not `SetEnv` — so it needs no server-side
+  `AcceptEnv`. Universal, audited, zero new deps, and the user's entire auth reality (jump hosts,
+  `ProxyCommand`, FIDO2/Kerberos, `known_hosts`, `ControlMaster`) works unchanged. This corrects
+  §4's original `SetEnv` sketch, which most servers reject.
+- **v2 (designed, not built): embed [`russh`](https://crates.io/crates/russh)** (production-proven
+  — Warpgate, VS Code's Remote-SSH fork; native unix-socket forwarding). One static binary,
+  multiplexed channels (terminal + broker + key-lease), in-process endpoints (no OS socket, so
+  Windows clients work), and auto-reconnect. The broker frames are transport-agnostic bytes, so v2
+  swaps the carrier under an unchanged `keyd`/`chat()`/protocol; wrapping stays the fallback for
+  exotic auth. Build it only if Windows-client or seamless-reconnect demand materializes.
+
+**Why not mosh** (the obvious "keep the connection alive across roaming" candidate) — rejected:
+1. **No forwarding of any kind** — `mosh-server` takes over from `sshd`, which then quits, so the
+   SSH tunnel dies at handoff. There is nowhere to carry the broker socket. (Cited: mosh issue
+   #337; mosh.org design.)
+2. **Needs a directly reachable UDP port** (60001–60999) — breaks jump hosts / bastions, the exact
+   on-call topology this doc's persona lives in.
+3. **No native Windows** (WSL only).
+4. **Redundant here:** mosh's value is *server-held screen state surviving roaming* — but Mars's
+   daemon already holds all state, so Mars gets mosh-class resilience by reconnecting its own frame
+   stream (v2's job). mosh's predictive local echo is a later client nicety, not a transport reason.
+
+**Two modes of getting the model API to the edge** (NOT a local model — both call the same cloud
+provider; the question is *where the key lives when the call fires*):
+- **Mode P — proxy home (shipped):** the remote holds no key; `chat()` ships the request home over
+  the forwarded socket, the broker injects the key and streams the completion back. Best security;
+  requires the tunnel up. (= option b below.)
+- **Mode E — key pushed to the edge (designed, next):** while the tunnel is up, lease a credential
+  into the *remote daemon's process memory only* (never disk/env) so the box can call the provider
+  **directly** and summarize its own status **while you're detached** — the one thing Mode P can't
+  do. Bounded by a short TTL; prefer a broker-minted lease over the raw key (§4 phase 2). Until
+  then, Phase 1 **defers** watch verdicts when the tunnel is down (holds the trigger) so they fire
+  on reattach.
+
 ## 2. The options
 
 Five architectures, from "automate the copy" to "the key never moves." The axis that
