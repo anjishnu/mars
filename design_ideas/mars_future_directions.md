@@ -510,8 +510,64 @@ beyond observation before the transaction journal lands (verdicts and queued *pr
 yes; ungated unattended action no); and — unchanged from `strategy.md` §6 — ghost-text,
 context-free chat, and head-on code editing, which remain other people's moats.
 
+### 4.4 The promise that binds the stack — MARS, the Mission-*Accelerating* Rust Shell
+
+*(Added 2026-07 — the third backronym tested, after Aware and Assist, and the one that
+survives: it names the **promise** rather than a mechanism, and the promise is
+measurable.)*
+
+**The physics.** Decompose an engineer's mission time (intent → verified done):
+typing/editing is ~5–10% and is what every incumbent optimizes obsessively (autocomplete,
+snippets, Warp). The other ~90% — **waiting** on builds/tests/training (~30%),
+**re-deriving** commands/fixes/context (~20%), **dead ends** (~15%), and **supervising**
+jobs-and-now-agent-fleets (~15%, rising fast) — has no tooling at all. Mars's five assets
+attack exactly those four terms, and only a tool that is *present, persistent, and
+remembering* can: that is why the claim is honest rather than marketing.
+
+**The engineer's statement of it — Mars is a pipelined processor for missions:**
+
+| CPU technique | Mars mechanism | Time term attacked |
+|---|---|---|
+| Pipelining | watches + Away Digest (machine work overlaps human absence) | waiting |
+| Caching | empirical memory (never recompute a derivation) | re-deriving |
+| Branch prediction | fix-arc warnings before the known-bad path | dead ends |
+| Superscalar execution | agent panes under supervision (the Delegation Surface) | supervising |
+
+The north-star metric — which "Aware" never had — is **mission latency**: wall-clock and
+attention-hours from intent to verified done.
+
+**Who it's for, sharpened.** One trait defines the ICP: *terminal-resident operators of
+long-feedback-loop work, usually on remote machines.* In wedge order: the
+**agent-wrangling senior engineer** (bottlenecked on supervision, not typing; zero
+incumbent tooling), the **MLE/researcher** (feedback loops priced in GPU-hours), the
+**SRE/on-call** (the one persona whose employer already buys time-to-done as a metric —
+MTTR). All three denominate their pain in the product's promised unit: hours. Explicitly
+not for: IDE-resident app devs, notebook-first data scientists, casual terminal users.
+
+**The design laws it implies:** (1) never make the human wait to *know* — waiting is
+fine, not-knowing-while-waiting is the waste; (2) never make the human re-derive;
+(3) never let a known dead end happen silently; (4) absence must be productive — detach ≠
+pause; (5) the verified next step is one keystroke away; (6) **a wrong acceleration is a
+deceleration** — rework is the most expensive time there is, so the confirm gates,
+reversibility, and "err quiet" are *part of* acceleration, not brakes on it (the mistake
+in Warp-class "fast" products). Corollary: zero investment in typing-speed features —
+that lane is crowded and small.
+
+**Honest weaknesses.** "Accelerator" is a crowded word (YC, GPUs, Warp's entire pitch);
+the differentiation must always be *which time* — not keystroke time, **mission time**.
+And it is a shallower philosophical frame than Aware — which is fine, because they
+compose rather than compete:
+
+> **Acceleration is the promise customers buy. Delegation and Memory are the mechanisms
+> that deliver it. Awareness is the v2 intelligence that sharpens it.**
+
+That composition resolves the backronym churn: the acronym stays a pun, the recommendation
+of §4.3 stands unchanged (lead with Delegation, memory as the arc, awareness as v2), and
+the *thesis* across every framing is one sentence: **we shorten mission latency.**
+
 One sentence to remember the whole study by:
 
 > **Mars is mission control: today, for your agents; underneath, a memory that compounds;
 > eventually, aware of the mission itself — in that order, because that is the order the
-> architecture can keep its promises in.**
+> architecture can keep its promises in — and the whole stack is sold as one number:
+> mission latency, down.**
