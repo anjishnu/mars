@@ -1,6 +1,8 @@
-/// LLM agent integration over OpenAI-compatible chat endpoints.
-/// Providers by env precedence: MARS_LLM_* (any endpoint, e.g. local Ollama;
-/// legacy ARES_LLM_* still honored) → GROQ_API_KEY → GEMINI_API_KEY / GOOGLE_API_KEY.
+/// LLM agent integration. Most providers speak the OpenAI-compatible chat API;
+/// Claude uses Anthropic's own Messages API (separate branch in `chat()`).
+/// Env precedence (paid-first): MARS_LLM_* (any endpoint, e.g. local Ollama;
+/// legacy ARES_LLM_* still honored) → ANTHROPIC_API_KEY → OPENAI_API_KEY →
+/// GROQ_API_KEY → GEMINI_API_KEY / GOOGLE_API_KEY.
 
 use std::sync::mpsc;
 
@@ -172,10 +174,19 @@ impl AgentConfig {
                 };
             }
         }
-        // Provider detection: explicit MARS_LLM_KEY wins, then Groq, then Gemini.
+        // Provider detection, paid-first: explicit MARS_LLM_KEY wins, then a set
+        // Claude/OpenAI key (you meant it), then the free Groq/Gemini tiers.
+        // Cheap defaults per provider (right-size, don't reach for the biggest);
+        // override any with MARS_LLM_MODEL.
         let (key, provider, default_url, default_model) =
             if let Ok(k) = env_var("LLM_KEY") {
                 (k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant")
+            } else if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
+                // Claude — Anthropic's own Messages API (not OpenAI-compatible;
+                // handled in chat()). Haiku is the cheap/fast default.
+                (k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5")
+            } else if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+                (k, "openai", "https://api.openai.com/v1", "gpt-4o-mini")
             } else if let Ok(k) = std::env::var("GROQ_API_KEY") {
                 // Qwen3-32B: strong open model on Groq's fast free tier.
                 (k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b")
@@ -269,7 +280,7 @@ pub fn ask(
 ) {
     std::thread::spawn(move || {
         let messages = build_messages(&registry, &screen, &history, &question);
-        match chat(&cfg, messages) {
+        match chat(&cfg, messages, "ask") {
             Ok(text) => {
                 let (display, directive) = parse_directive(&text);
                 let _ = tx.send(AgentEvent::Answer { text: display, directive });
@@ -291,7 +302,7 @@ pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Send
                  No punctuation, no explanation." }),
             serde_json::json!({ "role": "user", "content": screen }),
         ];
-        if let Ok(text) = chat(&cfg, messages) {
+        if let Ok(text) = chat(&cfg, messages, "auto-name") {
             let name = kebab(&text);
             if !name.is_empty() {
                 let _ = tx.send(AgentEvent::AutoName { tab_id, name });
@@ -322,7 +333,7 @@ pub fn watch_summary(
                  or 'failed:'/'done:'. No preamble, no markdown.") }),
             serde_json::json!({ "role": "user", "content": tail }),
         ];
-        match chat(&cfg, messages) {
+        match chat(&cfg, messages, "watch") {
             Ok(text) => {
                 let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
                 if !verdict.is_empty() {
@@ -351,7 +362,7 @@ pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEven
                  No punctuation, no explanation." }),
             serde_json::json!({ "role": "user", "content": screen }),
         ];
-        if let Ok(text) = chat(&cfg, messages) {
+        if let Ok(text) = chat(&cfg, messages, "session-name") {
             let name = kebab(&text);
             if !name.is_empty() {
                 let _ = tx.send(AgentEvent::SessionName { name });
@@ -375,7 +386,7 @@ pub fn translate_shell(cfg: AgentConfig, request: String, screen: String, tx: mp
             serde_json::json!({ "role": "user", "content":
                 format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
         ];
-        let ev = match chat(&cfg, messages) {
+        let ev = match chat(&cfg, messages, "shell") {
             Ok(text) => {
                 let command = text
                     .trim()
@@ -423,7 +434,11 @@ fn strip_reasoning(text: &str) -> String {
     out.trim().to_string()
 }
 
-pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>) -> anyhow::Result<String> {
+/// Single choke point for every LLM call. `task` tags the call (`ask`, `shell`,
+/// `watch`, …) for the debug log. Times the call, captures real token usage, and
+/// records it when MARS_LLM_DEBUG is on — then returns the reasoning-stripped
+/// reply. Broker mode proxies home (logged there, where the HTTP call happens).
+pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>, task: &str) -> anyhow::Result<String> {
     // Remote box: proxy the whole call home over the forwarded socket. No key,
     // no Authorization header, ever constructed here.
     if cfg.provider == "broker" {
@@ -433,6 +448,39 @@ pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>) -> anyhow::Resu
             .ok_or_else(|| anyhow::anyhow!("broker mode with no socket"))?;
         return crate::broker::chat_via_broker(sock, cfg, messages);
     }
+
+    let start = std::time::Instant::now();
+    let result = if cfg.provider == "anthropic" {
+        chat_anthropic(cfg, &messages)
+    } else {
+        chat_openai(cfg, &messages)
+    };
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    match &result {
+        Ok((text, pt, ct)) => {
+            crate::llm_log::record(&crate::llm_log::CallRecord {
+                task, provider: cfg.provider, model: &cfg.model,
+                prompt_tokens: *pt, completion_tokens: *ct, latency_ms,
+                ok: true, error: None, input: &messages, output: text,
+            });
+            Ok(strip_reasoning(text))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            crate::llm_log::record(&crate::llm_log::CallRecord {
+                task, provider: cfg.provider, model: &cfg.model,
+                prompt_tokens: 0, completion_tokens: 0, latency_ms,
+                ok: false, error: Some(&msg), input: &messages, output: "",
+            });
+            Err(anyhow::anyhow!("{msg}"))
+        }
+    }
+}
+
+/// OpenAI-compatible providers (OpenAI, Groq, Gemini's OpenAI shim, custom,
+/// Ollama). Returns (raw_text, prompt_tokens, completion_tokens).
+fn chat_openai(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Result<(String, u64, u64)> {
     let url = format!("{}/chat/completions", cfg.url);
     let body = serde_json::json!({
         "model": cfg.model,
@@ -485,6 +533,74 @@ pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>) -> anyhow::Resu
     if let Some(msg) = json["error"]["message"].as_str() {
         anyhow::bail!("{msg}");
     }
-    let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("");
-    Ok(strip_reasoning(text))
+    let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+    let pt = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+    let ct = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    Ok((text, pt, ct))
+}
+
+/// Anthropic Messages API — NOT OpenAI-compatible: system is a top-level field
+/// (not a message role), auth is `x-api-key` + `anthropic-version`, the reply is
+/// an array of content blocks, and usage is input/output_tokens.
+fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Result<(String, u64, u64)> {
+    // Split the system message(s) out of the OpenAI-style array.
+    let mut system = String::new();
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        if m["role"].as_str() == Some("system") {
+            if !system.is_empty() {
+                system.push('\n');
+            }
+            system.push_str(m["content"].as_str().unwrap_or(""));
+        } else {
+            msgs.push(m.clone());
+        }
+    }
+    let url = format!("{}/v1/messages", cfg.url);
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "max_tokens": cfg.max_tokens,
+        "system": system,
+        "messages": msgs,
+        "temperature": cfg.temperature
+    });
+    let resp = match ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("x-api-key", &cfg.key)
+        .set("anthropic-version", "2023-06-01")
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            let api_msg = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|j| j["error"]["message"].as_str().map(str::to_string));
+            let msg = match code {
+                429 => "rate limit reached (Anthropic) — wait and retry, or switch model \
+                        with MARS_LLM_MODEL."
+                    .to_string(),
+                401 | 403 => format!(
+                    "auth failed — check ANTHROPIC_API_KEY. ({})",
+                    api_msg.as_deref().unwrap_or("invalid credentials")
+                ),
+                _ => api_msg.unwrap_or_else(|| format!("HTTP {code}")),
+            };
+            anyhow::bail!("{msg}");
+        }
+        Err(e) => anyhow::bail!("{e}"),
+    };
+    let json: serde_json::Value = resp.into_json()?;
+    if let Some(msg) = json["error"]["message"].as_str() {
+        anyhow::bail!("{msg}");
+    }
+    // content is an array of blocks; concatenate the text ones.
+    let text = json["content"]
+        .as_array()
+        .map(|blocks| blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""))
+        .unwrap_or_default();
+    let pt = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+    let ct = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    Ok((text, pt, ct))
 }

@@ -127,12 +127,31 @@ different-sized terminal just reflows.
 Works out of the box with a free-tier key from any of:
 
 ```bash
-export GROQ_API_KEY=...        # Groq (free tier) — defaults to qwen/qwen3-32b
-export GEMINI_API_KEY=...      # Google AI Studio (free tier) — gemini-3.1-flash-lite
+export ANTHROPIC_API_KEY=...   # Claude — defaults to claude-haiku-4-5
+export OPENAI_API_KEY=...       # OpenAI — defaults to gpt-4o-mini
+export GROQ_API_KEY=...         # Groq (free tier) — defaults to qwen/qwen3-32b
+export GEMINI_API_KEY=...       # Google AI Studio (free tier) — gemini-3.1-flash-lite
 # or any OpenAI-compatible endpoint (e.g. local Ollama):
 export MARS_LLM_KEY=... MARS_LLM_URL=http://localhost:11434/v1 MARS_LLM_MODEL=llama3
 # override the model for any provider:
 export MARS_LLM_MODEL=qwen/qwen3-32b
+```
+
+Detection is **paid-first**: if several keys are set, Claude → OpenAI → Groq → Gemini
+(an explicit `MARS_LLM_KEY` always wins). Cheap defaults per provider — reach for a
+bigger model with `MARS_LLM_MODEL`, not by default.
+
+**Calibrating cost/latency (debug mode).** To see where tokens and time actually go —
+so you can right-size the model per task — run with `--llm-debug` (or `MARS_LLM_DEBUG=1`)
+to log every call, then profile it:
+
+```bash
+mars --llm-debug              # logs prompts, models, tokens, latency to $TMPDIR/mars-llm/
+mars llm-stats                # per task×model, ranked by total tokens:
+#   TASK       MODEL            N  AVG_IN  AVG_OUT  TOT_TOK  %TOK  AVG_MS  ERR
+#   watch      qwen/qwen3-32b   2    6050      195    12490   62%    3025    0   ← heaviest
+#   ask        qwen/qwen3-32b   2    1720      215     3870   19%     900    0
+mars llm-stats --raw          # full inputs/outputs per call
 ```
 
 Reasoning models (Qwen3, DeepSeek-R1) work — their `<think>` blocks are stripped from

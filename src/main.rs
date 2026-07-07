@@ -5,6 +5,7 @@ mod broker;
 mod buffer;
 mod config;
 mod layout;
+mod llm_log;
 mod mode;
 mod palette;
 mod pane;
@@ -62,8 +63,16 @@ SESSIONS  (work survives closed windows and disconnects)
 
 AGENT  (BETA — an assistant, not an authority; review what it proposes)
   mars ask \"<question>\"          one-shot answer from the LLM agent
-                                 (needs GEMINI_API_KEY, GROQ_API_KEY,
-                                  or MARS_LLM_KEY + MARS_LLM_URL)
+  Keys (paid-first): ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY,
+                     GEMINI_API_KEY, or MARS_LLM_KEY + MARS_LLM_URL (any
+                     OpenAI-compatible endpoint, e.g. local Ollama).
+                     MARS_LLM_MODEL overrides the model for any provider.
+
+LLM DEBUG  (calibrate prompts / right-size models per call)
+  mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
+                                 latency) to $TMPDIR/mars-llm/ (or MARS_LLM_DEBUG=1)
+  mars llm-stats [--raw]         profile the log: per task×model, ranked by
+                                 token use — avg in/out tokens, total, latency
 
 REMOTE  (BETA — the agent works on every box; the key never leaves home)
   mars ssh <host> [ssh args]     ssh in with the auth socket forwarded; the
@@ -91,7 +100,14 @@ fn main() -> Result<()> {
     // it before printing anything (and before crossterm snapshots "original").
     session::sanitize_tty();
 
-    let mut args = env::args().skip(1);
+    // `--llm-debug` is a global flag (any position): turn on LLM call logging and
+    // strip it out so it isn't mistaken for a filename/unknown command. It sets
+    // the same env var MARS_LLM_DEBUG so the session daemon inherits it too.
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.iter().any(|a| a == "--llm-debug") {
+        std::env::set_var("MARS_LLM_DEBUG", "1");
+    }
+    let mut args = raw_args.into_iter().filter(|a| a != "--llm-debug");
     let first = args.next();
 
     match first.as_deref() {
@@ -106,6 +122,11 @@ fn main() -> Result<()> {
         }
         // Headless self-check (no TTY needed) — render, bar, PTY, and sessions.
         Some("--selfcheck") => return selfcheck(),
+        // LLM observability: profile the debug log to right-size models per call.
+        Some("llm-stats") => {
+            let raw = args.any(|a| a == "--raw");
+            return llm_log::stats(raw);
+        }
         // Headless ask — verify the agent provider end-to-end from the shell.
         Some("ask") | Some("--ask") => {
             let question: String = args.collect::<Vec<_>>().join(" ");
@@ -276,7 +297,8 @@ fn ask_cli(question: String) -> Result<()> {
     }
     let cfg = agent::AgentConfig::from_env();
     if !cfg.is_configured() {
-        anyhow::bail!("no API key: export GROQ_API_KEY, GEMINI_API_KEY, or MARS_LLM_KEY");
+        anyhow::bail!("no API key: export ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, \
+                       GEMINI_API_KEY, or MARS_LLM_KEY (+ MARS_LLM_URL for a custom endpoint)");
     }
     println!("provider: {}   model: {}", cfg.provider, cfg.model);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -321,7 +343,9 @@ fn selfcheck() -> Result<()> {
     // deterministic regardless of the caller's environment.
     for key in [
         "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY",
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
         "MARS_LLM_KEY", "MARS_LLM_URL", "ARES_LLM_KEY", "ARES_LLM_URL",
+        "MARS_AUTH_SOCK", "MARS_LLM_DEBUG",
     ] {
         std::env::remove_var(key);
     }
@@ -1699,25 +1723,44 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] ares→mars migration ....... PASS");
     }
 
-    // 29. Gemini provider detection (env-based, no network).
+    // 29. Provider detection (env-based, no network): the free tiers, the two new
+    //     paid providers, and paid-first precedence.
     for v in ["MARS_LLM_KEY", "MARS_LLM_URL", "MARS_LLM_MODEL",
-              "ARES_LLM_KEY", "ARES_LLM_URL", "ARES_LLM_MODEL"] {
+              "ARES_LLM_KEY", "ARES_LLM_URL", "ARES_LLM_MODEL", "MARS_AUTH_SOCK",
+              "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
         std::env::remove_var(v);
     }
-    std::env::remove_var("GROQ_API_KEY");
     std::env::set_var("GEMINI_API_KEY", "test-key");
     let cfg = agent::AgentConfig::from_env();
     assert!(cfg.is_configured(), "GEMINI_API_KEY not detected");
     assert_eq!(cfg.provider, "gemini");
     assert!(cfg.url.contains("generativelanguage"), "wrong Gemini endpoint: {}", cfg.url);
     assert!(cfg.model.starts_with("gemini"), "wrong Gemini model: {}", cfg.model);
-    std::env::remove_var("GEMINI_API_KEY");
-    println!("[selfcheck] gemini provider ............ PASS");
+    // OpenAI (OpenAI-compatible path).
+    std::env::set_var("OPENAI_API_KEY", "test-key");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "openai", "OPENAI_API_KEY should beat GEMINI (paid-first)");
+    assert!(cfg.url.contains("api.openai.com"), "wrong OpenAI endpoint: {}", cfg.url);
+    assert!(cfg.model.starts_with("gpt-"), "wrong OpenAI default model: {}", cfg.model);
+    // Anthropic (own Messages API) — highest of the named keys.
+    std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "anthropic", "ANTHROPIC should beat OPENAI (paid-first order)");
+    assert!(cfg.url.contains("api.anthropic.com"), "wrong Anthropic endpoint: {}", cfg.url);
+    assert!(cfg.model.contains("claude"), "wrong Claude default model: {}", cfg.model);
+    // Explicit MARS_LLM_KEY still overrides every named provider.
+    std::env::set_var("MARS_LLM_KEY", "test-key");
+    assert_eq!(agent::AgentConfig::from_env().provider, "custom", "MARS_LLM_KEY must win");
+    for v in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MARS_LLM_KEY"] {
+        std::env::remove_var(v);
+    }
+    println!("[selfcheck] provider detection ........ PASS");
 
     // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
     {
         use std::io::{BufRead, BufReader};
         for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                  "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
                   "MARS_LLM_KEY", "ARES_LLM_KEY", "MARS_LLM_MODEL", "ARES_LLM_MODEL"] {
             std::env::remove_var(v);
         }
@@ -1766,7 +1809,7 @@ fn selfcheck() -> Result<()> {
 
         // Proxy round-trip: chat() in broker mode returns the broker's reply,
         // and NEVER constructs a key/Authorization header on this side.
-        let out = agent::chat(&c, vec![]).unwrap_or_default();
+        let out = agent::chat(&c, vec![], "test").unwrap_or_default();
         assert_eq!(out, "broker-ok", "broker proxy did not return the reply: {out:?}");
 
         std::env::remove_var("MARS_AUTH_SOCK");
@@ -1948,6 +1991,34 @@ fn selfcheck() -> Result<()> {
             "KillBuffer not searchable in the command bar"
         );
         println!("[selfcheck] orphan actions now in menu PASS");
+    }
+
+    // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
+    //     stats aggregates it, and logging is a strict no-op when disabled.
+    {
+        let _ = std::fs::remove_file(llm_log::log_path()); // start clean
+        std::env::set_var("MARS_LLM_DEBUG", "1");
+        let input = vec![serde_json::json!({"role": "user", "content": "hi"})];
+        llm_log::record(&llm_log::CallRecord {
+            task: "ask", provider: "groq", model: "qwen/qwen3-32b",
+            prompt_tokens: 100, completion_tokens: 20, latency_ms: 500,
+            ok: true, error: None, input: &input, output: "hello",
+        });
+        let logged = std::fs::read_to_string(llm_log::log_path())?;
+        assert!(logged.contains("\"task\":\"ask\"") && logged.contains("qwen/qwen3-32b"), "call not logged");
+        assert!(logged.contains("\"total_tokens\":120"), "token total not computed");
+        llm_log::stats(false)?; // aggregation runs cleanly
+        // Disabled → strictly no writes.
+        std::env::remove_var("MARS_LLM_DEBUG");
+        let before = std::fs::metadata(llm_log::log_path())?.len();
+        llm_log::record(&llm_log::CallRecord {
+            task: "ask", provider: "groq", model: "m",
+            prompt_tokens: 1, completion_tokens: 1, latency_ms: 1,
+            ok: true, error: None, input: &input, output: "x",
+        });
+        assert_eq!(std::fs::metadata(llm_log::log_path())?.len(), before, "record() wrote while disabled");
+        let _ = std::fs::remove_file(llm_log::log_path());
+        println!("[selfcheck] llm debug log + stats ..... PASS");
     }
 
     println!("\nALL SELFCHECKS PASSED ✓");

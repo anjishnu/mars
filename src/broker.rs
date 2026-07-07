@@ -144,7 +144,7 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
             }
             c.max_tokens = max_tokens;
             c.temperature = temperature;
-            match agent::chat(&c, messages) {
+            match agent::chat(&c, messages, "remote") {
                 Ok(text) => BrokerResponse::Chat { text },
                 Err(e) => BrokerResponse::Error { message: e.to_string() },
             }
