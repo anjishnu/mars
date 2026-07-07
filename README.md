@@ -152,6 +152,18 @@ mars ssh gpubox           # ssh in — forwards the auth socket AND auto-starts 
 (The broker — `mars keyd` — starts on demand the first time you `mars ssh`; run it
 explicitly only if you want it in a specific shell.)
 
+**Installing mars on a fresh host.** Mars needs a modern Rust toolchain (≥ 1.85) — a
+distro-packaged `cargo` (e.g. Ubuntu's) is usually too old and will fail with an
+`edition2024` error. Don't `apt install cargo`; use the installer, which sets up
+rustup for you and then builds mars:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anjishnu/mars/main/install.sh | sh
+```
+
+(Or, if you already have rustup: `cargo install mars-terminal`.) Your API key never
+lands on the box — it's served from home over the tunnel.
+
 The remote never makes the LLM call itself — it proxies the request home through the
 SSH tunnel, and the completion comes back. Compromise the box and there's nothing to
 steal; close your laptop and remote access ends with the tunnel. Jump hosts,

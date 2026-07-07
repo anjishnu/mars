@@ -4,6 +4,9 @@
 name = "mars-terminal"
 version = "0.1.1"
 edition = "2021"
+# The dependency tree pulls edition2024 crates → a modern toolchain is required.
+# Declaring it makes cargo say "requires rustc 1.85" instead of a cryptic dep error.
+rust-version = "1.85"
 description = "A terminal editor, multiplexer, and built-in AI agent in one binary — non-modal and Emacs-compatible, with tmux-style persistent sessions."
 license = "MIT"
 readme = "README.md"
