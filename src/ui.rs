@@ -1016,7 +1016,9 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
 
     let mut lines: Vec<Line> = Vec::new();
     for (idx, row) in items.iter().enumerate().skip(scroll).take(max_show) {
-        let selected = idx == palette.selected;
+        // Shell-first terminal composer: rows are SUGGESTIONS until the user
+        // arrows in — no highlighted row implies Enter won't fire one.
+        let selected = palette.navigated && idx == palette.selected;
         let item_bg  = if selected { Color::DarkGray } else { Color::Reset };
         let has_sub  = matches!(row.kind, ItemKind::Submenu(_));
 
@@ -1195,7 +1197,13 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
         .as_ref()
         .map(|p| matches!(p.bar_mode, BarMode::Shell))
         .unwrap_or(true);
-    let input = format!("{} {query} ", if shell_mode { "!" } else { "›" });
+    let navigated = app.palette.as_ref().map(|p| p.navigated).unwrap_or(false);
+    // Empty query: show a placeholder so the composer is unmistakably present.
+    let input = if query.is_empty() {
+        format!("{} run a command… ", if shell_mode { "!" } else { "›" })
+    } else {
+        format!("{} {query} ", if shell_mode { "!" } else { "›" })
+    };
     let configured = crate::agent::AgentConfig::from_env().is_configured();
     let err = app.agent_answer.as_deref().filter(|a| a.starts_with('⚠'));
     let hint = if app.agent_pending {
@@ -1210,8 +1218,10 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
         " Enter runs (set GEMINI_API_KEY to type English) · Esc".to_string()
     } else if shell_mode {
         " type English, Enter translates → command · Esc".to_string()
+    } else if navigated {
+        " Enter runs the highlighted command · type to go back to shell · Esc".to_string()
     } else {
-        " ↑↓ pick a command · Enter runs (or English → shell) · Esc".to_string()
+        " Enter = shell (English ok) · ↑↓ pick a Mars command · Esc".to_string()
     };
 
     let width = ((input.chars().count().max(hint.chars().count())) as u16)

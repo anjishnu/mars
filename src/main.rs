@@ -1342,7 +1342,23 @@ fn selfcheck() -> Result<()> {
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Command)),
         "Ctrl+Space in terminal did not open the unified (Command) composer"
     );
-    app.handle_key(k(KeyCode::Char('!')))?; // ! → force pure-shell mode
+    // SHELL-FIRST: typed text + Enter runs as a shell command even though the
+    // fuzzy list matches Mars actions (`ls` ⊆ "restore defauLt keyS" etc.) —
+    // Enter must never fire a menu row the user didn't arrow into.
+    typ(&mut app, "ls")?;
+    app.handle_key(k(KeyCode::Enter))?; // no key set → runs literally in the pane
+    assert!(app.mode == mode::Mode::Terminal, "shell-first Enter did not run the typed command");
+    // Arrowing IN engages the menu: ↓ selects, Enter activates the action.
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    typ(&mut app, "split")?;
+    let panes_before = app.tab().layout.pane_ids().len();
+    app.handle_key(k(KeyCode::Down))?; // engage the suggestion list
+    assert!(app.palette.as_ref().map(|p| p.navigated).unwrap_or(false), "↓ did not engage the menu");
+    app.handle_key(k(KeyCode::Enter))?; // activates the selected Split action
+    assert!(app.tab().layout.pane_ids().len() > panes_before, "navigated Enter did not run the action");
+    // `!` still forces pure-shell mode.
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    app.handle_key(k(KeyCode::Char('!')))?;
     assert!(
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)),
         "`!` did not force pure-shell mode"
@@ -1782,6 +1798,13 @@ fn selfcheck() -> Result<()> {
         let _ = std::fs::remove_dir_all(&tmp);
     }
     println!("[selfcheck] fleet cache + ls resolver . PASS");
+
+    // 32. The embedded installer (pushed to remotes by `mars ssh`) is intact.
+    assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
+    assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
+        "embedded install.sh missing its core steps");
+    assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
+    println!("[selfcheck] embedded installer ........ PASS");
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())

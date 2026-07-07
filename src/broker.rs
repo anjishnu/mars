@@ -17,6 +17,11 @@ use std::time::Duration;
 
 const BROKER_VERSION: &str = "1";
 
+/// The installer, embedded so `mars ssh` can drop it on any host it connects
+/// to — version-matched to this binary, no GitHub/crates availability needed
+/// for the script itself to arrive.
+pub const INSTALL_SH: &str = include_str!("../install.sh");
+
 /// Remote → home. One request per connection lifetime is enough, but the
 /// connection is kept open for reuse across an agent session.
 #[derive(Serialize, Deserialize)]
@@ -354,15 +359,53 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     fleet_record(&host, None); // remember this host for `mars ls`
     let remote_sock = remote_socket_path();
     let control = home_sock.with_file_name("cm-%r@%h:%p");
-    // Set the env via the remote command (not SetEnv); nudge an install if mars is
-    // missing (never a dead end); then hand over to a login shell.
-    // If mars is missing, print the real install steps. A distro `cargo` (e.g.
-    // Ubuntu's 1.75) is too old — needs Rust >= 1.85, so rustup first (official
-    // one-liner from rust-lang.org/tools/install), then cargo install.
-    let remote_cmd = format!(
-        "command -v mars >/dev/null 2>&1 || printf '[mars] not installed here. Install:\\n  \
+
+    // Drop the embedded installer at ~/.mars/install.sh over the SAME connection,
+    // BEFORE the interactive session: this first ssh performs the (single)
+    // authentication and persists the ControlMaster, which the interactive ssh
+    // then reuses — one prompt total. Password prompts read /dev/tty, so piping
+    // the script through stdin is safe. Best-effort: never blocks the session.
+    let pushed = {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("ssh")
+            .arg("-o").arg("ControlMaster=auto")
+            .arg("-o").arg("ControlPersist=60s")
+            .arg("-o").arg(format!("ControlPath={}", control.display()))
+            .args(&extra)
+            .arg(&host)
+            .arg("mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .ok();
+        match child.as_mut() {
+            Some(c) => {
+                let ok_write = c
+                    .stdin
+                    .take()
+                    .and_then(|mut s| s.write_all(INSTALL_SH.as_bytes()).ok())
+                    .is_some();
+                let ok_exit = c.wait().map(|s| s.success()).unwrap_or(false);
+                ok_write && ok_exit
+            }
+            None => false,
+        }
+    };
+    if !pushed {
+        eprintln!("mars ssh: note — couldn't drop the installer on the remote (continuing).");
+    }
+
+    // Set the env via the remote command (not SetEnv); nudge an install if mars
+    // is missing — pointing at the installer we just dropped (or the manual
+    // rustup+cargo steps as fallback); then hand over to a login shell.
+    let nudge = if pushed {
+        "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
+    } else {
+        "printf '[mars] not installed here. Install:\\n  \
          curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
-         . \"$HOME/.cargo/env\" && cargo install mars-terminal\\n'; \
+         . \"$HOME/.cargo/env\" && cargo install mars-terminal --locked\\n'"
+    };
+    let remote_cmd = format!(
+        "command -v mars >/dev/null 2>&1 || {nudge}; \
          MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
     );
     let status = std::process::Command::new("ssh")

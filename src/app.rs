@@ -2023,6 +2023,9 @@ impl App {
         self.bar_return = if self.mode == Mode::Terminal { Mode::Terminal } else { Mode::Edit };
         let mut p = Palette::root();
         p.bar_mode = bar_mode;
+        // Editor bars are menu-first (a row is always selected); the terminal
+        // composer is SHELL-first — the menu engages only when arrowed into.
+        p.navigated = self.bar_return != Mode::Terminal;
         self.palette = Some(p);
         self.mode = Mode::Bar;
         self.shell_ready = false;
@@ -2472,25 +2475,34 @@ impl App {
             }
             KeyCode::Enter => {
                 let frec = &self.frecency;
-                let kind = self.palette.as_ref().and_then(|p| {
-                    p.visible_items(frec).into_iter().nth(p.selected).map(|r| r.kind)
-                });
-                // Terminal composer: a query that matches no Mars command is a
-                // shell command → LLM-translate + confirm (never a silent no-op).
+                let (kind, navigated) = self
+                    .palette
+                    .as_ref()
+                    .map(|p| {
+                        (p.visible_items(frec).into_iter().nth(p.selected).map(|r| r.kind), p.navigated)
+                    })
+                    .unwrap_or((None, false));
+                // Terminal composer is SHELL-FIRST: typed text runs as a shell
+                // command (LLM-translate + confirm) unless the user explicitly
+                // arrowed into the menu. Fuzzy matches are suggestions, not a
+                // default — subsequence matching hits almost anything, and Enter
+                // must never fire a random action instead of the typed command.
                 let has_query = self.palette.as_ref().map(|p| !p.query.trim().is_empty()).unwrap_or(false);
-                if items_len == 0 && has_query && self.bar_return == Mode::Terminal {
+                if self.bar_return == Mode::Terminal && !navigated && has_query {
                     self.submit_terminal_shell();
                 } else {
                     self.activate_kind(kind);
                 }
             }
             KeyCode::Backspace => {
+                let term_ctx = self.bar_return == Mode::Terminal;
                 let close = if let Some(p) = self.palette.as_mut() {
                     if p.query.is_empty() {
                         !p.pop()
                     } else {
                         p.query.pop();
                         p.selected = 0;
+                        p.navigated = !term_ctx; // editing text disengages the menu
                         false
                     }
                 } else { false };
@@ -2499,9 +2511,11 @@ impl App {
             // Search-first (Claude-Code feel): typing always filters. Submenus are
             // reached with Enter, and fuzzy search flattens across them.
             KeyCode::Char(c) if none || shift => {
+                let term_ctx = self.bar_return == Mode::Terminal;
                 if let Some(p) = self.palette.as_mut() {
                     p.query.push(c);
                     p.selected = 0;
+                    p.navigated = !term_ctx; // editing text disengages the menu
                 }
             }
             _ => {}

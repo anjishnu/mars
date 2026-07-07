@@ -365,11 +365,21 @@ pub struct Palette {
     pub query: String,
     pub selected: usize,
     pub bar_mode: BarMode,
+    /// The user explicitly arrowed into the menu (↑/↓/C-p/C-n). In a terminal
+    /// the composer is shell-first: Enter runs the query as a command UNLESS a
+    /// suggestion was deliberately selected. Reset on open and on query edits.
+    pub navigated: bool,
 }
 
 impl Palette {
     pub fn root() -> Self {
-        Palette { stack: vec!["root"], query: String::new(), selected: 0, bar_mode: BarMode::Command }
+        Palette {
+            stack: vec!["root"],
+            query: String::new(),
+            selected: 0,
+            bar_mode: BarMode::Command,
+            navigated: false,
+        }
     }
 
     pub fn current_menu(&self) -> &'static str {
@@ -412,12 +422,19 @@ impl Palette {
         if total == 0 {
             return;
         }
+        // First arrow just engages the menu (highlights the current row).
+        if !std::mem::replace(&mut self.navigated, true) {
+            return;
+        }
         self.selected = if self.selected == 0 { total - 1 } else { self.selected - 1 };
     }
 
     /// Move selection down (wrapping).
     pub fn select_down(&mut self, total: usize) {
         if total == 0 {
+            return;
+        }
+        if !std::mem::replace(&mut self.navigated, true) {
             return;
         }
         self.selected = (self.selected + 1) % total;
