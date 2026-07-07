@@ -139,6 +139,11 @@ mars ask "how do I move a pane to the other side?"
 
 ### The agent works on every box — your key never leaves home
 
+> **Beta.** The SSH features (`mars ssh`, `mars keyd`, the fleet view, and the
+> remote installer) are new and still being hardened. The core editor, multiplexer,
+> sessions, and agent are stable; the remote/tunnel path may have rough edges — please
+> report anything you hit.
+
 You set your key **once**, on your own machine, and the agent works on every host you
 SSH into — without the key ever landing on a remote box (not in its env, not in its
 shell history, not on its disk).

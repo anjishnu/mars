@@ -65,7 +65,7 @@ AGENT
                                  (needs GEMINI_API_KEY, GROQ_API_KEY,
                                   or MARS_LLM_KEY + MARS_LLM_URL)
 
-REMOTE  (the agent works on every box — the key never leaves home)
+REMOTE  (BETA — the agent works on every box; the key never leaves home)
   mars ssh <host> [ssh args]     ssh in with the auth socket forwarded; the
                                  remote agent asks home, no key on the box.
                                  Auto-starts the key broker if it isn't running.

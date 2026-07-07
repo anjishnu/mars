@@ -6,7 +6,8 @@ The first substantial release since 0.1.0 — remote agents, a unified terminal
 composer, reattach briefings, and a top-to-bottom ergonomics pass.
 
 ### Added
-- **SSH broker** (`mars ssh <host>`, `mars keyd`): your LLM key stays home and is
+- **SSH broker** (`mars ssh <host>`, `mars keyd`) — **beta**, still being hardened:
+  your LLM key stays home and is
   served to remote boxes over the reverse-tunneled socket, so the agent works on a
   host that has no key on it. `mars ssh` auto-starts the home broker and drops a
   self-contained `install.sh` on the remote (rustup + `cargo install`, honest Windows
