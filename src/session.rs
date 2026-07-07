@@ -281,12 +281,17 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
     let mut term: Option<Terminal<CrosstermBackend<FrameWriter>>> = None;
 
     loop {
-        if let Some(t) = term.as_mut() {
-            if let Err(e) = t.draw(|f| ui::render(f, &mut app)) {
-                debug_log(&format!("srv: draw error: {e}"));
+        app.tick();
+        // Draw only when visible state moved — the frames go to the client over
+        // the socket (and thus over SSH), so an idle no-op draw is a wasted packet
+        // that contends with the user's own keystrokes.
+        if std::mem::take(&mut app.needs_redraw) {
+            if let Some(t) = term.as_mut() {
+                if let Err(e) = t.draw(|f| ui::render(f, &mut app)) {
+                    debug_log(&format!("srv: draw error: {e}"));
+                }
             }
         }
-        app.tick();
 
         match rx.recv_timeout(Duration::from_millis(app.tuning.poll_interval_ms)) {
             Ok(SrvEvent::Attach { stream, cols, rows, gen }) => {
@@ -296,6 +301,7 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                 client = Some((stream.try_clone()?, gen));
                 term = Some(make_terminal(stream, cols, rows)?);
                 attached.store(true, Ordering::SeqCst);
+                app.needs_redraw = true; // fresh client → full repaint
                 app.on_attach(); // W7: "where was I?" briefing from the detach diff
                 if let Some(t) = term.as_mut() {
                     if let Err(e) = t.clear() {
@@ -309,10 +315,12 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                     if let Some(t) = term.as_mut() {
                         let _ = t.clear();
                     }
+                    app.needs_redraw = true;
                 }
             }
             Ok(SrvEvent::Input(ev)) => {
                 let _ = app.apply_input(ev);
+                app.needs_redraw = true; // input → repaint
             }
             Ok(SrvEvent::ClientGone(gen)) => {
                 if client.as_ref().map(|(_, g)| *g == gen).unwrap_or(false) {

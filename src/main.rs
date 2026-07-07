@@ -346,6 +346,24 @@ fn selfcheck() -> Result<()> {
     assert!(app.mode == mode::Mode::Edit, "typing changed mode");
     println!("[selfcheck] non-modal insert ........... PASS");
 
+    // 2b. Idle-render gating (the SSH no-op-flush fix): after a draw, an idle
+    //     tick must NOT request a redraw; a background agent event and an active
+    //     spinner MUST. Zero idle flushes = a quiet link.
+    {
+        let mut app = App::new(None)?;
+        app.needs_redraw = false; // pretend we just drew
+        app.tick();
+        assert!(!app.needs_redraw, "idle tick asked for a redraw (would flush over SSH every tick)");
+        app.agent_tx.send(agent::AgentEvent::BgDone)?; // a background event landed
+        app.tick();
+        assert!(app.needs_redraw, "an agent event did not request a redraw");
+        app.needs_redraw = false;
+        app.agent_pending = true; // spinner animates → redraw each tick
+        app.tick();
+        assert!(app.needs_redraw, "the thinking spinner did not request a redraw");
+    }
+    println!("[selfcheck] idle render gating ........ PASS");
+
     // 3. Kill-ring round-trip: C-k kills the line, C-y yanks it back.
     app.handle_key(k(KeyCode::Enter))?;
     typ(&mut app, "KILLME")?;

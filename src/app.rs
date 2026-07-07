@@ -262,6 +262,11 @@ pub struct App {
     /// Whether the one undo checkpoint for this replace has been taken.
     replace_checkpointed: bool,
     pub frame_tick: u64,
+    /// Render only when something visible changed. Set on input and by `tick()`
+    /// when it moves visible state (terminal output, agent events, the spinner,
+    /// a pending which-key panel). Keeps an idle screen from flushing 60×/s —
+    /// invisible locally, but pure noise (and input contention) over SSH.
+    pub needs_redraw: bool,
     // ── Terminal panes ──
     pub terms: HashMap<TermId, Term>,
     pub term_tx: mpsc::Sender<TermEvent>,
@@ -347,6 +352,7 @@ impl App {
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
             session_name_attempted: false,
+            needs_redraw: true, // draw the first frame
             edit_run: EditRun::None,
             replace_from: String::new(),
             replace_to: String::new(),
@@ -3459,6 +3465,7 @@ impl App {
         // the watch clock (W6: output resets quiet, exit queues a verdict).
         let now = self.frame_tick;
         while let Ok(ev) = self.term_rx.try_recv() {
+            self.needs_redraw = true; // terminal content moved → repaint
             match ev {
                 TermEvent::Output(id) => {
                     if let Some(w) = self.watches.get_mut(&id) {
@@ -3499,6 +3506,9 @@ impl App {
         let mut events = Vec::new();
         while let Ok(ev) = self.agent_rx.try_recv() {
             events.push(ev);
+        }
+        if !events.is_empty() {
+            self.needs_redraw = true; // an answer / verdict / rename landed
         }
         for ev in events {
             match ev {
@@ -3599,6 +3609,14 @@ impl App {
         self.maybe_auto_name();
         self.maybe_auto_name_session();
         self.maybe_fire_watches();
+
+        // Timer-driven surfaces that animate without input: the agent spinner
+        // (every frame while thinking) and the which-key panel (appears a few
+        // ticks after a prefix is held). Redraw while either is live; otherwise
+        // an idle screen stays quiet — no draw, no flush, silent link.
+        if self.agent_pending || !self.pending_prefix.is_empty() {
+            self.needs_redraw = true;
+        }
     }
 
     /// Append an event to the bounded away-log ring (the Away Digest source).
@@ -3925,8 +3943,13 @@ impl App {
         events: &mpsc::Receiver<InputEvent>,
     ) -> Result<()> {
         loop {
-            terminal.draw(|f| ui::render(f, self))?;
             self.tick();
+            // Only redraw (and flush) when something visible changed — an idle
+            // screen must not stream no-op frames, especially over SSH.
+            if self.needs_redraw {
+                terminal.draw(|f| ui::render(f, self))?;
+                self.needs_redraw = false;
+            }
 
             match events.recv_timeout(Duration::from_millis(self.tuning.poll_interval_ms)) {
                 Ok(first) => {
@@ -3935,6 +3958,7 @@ impl App {
                     while let Ok(ev) = events.try_recv() {
                         self.apply_input(ev)?;
                     }
+                    self.needs_redraw = true; // input → repaint
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break, // input source gone
