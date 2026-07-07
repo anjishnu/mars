@@ -359,6 +359,32 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     fleet_record(&host, None); // remember this host for `mars ls`
     let remote_sock = remote_socket_path();
     let control = home_sock.with_file_name("cm-%r@%h:%p");
+    // A ControlMaster killed uncleanly (pkill, crash) leaves its socket file
+    // behind; ssh then warns "ControlSocket … already exists, disabling
+    // multiplexing" and drops connection-sharing. Sweep dead ones first:
+    // `ssh -O check` answers from the socket alone, so a dummy destination works.
+    if let Some(dir) = control.parent() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.starts_with("cm-") {
+                    continue;
+                }
+                let alive = std::process::Command::new("ssh")
+                    .arg("-O").arg("check")
+                    .arg("-o").arg(format!("ControlPath={}", e.path().display()))
+                    .arg("stale-check")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !alive {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
 
     // Drop the embedded installer at ~/.mars/install.sh over the SAME connection,
     // BEFORE the interactive session: this first ssh performs the (single)
