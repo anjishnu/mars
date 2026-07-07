@@ -66,10 +66,11 @@ AGENT
                                   or MARS_LLM_KEY + MARS_LLM_URL)
 
 REMOTE  (the agent works on every box — the key never leaves home)
-  mars keyd                      run once on your machine: holds the key,
-                                 serves it over a forwarded socket
-  mars ssh <host> [ssh args]     ssh in with the auth socket forwarded;
-                                 the remote agent asks home, no key on the box
+  mars ssh <host> [ssh args]     ssh in with the auth socket forwarded; the
+                                 remote agent asks home, no key on the box.
+                                 Auto-starts the key broker if it isn't running.
+  mars keyd                      (optional) start the broker explicitly, in a
+                                 shell where your API key is set
 
 INSIDE THE EDITOR
   Ctrl+Space   search every command        !   run a shell command

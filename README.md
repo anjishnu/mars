@@ -144,10 +144,13 @@ SSH into — without the key ever landing on a remote box (not in its env, not i
 shell history, not on its disk).
 
 ```bash
-mars keyd                 # once, at home: holds the key, serves it over a socket
-mars ssh gpubox           # ssh in — the auth socket is forwarded automatically
+mars ssh gpubox           # ssh in — forwards the auth socket AND auto-starts the
+                          # key broker if needed (inheriting this shell's API key).
                           # `mars` on gpubox → the agent just works. No key on the box.
 ```
+
+(The broker — `mars keyd` — starts on demand the first time you `mars ssh`; run it
+explicitly only if you want it in a specific shell.)
 
 The remote never makes the LLM call itself — it proxies the request home through the
 SSH tunnel, and the completion comes back. Compromise the box and there's nothing to

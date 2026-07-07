@@ -281,17 +281,76 @@ pub fn resolve_target(hosts: &[String], input: &str) -> Option<String> {
     }
 }
 
+/// Make sure the home broker is running, auto-starting it (detached) if not —
+/// so `mars ssh` is one command, not two. The spawned `mars keyd` inherits THIS
+/// shell's env, which is exactly where the API key lives. Best-effort: ssh
+/// proceeds either way (a keyless box just won't have an agent).
+fn ensure_keyd(home_sock: &std::path::Path) -> bool {
+    if UnixStream::connect(home_sock).is_ok() {
+        return true; // already up
+    }
+    // Starting the broker needs a key in this environment.
+    if !AgentConfig::from_env().is_configured() {
+        eprintln!(
+            "mars ssh: no API key in this shell, so the remote agent won't have one.\n  \
+             set GROQ_API_KEY / GEMINI_API_KEY here (then it auto-starts), or run `mars keyd` \
+             where your key lives."
+        );
+        return false;
+    }
+    let _ = std::fs::remove_file(home_sock); // clear a stale socket
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("keyd");
+    cmd.env_remove("MARS_AUTH_SOCK"); // the broker must never run in proxy mode
+    // Log to ~/.mars/keyd.log; never spill the daemon's output onto this TTY.
+    let log = home_sock.with_file_name("keyd.log");
+    match std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        Ok(f) => {
+            let f2 = f.try_clone().ok();
+            cmd.stdout(f);
+            match f2 {
+                Some(f2) => { cmd.stderr(f2); }
+                None => { cmd.stderr(std::process::Stdio::null()); }
+            }
+        }
+        Err(_) => {
+            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        }
+    }
+    cmd.stdin(std::process::Stdio::null());
+    // Detach from this TTY so the broker outlives the ssh session (like ssh-agent).
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if cmd.spawn().is_err() {
+        return false;
+    }
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(50));
+        if UnixStream::connect(home_sock).is_ok() {
+            eprintln!("mars ssh: started the home broker (mars keyd) automatically.");
+            return true;
+        }
+    }
+    eprintln!("mars ssh: could not start the home broker (see ~/.mars/keyd.log).");
+    false
+}
+
 /// `mars ssh <host> [ssh args…]` — wraps system ssh so the auth socket is
 /// forwarded and `MARS_AUTH_SOCK` is set in the remote shell, with no reliance
 /// on server-side `AcceptEnv`.
 pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     let home_sock = broker_socket_path()?;
-    if UnixStream::connect(&home_sock).is_err() {
-        eprintln!(
-            "mars ssh: note — the home broker isn't running, so the remote agent won't have a key.\n  \
-             start it first (in another terminal):  mars keyd"
-        );
-    }
+    ensure_keyd(&home_sock); // auto-start the broker if it isn't already up
+
     fleet_record(&host, None); // remember this host for `mars ls`
     let remote_sock = remote_socket_path();
     let control = home_sock.with_file_name("cm-%r@%h:%p");
