@@ -729,6 +729,28 @@ fn selfcheck() -> Result<()> {
     assert!(sh.screen().contents().contains("ares_pty_ok"), "terminal echo not found");
     println!("[selfcheck] terminal PTY echo .......... PASS");
 
+    // 15a. Terminal mouse-copy: the selection extractor pulls the selected cells
+    //      as text (the core of drag-to-copy in a terminal pane).
+    {
+        sh.send_bytes(b"printf 'COPYME123\\n'\n");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        while rx.try_recv().is_ok() {}
+        let screen = sh.screen();
+        let (rows, cols) = screen.size();
+        let mut out_row = None;
+        for r in 0..rows {
+            let mut line = String::new();
+            for c in 0..cols {
+                line.push_str(&screen.cell(r, c).map(|x| x.contents()).unwrap_or_default());
+            }
+            if line.trim() == "COPYME123" { out_row = Some(r); break; }
+        }
+        let r = out_row.expect("printf output row not found on screen");
+        let text = app::selection_text_from_screen(&screen, (r, 0), (r, 8), cols - 1);
+        assert_eq!(text, "COPYME123", "terminal selection extraction wrong: {text:?}");
+    }
+    println!("[selfcheck] terminal mouse-copy ....... PASS");
+
     // 15b. Scrollback: history survives past the viewport and the view can
     //      scroll back through it, then snap to live.
     sh.send_bytes(b"seq 1 100\n");

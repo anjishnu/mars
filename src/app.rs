@@ -102,6 +102,48 @@ pub struct WatchState {
 #[derive(Clone, Copy)]
 pub enum WatchReason { Exit, Quiet }
 
+/// Pull the selected cells from a terminal screen as text — reading order,
+/// trailing spaces trimmed per row (linear/text-flow, like a normal terminal
+/// copy). `a`/`b` are normalized (a ≤ b) screen cells; `last_col` bounds
+/// intermediate full rows. Free function so it's unit-testable off a real screen.
+pub(crate) fn selection_text_from_screen(
+    screen: &vt100::Screen,
+    a: (u16, u16),
+    b: (u16, u16),
+    last_col: u16,
+) -> String {
+    let mut out = String::new();
+    for row in a.0..=b.0 {
+        let c0 = if row == a.0 { a.1 } else { 0 };
+        let c1 = if row == b.0 { b.1 } else { last_col };
+        let mut line = String::new();
+        for col in c0..=c1 {
+            let ch = screen.cell(row, col).map(|c| c.contents()).unwrap_or_default();
+            line.push_str(if ch.is_empty() { " " } else { &ch });
+        }
+        out.push_str(line.trim_end());
+        if row < b.0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// A live mouse drag-selection inside a terminal pane. Cells are in the pane's
+/// visible screen coordinates (row, col); `ox`/`oy` map a screen cell to the
+/// absolute terminal position, `vw`/`vh` bound it. Copied to the clipboard on
+/// release; highlighted while dragging.
+#[derive(Clone, Copy)]
+pub struct TermSel {
+    pub tid: TermId,
+    pub ox: u16,
+    pub oy: u16,
+    pub vw: u16,
+    pub vh: u16,
+    pub anchor: (u16, u16),
+    pub end: (u16, u16),
+}
+
 /// Coalesces consecutive edits into one undo step: a run of typed characters is
 /// one undo, a run of backspaces another; any motion or command breaks the run so
 /// the next keystroke starts a fresh checkpoint.
@@ -261,6 +303,8 @@ pub struct App {
     replace_idx: Option<usize>,
     /// Whether the one undo checkpoint for this replace has been taken.
     replace_checkpointed: bool,
+    /// Live terminal mouse drag-selection (copied on release).
+    pub term_sel: Option<TermSel>,
     pub frame_tick: u64,
     /// Render only when something visible changed. Set on input and by `tick()`
     /// when it moves visible state (terminal output, agent events, the spinner,
@@ -352,6 +396,7 @@ impl App {
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
             session_name_attempted: false,
+            term_sel: None,
             needs_redraw: true, // draw the first frame
             edit_run: EditRun::None,
             replace_from: String::new(),
@@ -4004,7 +4049,23 @@ impl App {
                 let (pane_id, rect) = match hit { Some(h) => h, None => return };
                 self.tab_mut().focused_pane = pane_id;
                 match self.panes.get(&pane_id).map(|p| p.content.clone()) {
-                    Some(PaneContent::Terminal(_)) => self.mode = Mode::Terminal,
+                    Some(PaneContent::Terminal(tid)) => {
+                        self.mode = Mode::Terminal;
+                        // Begin a drag-selection at the clicked cell (screen coords).
+                        let (rows, cols) = self
+                            .terms
+                            .get(&tid)
+                            .map(|t| t.screen().size())
+                            .unwrap_or((0, 0));
+                        let vh = rows.min(rect.height.saturating_sub(2));
+                        let vw = cols.min(rect.width.saturating_sub(2));
+                        let (ox, oy) = (rect.x + 1, rect.y + 1);
+                        let cell = (
+                            m.row.saturating_sub(oy).min(vh.saturating_sub(1)),
+                            m.column.saturating_sub(ox).min(vw.saturating_sub(1)),
+                        );
+                        self.term_sel = Some(TermSel { tid, ox, oy, vw, vh, anchor: cell, end: cell });
+                    }
                     Some(PaneContent::Editor(buf_id)) => {
                         self.mode = Mode::Edit;
                         // Inner area = rect minus 1-cell border; text starts
@@ -4055,8 +4116,40 @@ impl App {
                     _ => {}
                 }
             }
+            // Extend an in-progress terminal selection.
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(sel) = self.term_sel.as_mut() {
+                    sel.end = (
+                        m.row.saturating_sub(sel.oy).min(sel.vh.saturating_sub(1)),
+                        m.column.saturating_sub(sel.ox).min(sel.vw.saturating_sub(1)),
+                    );
+                }
+            }
+            // Release: copy the selected terminal text to the clipboard.
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = self.term_sel.take() {
+                    let text = self.term_selection_text(&sel);
+                    if !text.is_empty() {
+                        if let Some(cb) = self.clipboard.as_mut() {
+                            let _ = cb.set_text(text.clone());
+                        }
+                        self.kill_ring.push(text.clone());
+                        self.status_msg = Some(format!("Copied {} chars", text.chars().count()));
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Extract the text under a terminal drag-selection.
+    fn term_selection_text(&self, sel: &TermSel) -> String {
+        let Some(t) = self.terms.get(&sel.tid) else { return String::new() };
+        let (mut a, mut b) = (sel.anchor, sel.end);
+        if b < a {
+            std::mem::swap(&mut a, &mut b);
+        }
+        selection_text_from_screen(&t.screen(), a, b, sel.vw.saturating_sub(1))
     }
 
     // ── Persisted state (frecency + nudge counters) ──────────────────────────

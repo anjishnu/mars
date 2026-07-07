@@ -673,6 +673,15 @@ fn render_terminal_pane(
     let vh = inner.height.min(rows);
     let vw = inner.width.min(cols);
 
+    // A live mouse selection in THIS terminal → highlight its cells.
+    let sel = app.term_sel.filter(|s| s.tid == term_id).map(|s| {
+        let (mut a, mut b) = (s.anchor, s.end);
+        if b < a { std::mem::swap(&mut a, &mut b); }
+        (a, b, s.vw.saturating_sub(1))
+    });
+    let [sr, sg, sb] = app.tuning.selection_bg;
+    let sel_bg = Color::Rgb(sr, sg, sb);
+
     let mut lines: Vec<Line> = Vec::with_capacity(vh as usize);
     for row in 0..vh {
         let mut spans: Vec<Span> = Vec::with_capacity(vw as usize);
@@ -687,6 +696,13 @@ fn render_terminal_pane(
                 if cell.italic()    { style = style.add_modifier(Modifier::ITALIC); }
                 if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
                 if cell.inverse()   { style = style.add_modifier(Modifier::REVERSED); }
+                if let Some((a, b, last)) = sel {
+                    let c0 = if row == a.0 { a.1 } else { 0 };
+                    let c1 = if row == b.0 { b.1 } else { last };
+                    if row >= a.0 && row <= b.0 && col >= c0 && col <= c1 {
+                        style = style.bg(sel_bg);
+                    }
+                }
                 spans.push(Span::styled(ch, style));
             } else {
                 spans.push(Span::raw(" "));

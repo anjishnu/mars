@@ -61,6 +61,23 @@
 - LESSON: if `cargo build` shows no "Compiling mars-terminal" line after an edit, or a brand-new
   selfcheck line doesn't appear in output, suspect the fingerprint cache — check
   `stat -f "%Sm" target/debug/mars` against wall clock before trusting a PASS.
+- RELIABLE FIX: `cargo clean -p mars-terminal && cargo build` (faster than full `cargo clean`;
+  `touch src/main.rs` alone does NOT bust it). Recurred 2026-07 during the render-loop work.
+
+## Render only when changed + terminal mouse-copy (2026-07, shipped 43150bc + next)
+- SSH lag root cause: both render loops (`App::run`, `session::server_main`) drew+flushed EVERY
+  tick (~61/s at poll=16) even idle → 61 no-op packets/s over SSH. Fix: `pub needs_redraw: bool`
+  on App (init true); tick() sets it on term_rx events, agent_rx events, agent_pending (spinner),
+  or non-empty pending_prefix (which-key). Loops reordered tick→draw-if-needs_redraw→recv; input
+  arms set it. server_main uses `std::mem::take(&mut app.needs_redraw)`. Idle = zero flushes.
+  Users should revert any poll_interval_ms mitigation back to 16 (now cheap).
+- Terminal mouse-copy: `pub term_sel: Option<TermSel{tid,ox,oy,vw,vh,anchor,end}>`. handle_mouse:
+  Down(Left) on a terminal pane starts a selection at the clicked screen cell; Drag extends end;
+  Up copies via `selection_text_from_screen(&screen,a,b,last_col)` (pub(crate) free fn, linear
+  text-flow, trailing-space-trimmed) → clipboard + kill_ring + "Copied N chars". ui.rs
+  render_terminal_pane highlights selected cells (selection_bg). Wheel-scroll + Cmd+V paste
+  ALREADY worked (ScrollUp/Down→scroll_view; paste_text→send_bytes w/ bracketed re-wrap).
+  Selfcheck extracts a printf'd row via the free fn. Real drag = real-terminal-only per AGENTS.md.
 
 ## Away Digest (2026-07, shipped a1062f8)
 - away_log: bounded (200) Vec<AwayEvent{tick, pane, kind: NeedsYou|Done|Context, text, dur_ticks}>
