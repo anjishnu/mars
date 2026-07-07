@@ -42,7 +42,7 @@ Inside the editor, four keys carry you everywhere:
 | `Ctrl+Space` | search every command (type to filter, Enter to run) — works in terminal panes too |
 | `!` (in the bar) | run a shell command in a terminal pane |
 | `?` (in the bar) | ask the built-in agent anything ("how do I split the screen?") |
-| `C-t` | travel mode: tabs, panes, splits — with an on-screen cheat panel |
+| `C-t` | space warp: tabs, panes, splits — with an on-screen cheat panel |
 
 `C-g` cancels anything. Every menu row shows its real keybinding, so the fast path
 teaches itself as you go.
@@ -221,7 +221,7 @@ Mars speaks three dialects at once — whichever your fingers know:
 - **Modern/Mac**: `C-c`/`C-v` copy/paste (system clipboard) · Shift+arrows select ·
   typing replaces selection · `Tab`/`Shift-Tab` indent/dedent a selected block ·
   mouse click/scroll/wheel · `⌘C/⌘V` on kitty-class terminals
-- **tmux/zellij**: `C-t` travel hub · `M-{`/`M-}` or `C-PgUp/PgDn` switch tabs ·
+- **tmux/zellij**: `C-t` space warp · `M-{`/`M-}` or `C-PgUp/PgDn` switch tabs ·
   `M-1..9` jump to tab · `C-o`/`Ctrl+arrows` move between panes · `C-|`/`C--` splits ·
   scrollback with the wheel or `Shift+PgUp/PgDn`
 

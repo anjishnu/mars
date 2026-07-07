@@ -97,7 +97,7 @@ impl Action {
             Action::MoveTabLeft        => "move tab left",
             Action::MoveTabRight       => "move tab right",
             Action::RenameTab          => "rename tab",
-            Action::TabMode            => "tab mode",
+            Action::TabMode            => "space warp (tabs/panes)",
             Action::Save               => "save",
             Action::ToggleFileTree     => "find file (file tree)",
             Action::RefreshIndex       => "refresh file index",
@@ -228,7 +228,7 @@ fn tab_menu() -> Vec<MenuItem> {
     vec![
         MenuItem::run_desc("New tab",        Action::NewTab,       "Open a new tab with a scratch buffer"),
         MenuItem::run_desc("Close tab",      Action::CloseTab,     "Close the current tab"),
-        MenuItem::run_desc("Rename tab",     Action::RenameTab,    "Name this tab (also r in C-t travel mode)"),
+        MenuItem::run_desc("Rename tab",     Action::RenameTab,    "Name this tab (also r in C-t space warp)"),
         MenuItem::run_desc("Next tab",       Action::NextTab,      "Switch to the next tab (also M-1..9)"),
         MenuItem::run_desc("Prev tab",       Action::PrevTab,      "Switch to the previous tab"),
         MenuItem::run_desc("Move tab right", Action::MoveTabRight, "Reorder: move this tab right"),

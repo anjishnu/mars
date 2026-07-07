@@ -162,7 +162,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .title(Span::styled(
-            " C-t · travel ",
+            " C-t · space warp ",
             Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::TOP | Borders::LEFT)
@@ -596,7 +596,7 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     // centering made these look ragged; a single left pad keeps the columns true.
     let cmds: &[(&str, &str)] = &[
         ("C-Space", "command bar — search actions · ! shell · ? ask the agent"),
-        ("C-t",     "travel mode — tabs, panes, splits, open terminal"),
+        ("C-t",     "space warp — tabs, panes, splits, open terminal"),
         ("C-u",     "time-travel — scrub back through undo history"),
         ("C-x C-d", "detach — work keeps running while you're gone"),
         ("C-g",     "cancel anything"),

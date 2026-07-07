@@ -22,7 +22,7 @@ impl Mode {
             Mode::Edit     => "EDIT",
             Mode::Bar      => "BAR",
             Mode::Prompt   => "MINI",
-            Mode::Tab      => "C-t",
+            Mode::Tab      => "WARP",
             Mode::Terminal => "TERM",
             Mode::Tree     => "TREE",
             Mode::Undo     => "TIME",

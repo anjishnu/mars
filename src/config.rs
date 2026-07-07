@@ -193,8 +193,9 @@ impl RawBindings {
             ("M-`",     Action::OpenTerminal),
             ("C-x C-t", Action::OpenTerminal),
             // session
-            ("C-x C-d", Action::Detach), // detach (also: C-t D travel mode)
+            ("C-x C-d", Action::Detach), // detach (also: C-t D in space warp)
             ("C-x g",   Action::AwayDigest), // what happened while I was gone
+            ("C-x w",   Action::WatchPane), // watch this pane (also: C-t w)
             // edit / kill-ring
             ("C-k",     Action::KillLine),
             ("C-w",     Action::KillRegion),
