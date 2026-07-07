@@ -1,6 +1,10 @@
 #!/bin/sh
-# Foolproof Mars installer — safe to run over SSH, safe to pipe from curl:
-#   curl -fsSL https://raw.githubusercontent.com/anjishnu/mars/main/install.sh | sh
+# Foolproof Mars installer — run it directly (`sh install.sh`) or scp it to a host.
+# (Once this repo is public on GitHub, the curl|sh form of its raw URL works too.)
+#
+# It automates the official steps (rust-lang.org/tools/install + crates.io):
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+#   cargo install mars-terminal
 #
 # Handles the #1 remote-host trap: a distro `cargo` (e.g. Ubuntu's 1.75) is far too
 # old for Mars's dependency tree, which needs Rust >= 1.85 (edition2024). This script

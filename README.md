@@ -153,16 +153,20 @@ mars ssh gpubox           # ssh in — forwards the auth socket AND auto-starts 
 explicitly only if you want it in a specific shell.)
 
 **Installing mars on a fresh host.** Mars needs a modern Rust toolchain (≥ 1.85) — a
-distro-packaged `cargo` (e.g. Ubuntu's) is usually too old and will fail with an
-`edition2024` error. Don't `apt install cargo`; use the installer, which sets up
-rustup for you and then builds mars:
+distro-packaged `cargo` (e.g. Ubuntu's 1.75) is too old and fails with a cryptic
+`edition2024` error. Don't `apt install cargo`; install rustup (the official way,
+from [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)), then
+install mars from crates.io:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anjishnu/mars/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain
+. "$HOME/.cargo/env"
+cargo install mars-terminal                                       # the `mars` binary
 ```
 
-(Or, if you already have rustup: `cargo install mars-terminal`.) Your API key never
-lands on the box — it's served from home over the tunnel.
+(`install.sh` in this repo automates exactly those steps, including detecting a
+too-old distro cargo.) Your API key never lands on the box — it's served from home
+over the tunnel.
 
 The remote never makes the LLM call itself — it proxies the request home through the
 SSH tunnel, and the completion comes back. Compromise the box and there's nothing to

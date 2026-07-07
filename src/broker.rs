@@ -356,12 +356,13 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     let control = home_sock.with_file_name("cm-%r@%h:%p");
     // Set the env via the remote command (not SetEnv); nudge an install if mars is
     // missing (never a dead end); then hand over to a login shell.
-    // If mars is missing, point at the installer that handles the toolchain (a
-    // distro `cargo` is usually too old — needs Rust >= 1.85). One line, no sudo.
+    // If mars is missing, print the real install steps. A distro `cargo` (e.g.
+    // Ubuntu's 1.75) is too old — needs Rust >= 1.85, so rustup first (official
+    // one-liner from rust-lang.org/tools/install), then cargo install.
     let remote_cmd = format!(
-        "command -v mars >/dev/null 2>&1 || \
-         printf '[mars] not installed here. Install (handles the Rust toolchain):\\n  \
-         curl -fsSL https://raw.githubusercontent.com/anjishnu/mars/main/install.sh | sh\\n'; \
+        "command -v mars >/dev/null 2>&1 || printf '[mars] not installed here. Install:\\n  \
+         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
+         . \"$HOME/.cargo/env\" && cargo install mars-terminal\\n'; \
          MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
     );
     let status = std::process::Command::new("ssh")
