@@ -1,4 +1,4 @@
-/// The action palette behind the command bar: a fuzzy-searchable dropdown
+/// The action palette behind mission control (the command bar): a fuzzy-searchable dropdown
 /// that is the single "how do I do X?" entry point. Opened by Ctrl+Space / M-x.
 
 use std::collections::HashMap;
@@ -99,7 +99,7 @@ impl Action {
             Action::RenameTab          => "rename tab",
             Action::TabMode            => "space warp (tabs/panes)",
             Action::Save               => "save",
-            Action::ToggleFileTree     => "find file (file tree)",
+            Action::ToggleFileTree     => "navigator (browse & jump to files)",
             Action::RefreshIndex       => "refresh file index",
             Action::RestoreKeybindings => "restore default keybindings",
             Action::KillBuffer         => "kill buffer",
@@ -179,7 +179,7 @@ impl MenuItem {
 fn root_menu() -> Vec<MenuItem> {
     vec![
         MenuItem::run_desc("Save",          Action::Save,           "Save the current buffer"),
-        MenuItem::run_desc("Find file…",    Action::ToggleFileTree, "Browse/filter project files in the left sidebar (also @)"),
+        MenuItem::run_desc("Navigator — browse & jump to files", Action::ToggleFileTree, "Open the file sidebar; type to filter, Enter to jump (also @)"),
         MenuItem::run_desc("Search",        Action::Search,       "Incremental search in this buffer"),
         MenuItem::run_desc("Search & replace…", Action::QueryReplace, "Find and replace, stepping y/n through each match"),
         MenuItem::run_desc("Undo",          Action::Undo,         "Undo the last edit"),

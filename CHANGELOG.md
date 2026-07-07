@@ -28,6 +28,10 @@ composer, reattach briefings, and a top-to-bottom ergonomics pass.
   exits, even while you're detached.
 - Nested `mars <file>` inside a session opens a new tab instead of a nested Mars.
 - **Space warp** (`C-t`): renamed travel mode, with a `T` verb to open a terminal tab.
+- **Mission control** — the command bar (`Ctrl+Space` / `M-x`) is now named mission
+  control on every teaching surface (start screen, help, menus).
+- **Navigator** — the file sidebar (`C-x C-f`, or `@` in mission control) is renamed Navigator
+  and now surfaced on the start screen and as a searchable menu row with its shortcut.
 
 ### Changed / fixed (ergonomics)
 - **No orphaned shells**: closing a pane/tab now reaps its PTY (kills the child) and a

@@ -595,7 +595,8 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     // column, descriptions left-aligned), the whole block centered. Per-line
     // centering made these look ragged; a single left pad keeps the columns true.
     let cmds: &[(&str, &str)] = &[
-        ("C-Space", "command bar — search actions · ! shell · ? ask the agent"),
+        ("C-Space", "mission control — search actions · ! shell · ? ask the agent"),
+        ("C-x C-f", "navigator — browse & jump to any project file"),
         ("C-t",     "space warp — tabs, panes, splits, open terminal"),
         ("C-u",     "time-travel — scrub back through undo history"),
         ("C-x C-d", "detach — work keeps running while you're gone"),
@@ -1122,9 +1123,9 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
         })
         .unwrap_or_default();
     let title = if filter.is_empty() {
-        format!(" {root_name}/ ")
+        format!(" Navigator · {root_name}/ ")
     } else {
-        format!(" ⌕ {filter} ")
+        format!(" Navigator · ⌕ {filter} ")
     };
     let block = Block::default()
         .borders(Borders::ALL)

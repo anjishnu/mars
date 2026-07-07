@@ -2,7 +2,7 @@
 pub enum Mode {
     /// Non-modal text editing: typing inserts, chords/prefixes run commands.
     Edit,
-    /// Command bar (Ctrl+Space / M-x) — fuzzy actions + Ask agent + `!` shell.
+    /// Mission control (Ctrl+Space / M-x) — fuzzy actions + Ask agent + `!` shell.
     Bar,
     /// Minibuffer prompt (find-file, switch-buffer, save-as, isearch, confirms).
     Prompt,
@@ -20,11 +20,11 @@ impl Mode {
     pub fn label(&self) -> &'static str {
         match self {
             Mode::Edit     => "EDIT",
-            Mode::Bar      => "BAR",
+            Mode::Bar      => "MC",   // mission control
             Mode::Prompt   => "MINI",
             Mode::Tab      => "WARP",
             Mode::Terminal => "TERM",
-            Mode::Tree     => "TREE",
+            Mode::Tree     => "NAV",
             Mode::Undo     => "TIME",
         }
     }

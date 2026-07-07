@@ -1,7 +1,7 @@
 # MARS
 
 *Mission control for your terminal* — a non-modal, Emacs-compatible terminal editor
-with a Claude-Code-style command bar, a built-in LLM agent, real terminal panes, and
+with a Claude-Code-style mission-control command bar, a built-in LLM agent, real terminal panes, and
 tmux/zellij-style persistent sessions. One tool, one set of keys.
 
 ```
@@ -39,9 +39,10 @@ Inside the editor, four keys carry you everywhere:
 
 | Key | What it does |
 |---|---|
-| `Ctrl+Space` | search every command (type to filter, Enter to run) — works in terminal panes too |
-| `!` (in the bar) | run a shell command in a terminal pane |
-| `?` (in the bar) | ask the built-in agent anything ("how do I split the screen?") |
+| `Ctrl+Space` | **mission control** — search every command (type to filter, Enter to run); works in terminal panes too |
+| `!` (in mission control) | run a shell command in a terminal pane |
+| `?` (in mission control) | ask the built-in agent anything ("how do I split the screen?") |
+| `C-x C-f` | **Navigator** — browse & jump to any project file (type to fuzzy-filter) |
 | `C-t` | space warp: tabs, panes, splits — with an on-screen cheat panel |
 
 `C-g` cancels anything. Every menu row shows its real keybinding, so the fast path
@@ -137,7 +138,7 @@ export MARS_LLM_MODEL=qwen/qwen3-32b
 Reasoning models (Qwen3, DeepSeek-R1) work — their `<think>` blocks are stripped from
 answers automatically.
 
-Then `?` in the command bar, or from the shell:
+Then `?` in mission control, or from the shell:
 
 ```bash
 mars ask "how do I move a pane to the other side?"
@@ -211,7 +212,7 @@ What that unlocks:
 - **Shell translation.** In a terminal pane, `Ctrl+Space` then plain English
   ("find big files here") → the agent translates it to a shell command and shows it
   for you to confirm. Typed a real Mars command instead? It's recognized and run
-  directly. (`!` still forces shell, `?` asks, `@` opens the file tree.)
+  directly. (`!` still forces shell, `?` asks, `@` opens Navigator.)
 
 With an agent connected, tabs you haven't named get a quiet auto-generated label
 from their content (rename one yourself and it's yours forever; `auto_name_secs = 0`
@@ -221,14 +222,15 @@ turns it off).
 
 Mars speaks three dialects at once — whichever your fingers know:
 
-- **Browse files**: `Ctrl+Space` then `@` (or `C-x d`) opens a **file tree** on the left.
+- **Navigator (browse files)**: `C-x C-f` — or `Ctrl+Space` then `@` — opens **Navigator**, the
+  file sidebar on the left.
   Folders are bold + colored and collapsed — arrow to one and `Enter`/`→` expands it in
   place (`←` collapses); on a file, `→` previews it (reversible) and `Enter` opens it;
   `../` at the top steps up a directory. Start **typing** to fuzzy-filter the whole
   project to a shortlist; `Esc` closes.
 - **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `M-%` query-replace
   (`y`/`n` step, `!` all) · `C-k`/`C-y` kill/yank · `C-x 2`/`C-x 3`/`C-x o` windows ·
-  `M-x` command bar
+  `M-x` mission control
 - **Modern/Mac**: `C-c`/`C-v` copy/paste (system clipboard) · Shift+arrows select ·
   typing replaces selection · `Tab`/`Shift-Tab` indent/dedent a selected block ·
   mouse click/scroll/wheel · `⌘C/⌘V` on kitty-class terminals

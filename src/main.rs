@@ -73,9 +73,9 @@ REMOTE  (BETA — the agent works on every box; the key never leaves home)
                                  shell where your API key is set
 
 INSIDE THE EDITOR
-  Ctrl+Space   search every command        !   run a shell command
-  ?            ask the agent               C-t tabs / panes / splits
-  @ or C-x d   file tree (browse/filter)   C-x C-s save   C-g cancel anything
+  Ctrl+Space   mission control (search)    !   run a shell command
+  ?            ask the agent               C-t space warp (tabs/panes)
+  C-x C-f      Navigator (browse & jump)       C-x C-s save   C-g cancel anything
 
 MORE
   mars help                      this text          (aliases: -h, --help)
