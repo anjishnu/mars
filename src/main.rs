@@ -1806,6 +1806,76 @@ fn selfcheck() -> Result<()> {
     assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
     println!("[selfcheck] embedded installer ........ PASS");
 
+    // 33. Closing a tab with a live terminal confirms, then reaps the PTY —
+    //     never orphans the shell (P0.1). Decline keeps everything; confirm
+    //     removes the tab AND drops the Term + its watch state.
+    let mut app = App::new(None)?;
+    app.new_tab(); // tab index 1 (active); open a live shell inside it
+    app.open_terminal();
+    let tid = match app.focused_pane().content {
+        pane::PaneContent::Terminal(id) => id,
+        _ => panic!("open_terminal did not attach a terminal"),
+    };
+    app.run_action(palette::Action::WatchPane); // give it watch state to reap too
+    assert!(app.terms.contains_key(&tid) && app.watches.contains_key(&tid), "terminal/watch not registered");
+    app.run_action(palette::Action::CloseTab);
+    assert!(app.mode == mode::Mode::Prompt, "close with a live terminal did not confirm");
+    assert!(app.terms.contains_key(&tid), "terminal reaped before confirmation");
+    app.handle_key(k(KeyCode::Char('n')))?; // decline
+    assert_eq!(app.tabs.len(), 2, "declined close still removed the tab");
+    assert!(app.terms.contains_key(&tid), "declined close still reaped the terminal");
+    app.run_action(palette::Action::CloseTab);
+    app.handle_key(k(KeyCode::Char('y')))?; // confirm
+    assert_eq!(app.tabs.len(), 1, "confirmed close did not remove the tab");
+    assert!(!app.terms.contains_key(&tid), "confirmed close ORPHANED the terminal (not reaped)");
+    assert!(!app.watches.contains_key(&tid), "watch state not cleaned on reap");
+    println!("[selfcheck] close gate reaps PTYs ..... PASS");
+
+    // 34. Space-warp d/q confirm even with NO live terminal — motor-slip guard
+    //     for destructive keys sitting next to navigation (P0.2).
+    let mut app = App::new(None)?;
+    app.new_tab(); // 2 plain editor tabs, no terminals
+    app.handle_key(kc(KeyCode::Char('t')))?; // C-t → warp
+    assert!(app.mode == mode::Mode::Tab, "C-t did not enter space warp");
+    app.handle_key(k(KeyCode::Char('d')))?; // close-tab verb
+    assert!(app.mode == mode::Mode::Prompt, "warp 'd' did not confirm (motor-slip guard)");
+    app.handle_key(k(KeyCode::Char('n')))?;
+    assert_eq!(app.tabs.len(), 2, "declined warp 'd' still closed the tab");
+    println!("[selfcheck] warp keys motor-slip gate . PASS");
+
+    // 35. C-g cancels the command bar from every submode (doctrine §3.4).
+    let mut app = App::new(None)?;
+    app.handle_key(kc(KeyCode::Char(' ')))?; // → Bar (Command)
+    assert!(app.mode == mode::Mode::Bar, "bar did not open");
+    app.handle_key(kc(KeyCode::Char('g')))?;
+    assert!(app.mode != mode::Mode::Bar && app.palette.is_none(), "C-g did not cancel Command bar");
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    app.handle_key(k(KeyCode::Char('!')))?; // → Shell submode
+    assert!(matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)), "! did not reach shell");
+    app.handle_key(kc(KeyCode::Char('g')))?;
+    assert!(app.palette.is_none(), "C-g did not cancel shell submode");
+    println!("[selfcheck] C-g cancels the bar ....... PASS");
+
+    // 36. A plain click (anchor == end) must not copy — no clipboard clobber (P1.4).
+    {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = App::new(None)?;
+        app.open_terminal();
+        let tid = match app.focused_pane().content {
+            pane::PaneContent::Terminal(id) => id,
+            _ => panic!("no terminal"),
+        };
+        let before = app.kill_ring.len();
+        app.term_sel = Some(app::TermSel { tid, ox: 0, oy: 0, vw: 80, vh: 24, anchor: (2, 3), end: (2, 3) });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 3, row: 2, modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.kill_ring.len(), before, "plain click copied to the kill ring");
+        assert!(app.term_sel.is_none(), "term_sel not cleared on release");
+    }
+    println!("[selfcheck] click-no-drag no clobber .. PASS");
+
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())
 }

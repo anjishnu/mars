@@ -104,6 +104,14 @@ pub fn spawn(
     })
 }
 
+/// Removing a Term (closed pane/tab, app exit) must not orphan the shell: kill
+/// the child process tree with the pane, never leave it running invisibly.
+impl Drop for Term {
+    fn drop(&mut self) {
+        let _ = self._child.kill();
+    }
+}
+
 impl Term {
     pub fn send_bytes(&mut self, bytes: &[u8]) {
         let _ = self.writer.write_all(bytes);

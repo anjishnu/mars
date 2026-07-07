@@ -140,7 +140,14 @@ impl Action {
 
     /// Destructive actions the agent's `RUN:` directive must confirm first.
     pub fn is_destructive(&self) -> bool {
-        matches!(self, Action::Quit | Action::CloseTab | Action::KillBuffer | Action::ClosePane)
+        matches!(
+            self,
+            Action::Quit
+                | Action::CloseTab
+                | Action::KillBuffer
+                | Action::ClosePane
+                | Action::DeleteOtherWindows
+        )
     }
 }
 

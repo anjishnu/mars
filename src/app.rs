@@ -296,6 +296,14 @@ pub struct App {
     session_name_attempted: bool,
     /// Undo coalescing: the kind of edit run currently in progress.
     edit_run: EditRun,
+    /// One-shot bypass for the live-terminal close gate: set by the confirm
+    /// prompt's `y`, consumed by the close_* functions (so the confirmed action
+    /// doesn't re-prompt).
+    close_confirmed: bool,
+    /// One-shot "always confirm this close, even with no live terminal" — set by
+    /// space-warp's d/q/0 (destructive keys adjacent to navigation), consumed at
+    /// the top of every close_* fn so it never leaks to a later close.
+    force_close_confirm: bool,
     // ── Query-replace (M-%) ──
     replace_from: String,
     replace_to: String,
@@ -396,6 +404,8 @@ impl App {
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
             session_name_attempted: false,
+            close_confirmed: false,
+            force_close_confirm: false,
             term_sel: None,
             needs_redraw: true, // draw the first frame
             edit_run: EditRun::None,
@@ -1224,13 +1234,19 @@ impl App {
     }
 
     fn delete_other_windows(&mut self) {
+        let force = std::mem::take(&mut self.force_close_confirm);
         let focused = self.focused_pane_id();
-        for id in self.tab().layout.pane_ids() {
-            if id != focused {
-                self.panes.remove(&id);
-                // any terminal owned by that pane is dropped with it
-            }
+        let victims: Vec<PaneId> =
+            self.tab().layout.pane_ids().into_iter().filter(|id| *id != focused).collect();
+        if self.confirm_close(
+            self.live_terms_in(&victims),
+            force,
+            Action::DeleteOtherWindows,
+            "the other panes",
+        ) {
+            return;
         }
+        self.reap_panes(&victims);
         let tab = self.tab_mut();
         tab.layout = PaneLayout::Single(focused);
         tab.focused_pane = focused;
@@ -1504,16 +1520,63 @@ impl App {
         self.status_msg = Some("Split │".into());
     }
 
+    /// How many still-running shells live inside these panes.
+    fn live_terms_in(&self, pane_ids: &[PaneId]) -> usize {
+        pane_ids
+            .iter()
+            .filter_map(|pid| self.panes.get(pid))
+            .filter_map(|p| match p.content {
+                PaneContent::Terminal(tid) => self.terms.get(&tid),
+                _ => None,
+            })
+            .filter(|t| !t.exited)
+            .count()
+    }
+
+    /// Remove panes AND everything they own: their terminals (killing the shell
+    /// via Term::drop) and any watch state — never orphan a running PTY.
+    fn reap_panes(&mut self, pane_ids: &[PaneId]) {
+        for pid in pane_ids {
+            if let Some(p) = self.panes.remove(pid) {
+                if let PaneContent::Terminal(tid) = p.content {
+                    self.terms.remove(&tid);
+                    self.watches.remove(&tid);
+                }
+            }
+        }
+    }
+
+    /// Gate a close behind one y/n prompt. Fires when it would kill `live`
+    /// running shells (data-loss guard) OR when `force` is set (space-warp's
+    /// motor-slip guard). Returns true when the caller should stop and wait.
+    fn confirm_close(&mut self, live: usize, force: bool, action: Action, what: &str) -> bool {
+        if std::mem::take(&mut self.close_confirmed) || (live == 0 && !force) {
+            return false;
+        }
+        let msg = if live > 0 {
+            let plural = if live == 1 { "" } else { "s" };
+            format!("Close {what} — {live} running terminal{plural} will be killed. y/n ")
+        } else {
+            format!("Close {what}? y/n ")
+        };
+        self.start_prompt(PromptKind::ConfirmAction(action), &msg);
+        true
+    }
+
     pub fn close_pane(&mut self) {
+        let force = std::mem::take(&mut self.force_close_confirm);
         if self.tab().layout.count() <= 1 {
             return;
         }
         let focused = self.focused_pane_id();
+        if self.confirm_close(self.live_terms_in(&[focused]), force, Action::ClosePane, "this pane") {
+            return;
+        }
         let next = self.tab().layout.next_pane(focused);
         let tab = self.tab_mut();
         tab.layout.remove(focused);
         tab.focused_pane = next;
-        self.panes.remove(&focused);
+        self.reap_panes(&[focused]);
     }
 
     pub fn focus_next_pane(&mut self) {
@@ -1634,14 +1697,16 @@ impl App {
     }
 
     pub fn close_tab(&mut self) {
+        let force = std::mem::take(&mut self.force_close_confirm);
         if self.tabs.len() == 1 {
-            self.request_quit();
+            self.request_quit(); // quit has its own dirty-buffer gate
             return;
         }
         let pane_ids = self.tab().layout.pane_ids();
-        for pid in pane_ids {
-            self.panes.remove(&pid);
+        if self.confirm_close(self.live_terms_in(&pane_ids), force, Action::CloseTab, "this tab") {
+            return;
         }
+        self.reap_panes(&pane_ids);
         self.tabs.remove(self.active_tab);
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
@@ -2203,7 +2268,9 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 self.close_prompt();
+                self.close_confirmed = true; // the gated close_* runs once, un-re-prompted
                 self.run_action(action);
+                self.close_confirmed = false;
             }
             _ if ctrl || matches!(key.code, KeyCode::Esc | KeyCode::Char('n')) => {
                 self.close_prompt();
@@ -2299,7 +2366,13 @@ impl App {
                 self.new_tab();
                 self.mode = Mode::Edit; // creation exits — you'll want to type
             }
-            KeyCode::Char('d') => self.close_tab(),
+            // Destructive warp verbs sit beside navigation keys (d~h/l, 0~1-9) —
+            // a motor slip must cost a prompt, not a tab. force_close_confirm
+            // makes the close gate always fire here (even with no live terminal).
+            KeyCode::Char('d') => {
+                self.force_close_confirm = true;
+                self.close_tab();
+            }
             KeyCode::Char('T') => {
                 // Open a terminal in a NEW tab (non-destructive; creation exits).
                 self.new_tab();
@@ -2332,7 +2405,10 @@ impl App {
                 self.split_horizontal();
                 self.mode = Mode::Edit;
             }
-            KeyCode::Char('q') | KeyCode::Char('0') => self.close_pane(),
+            KeyCode::Char('q') | KeyCode::Char('0') => {
+                self.force_close_confirm = true; // motor-slip guard (0 ~ digit row)
+                self.close_pane();
+            }
             // ── Session ──
             KeyCode::Char('D') => {
                 self.run_action(Action::Detach);
@@ -2350,6 +2426,13 @@ impl App {
         let ctrl  = key.modifiers.contains(KeyModifiers::CONTROL);
         let none  = key.modifiers == KeyModifiers::NONE;
         let shift = key.modifiers == KeyModifiers::SHIFT;
+
+        // C-g cancels the bar from every submode — the one overlearned recovery
+        // chord (doctrine §3.4) must be reliable here, the most-used surface.
+        if ctrl && matches!(key.code, KeyCode::Char('g')) {
+            self.close_bar();
+            return;
+        }
 
         // Ctrl+Space inside a sub-mode (shell / file) → the full command bar.
         let chord = chord_of(&key);
@@ -4167,10 +4250,17 @@ impl App {
                     );
                 }
             }
-            // Release: copy the selected terminal text to the clipboard.
+            // Release: copy the selected terminal text to the clipboard — but
+            // only for a real drag. A plain click (anchor == end) is focus, not
+            // a selection; copying a 1-char "selection" would silently clobber
+            // the clipboard on every click.
             MouseEventKind::Up(MouseButton::Left) => {
                 if let Some(sel) = self.term_sel.take() {
-                    let text = self.term_selection_text(&sel);
+                    let text = if sel.anchor == sel.end {
+                        String::new()
+                    } else {
+                        self.term_selection_text(&sel)
+                    };
                     if !text.is_empty() {
                         if let Some(cb) = self.clipboard.as_mut() {
                             let _ = cb.set_text(text.clone());
