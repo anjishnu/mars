@@ -82,7 +82,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.palette.is_some() && matches!(app.mode, Mode::Bar) {
         match app.palette.as_ref().map(|p| p.bar_mode.clone()) {
             Some(BarMode::Ask)     => render_ask_panel(frame, app, pane_area, bar_area),
-            Some(BarMode::Command) => render_bar_dropdown(frame, app, pane_area, bar_area),
+            Some(BarMode::Command) => {
+                render_bar_dropdown(frame, app, pane_area, bar_area);
+                // In a terminal, the unified composer also shows the red inline
+                // overlay at the cursor (type-in-place) — best of both worlds.
+                if app.bar_return == Mode::Terminal {
+                    render_shell_overlay(frame, app, pane_area);
+                }
+            }
             // Shell: an inline composer anchored at the cursor (no eye-jump).
             Some(BarMode::Shell)   => render_shell_overlay(frame, app, pane_area),
             None => {}
@@ -112,6 +119,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         ("h l ← →", "switch tab"),
         ("1-9",     "jump to tab"),
         ("H L",     "move tab"),
+        ("T",       "open terminal (new tab)"),
         ("d",       "close tab"),
         ("",        ""),
         ("o / Tab", "next pane"),
@@ -238,9 +246,10 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
+            // Readable (not near-invisible DarkGray) so you can see inactive tab names.
             spans.push(Span::styled(
                 label,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(rgb(app.tuning.theme_accent_bright)),
             ));
         }
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
@@ -582,23 +591,37 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
         lines.push(Line::raw(""));
     }
 
-    let hint = |key: &str, what: &str| {
-        Line::from(vec![
-            Span::styled(
-                format!("{key}  "),
-                Style::default().fg(rgb(t.theme_accent_bright)).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(what.to_string(), Style::default().fg(Color::DarkGray)),
-        ])
-        .centered()
-    };
-    lines.push(hint("C-Spc", "search every command"));
-    lines.push(hint("!", "run a shell command  ·  ? ask the agent"));
-    lines.push(hint("C-t", "travel: tabs, panes, splits"));
+    // Key commands — rendered as one aligned block (keys right-justified into a
+    // column, descriptions left-aligned), the whole block centered. Per-line
+    // centering made these look ragged; a single left pad keeps the columns true.
+    let cmds: &[(&str, &str)] = &[
+        ("C-Space", "command bar — search actions · ! shell · ? ask the agent"),
+        ("C-t",     "travel mode — tabs, panes, splits, open terminal"),
+        ("C-u",     "time-travel — scrub back through undo history"),
+        ("C-x C-d", "detach — work keeps running while you're gone"),
+        ("C-g",     "cancel anything"),
+    ];
+    let keyw = cmds.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let block_w = cmds
+        .iter()
+        .map(|(_, d)| keyw + 3 + d.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let lpad = " ".repeat((inner.width.saturating_sub(block_w) / 2) as usize);
+    let key_style = Style::default().fg(rgb(t.theme_accent_bright)).add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(Color::Gray);
+    for (k, d) in cmds {
+        lines.push(Line::from(vec![
+            Span::raw(lpad.clone()),
+            Span::styled(format!("{k:>keyw$}"), key_style),
+            Span::raw("   "),
+            Span::styled(d.to_string(), desc_style),
+        ]));
+    }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "just start typing",
-        Style::default().fg(Color::DarkGray),
+        "or just start typing",
+        Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
     )).centered());
 
     // Vertically center the banner block.
@@ -1165,8 +1188,14 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
     let accent = rgb(app.tuning.theme_accent);
 
     // The input line begins EXACTLY where the cursor was (no label prefix), so
-    // it reads as typing in place. A tiny `!` chip sits just left of it.
-    let input = format!("! {query} ");
+    // it reads as typing in place. A tiny chip sits just left of it: `!` for the
+    // pure-shell mode, `›` for the unified composer (shell OR a picked command).
+    let shell_mode = app
+        .palette
+        .as_ref()
+        .map(|p| matches!(p.bar_mode, BarMode::Shell))
+        .unwrap_or(true);
+    let input = format!("{} {query} ", if shell_mode { "!" } else { "›" });
     let configured = crate::agent::AgentConfig::from_env().is_configured();
     let err = app.agent_answer.as_deref().filter(|a| a.starts_with('⚠'));
     let hint = if app.agent_pending {
@@ -1179,8 +1208,10 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
         format!(" {e} · Enter runs literally · Esc")
     } else if !configured {
         " Enter runs (set GEMINI_API_KEY to type English) · Esc".to_string()
+    } else if shell_mode {
+        " type English, Enter translates → command · Esc".to_string()
     } else {
-        " type English, Enter translates → command · Ctrl+Space = command bar".to_string()
+        " ↑↓ pick a command · Enter runs (or English → shell) · Esc".to_string()
     };
 
     let width = ((input.chars().count().max(hint.chars().count())) as u16)

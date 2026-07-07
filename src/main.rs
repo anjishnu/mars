@@ -1328,30 +1328,29 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Esc))?; // leave travel
     println!("[selfcheck] pane resize + zoom ........ PASS");
 
-    // 26k. Terminal Ctrl+Space → the inline shell composer directly (the `!`
-    //      behavior in one keystroke); a second Ctrl+Space reaches the command bar;
-    //      with no agent key, Enter runs the typed command → terminal.
+    // 26k. Terminal Ctrl+Space → the UNIFIED composer in one keystroke: Command
+    //      mode (↑/↓ command menu) with the red inline overlay; `!` forces pure
+    //      shell; with no agent key, Enter runs the typed command → terminal.
     let mut app = App::new(None)?;
     app.handle_key(kc(KeyCode::Char(' ')))?;
     app.handle_key(k(KeyCode::Char('!')))?; // open a terminal via bar `!`…
     typ(&mut app, "true")?;
     app.handle_key(k(KeyCode::Enter))?; // …now attached to a terminal pane
     assert!(app.mode == mode::Mode::Terminal, "not in a terminal");
-    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → shell composer (one keystroke)
-    assert!(
-        matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)),
-        "Ctrl+Space in terminal did not open the shell composer"
-    );
-    app.handle_key(kc(KeyCode::Char(' ')))?; // a second Ctrl+Space → the command bar
+    app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space → the unified composer
     assert!(
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Command)),
-        "second Ctrl+Space did not reach the command bar"
+        "Ctrl+Space in terminal did not open the unified (Command) composer"
     );
-    app.handle_key(k(KeyCode::Char('!')))?; // ! → back to shell mode
+    app.handle_key(k(KeyCode::Char('!')))?; // ! → force pure-shell mode
+    assert!(
+        matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Shell)),
+        "`!` did not force pure-shell mode"
+    );
     typ(&mut app, "echo composer_ok")?;
     app.handle_key(k(KeyCode::Enter))?; // no key → runs the command directly
     assert!(app.mode == mode::Mode::Terminal, "shell composer Enter did not run the command");
-    println!("[selfcheck] terminal shell composer .... PASS");
+    println!("[selfcheck] terminal composer (unified) . PASS");
 
     // 26l. W6 watch: watching a pane + a verdict event → a failure notice that
     //      renders and is dismissed with Esc.

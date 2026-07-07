@@ -2297,6 +2297,11 @@ impl App {
                 self.mode = Mode::Edit; // creation exits — you'll want to type
             }
             KeyCode::Char('d') => self.close_tab(),
+            KeyCode::Char('T') => {
+                // Open a terminal in a NEW tab (non-destructive; creation exits).
+                self.new_tab();
+                self.open_terminal(); // converts the new tab's pane; sets Mode::Terminal
+            }
             KeyCode::Char('r') => self.run_action(Action::RenameTab), // → prompt, exits mode
             KeyCode::Char('?') => self.run_action(Action::ExplainFailure), // triage → Ask
             KeyCode::Char('w') => self.toggle_watch_pane(), // W6: watch this pane
@@ -3404,14 +3409,14 @@ impl App {
     }
 
     fn handle_terminal(&mut self, key: KeyEvent) {
-        // Ctrl+Space from a terminal opens the inline shell composer directly
-        // (the `!` behavior, one keystroke): type an English request, Enter
-        // LLM-translates it to a command shown for a confirming second Enter. It's
-        // a small overlay anchored at the cursor, so the terminal stays visible.
-        // A second Ctrl+Space switches to the full command bar.
+        // Ctrl+Space from a terminal opens the unified composer, one keystroke: a
+        // red inline overlay anchored at the cursor (type in place, the terminal
+        // stays visible) AND a ↑/↓ menu of matching Mars commands above the bar.
+        // Enter runs a picked command; with no match it's a shell command
+        // (LLM-translated + confirmed). `!` forces pure-shell; `?` asks the agent.
         let chord = chord_of(&key);
         if self.keys.bar_open.contains(&chord) || matches!(key.code, KeyCode::Null) {
-            self.open_bar(BarMode::Shell);
+            self.open_bar(BarMode::Command);
             return;
         }
         // Ctrl+g detaches back to the editor.
