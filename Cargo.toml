@@ -2,7 +2,7 @@
 # `mars` is taken on crates.io, so the package/crate name is `mars-terminal`.
 # The installed binary stays `mars` regardless (see [[bin]] below).
 name = "mars-terminal"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 # The dependency tree pulls edition2024 crates → a modern toolchain is required.
 # Declaring it makes cargo say "requires rustc 1.85" instead of a cryptic dep error.
@@ -17,7 +17,10 @@ keywords = ["terminal", "editor", "tui", "multiplexer", "agent"]
 categories = ["command-line-utilities", "text-editors"]
 # Keep the published package lean: ship only source + README + LICENSE, not the
 # design docs, .claude/, or scratch. (target/ and .git are auto-excluded.)
-include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]
+# Leading "/" anchors to the package root (gitignore glob semantics) so a bare
+# "README.md" doesn't also sweep in design_ideas/README.md. install.sh is REQUIRED:
+# broker.rs embeds it via include_str!, so the crate won't compile without it.
+include = ["src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/CHANGELOG.md", "/install.sh"]
 
 [[bin]]
 name = "mars"
