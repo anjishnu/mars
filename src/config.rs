@@ -94,21 +94,60 @@ pub struct KeyBindings {
     pub edit: HashMap<Vec<KeyChord>, Action>,
     /// Single chords that open the command bar (Ctrl+Space, M-x).
     pub bar_open: Vec<KeyChord>,
+    /// Definition order of each sequence — the canonical-vs-alias tiebreak, so
+    /// `binding_for` prefers the first-listed chord (C-s over the C-r alias).
+    order: HashMap<Vec<KeyChord>, usize>,
+}
+
+/// Capability tier of a chord sequence for DISPLAY preference: lower = more
+/// universally deliverable. A hint must never advertise a chord the user's
+/// terminal can't physically send (the honesty invariant is only satisfied if
+/// the shown chord actually reaches Mars). This does not affect what's *bound* —
+/// every chord still works where the terminal supports it; this only chooses
+/// which of several equivalents to teach.
+fn chord_tier(seq: &[KeyChord]) -> u8 {
+    let mut tier = 0u8;
+    for c in seq {
+        // ⌘/super is forwarded only by kitty-protocol terminals; elsewhere the
+        // OS/terminal consumes it and nothing reaches Mars.
+        if c.modifiers.contains(KeyModifiers::SUPER) {
+            tier = tier.max(2);
+        }
+        if c.modifiers.contains(KeyModifiers::CONTROL) {
+            if let KeyCode::Char(ch) = c.code {
+                match ch {
+                    // Ctrl + shifted punctuation rides the kitty protocol only.
+                    '|' | '{' | '}' => tier = tier.max(2),
+                    // Ambiguous legacy encodings (C-- ⇒ C-_ ⇒ Undo on many
+                    // terminals; C-\ ⇒ SIGQUIT in some shells) — prefer a
+                    // cleaner equivalent when one exists.
+                    '-' | '\\' | '_' => tier = tier.max(1),
+                    _ => {}
+                }
+            }
+        }
+    }
+    tier
 }
 
 impl KeyBindings {
     pub fn lookup(&self, seq: &[KeyChord]) -> Option<Action> {
         self.edit.get(seq).cloned()
     }
-    /// The (shortest) chord sequence bound to `action`, rendered for display —
-    /// the single source of truth for every hint surface in the UI.
+    /// The best chord sequence bound to `action`, rendered for display — the
+    /// single source of truth for every hint surface. Preference order:
+    /// capability tier (universal first), then length (shortest), then
+    /// definition order (canonical over alias), then lexicographic.
     pub fn binding_for(&self, action: &Action) -> Option<String> {
         self.edit
             .iter()
             .filter(|(_, a)| *a == action)
-            .map(|(seq, _)| (seq.len(), render_chords(seq)))
-            .min() // shortest first, then lexicographic — deterministic on ties
-            .map(|(_, s)| s)
+            .map(|(seq, _)| {
+                let order = self.order.get(seq).copied().unwrap_or(usize::MAX);
+                (chord_tier(seq), seq.len(), order, render_chords(seq))
+            })
+            .min()
+            .map(|(_, _, _, s)| s)
     }
 
     /// which-key continuations for a pending prefix: (tail keys, action).
@@ -154,9 +193,11 @@ struct RawBindings {
     bar_open: Vec<String>,
 }
 
-impl RawBindings {
-    fn defaults() -> Self {
-        let edit = [
+/// The default bindings in canonical order — the array order is meaningful:
+/// `binding_for` prefers earlier entries as the chord to teach (C-s before its
+/// C-r alias). Kept as an ordered slice (not a map) so that order survives.
+fn default_edit_pairs() -> Vec<(&'static str, Action)> {
+    vec![
             // files / buffers
             ("C-x C-s", Action::Save),
             ("C-x C-c", Action::Quit),
@@ -240,10 +281,15 @@ impl RawBindings {
             // search
             ("C-s",     Action::Search),
             ("C-r",     Action::Search), // reverse-isearch is not implemented; C-r = search
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+    ]
+}
+
+impl RawBindings {
+    fn defaults() -> Self {
+        let edit = default_edit_pairs()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
 
         RawBindings {
             edit,
@@ -255,8 +301,14 @@ impl RawBindings {
     /// old config files; a user entry for the same sequence wins.
     fn into_bindings(self) -> KeyBindings {
         let mut edit: HashMap<Vec<KeyChord>, Action> = HashMap::new();
-        for (k, v) in RawBindings::defaults().edit.into_iter().chain(self.edit) {
+        let mut order: HashMap<Vec<KeyChord>, usize> = HashMap::new();
+        // Defaults first, in their true array order (the canonical preference —
+        // C-s before its C-r alias), user entries after; the first assignment
+        // wins the order slot so the canonical chord keeps the lower index.
+        let defaults = default_edit_pairs().into_iter().map(|(k, v)| (k.to_string(), v));
+        for (i, (k, v)) in defaults.chain(self.edit).enumerate() {
             if let Some(seq) = parse_sequence(&k) {
+                order.entry(seq.clone()).or_insert(i);
                 edit.insert(seq, v);
             }
         }
@@ -267,7 +319,7 @@ impl RawBindings {
         if bar_open.is_empty() {
             bar_open = RawBindings::defaults().bar_open.iter().filter_map(|s| parse_key(s)).collect();
         }
-        KeyBindings { edit, bar_open }
+        KeyBindings { edit, bar_open, order }
     }
 }
 

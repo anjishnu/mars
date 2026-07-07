@@ -788,6 +788,15 @@ fn status_hints(app: &App) -> Vec<(String, String)> {
         }
         v.push(("C-g".to_string(), "cancel".to_string()));
         v
+    } else if matches!(app.mode, Mode::Terminal) {
+        // Live-derived like Edit: the bar-open chord is remappable, and C-g here
+        // means "leave the terminal for the editor" — NOT session detach (which
+        // is C-x C-d). Naming it "detach" scared tmux refugees.
+        vec![
+            (bar_open_keys(app), "commands".to_string()),
+            ("C-g".to_string(), "to editor".to_string()),
+            ("type".to_string(), "to shell".to_string()),
+        ]
     } else {
         app.mode
             .hints()

@@ -3476,7 +3476,7 @@ impl App {
                     p.content = PaneContent::Terminal(id);
                 }
                 self.mode = Mode::Terminal;
-                self.status_msg = Some("Terminal — Ctrl+g to detach".into());
+                self.status_msg = Some("Terminal — Ctrl+g back to editor".into());
             }
             Err(e) => {
                 self.status_msg = Some(format!("Terminal failed: {}", e));
@@ -3522,6 +3522,13 @@ impl App {
                 self.mode = Mode::Edit;
                 return;
             }
+        }
+        // A proactive notice is up: Esc dismisses it here (one keypress budget)
+        // rather than leaking 0x1b to the shell — so the notice's "Esc dismiss"
+        // hint is honest even when it renders over a focused terminal pane.
+        if matches!(key.code, KeyCode::Esc) && !self.notices.is_empty() {
+            self.dismiss_notice();
+            return;
         }
         // Global chrome chords (single-chord only — prefixes belong to the shell).
         if let Some(action) = self.keys.lookup(std::slice::from_ref(&chord)) {
@@ -3899,12 +3906,16 @@ impl App {
         self.notices.retain(|n| !events.iter().any(|e| n.text == e.text));
         self.digest_from_tick = Some(from); // the "away digest" action re-summons details
         let away = self.fmt_dur(self.frame_tick.saturating_sub(from));
-        // Honesty invariant: the digest hint shows the live binding, never a literal.
-        let hint = self
-            .keys
-            .binding_for(&Action::AwayDigest)
-            .map(|b| format!(" · {b} digest"))
-            .unwrap_or_default();
+        // Honesty invariant, situated: the digest hint shows the live binding —
+        // but reattach usually lands in a terminal pane, where a prefix chord
+        // like C-x g goes to the shell, not Mars. So prefix it with the
+        // leave-terminal step (C-g) whenever the focus is a terminal.
+        let in_term = matches!(self.focused_pane().content, PaneContent::Terminal(_));
+        let hint = match self.keys.binding_for(&Action::AwayDigest) {
+            Some(b) if in_term => format!(" · C-g then {b} · digest"),
+            Some(b) => format!(" · {b} digest"),
+            None => String::new(),
+        };
         self.notices.push(Notice {
             text: format!("while away {away} — {}{hint}", items.join(" · ")),
             kind: if failed { NoticeKind::Failure } else { NoticeKind::Info },

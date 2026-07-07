@@ -56,8 +56,12 @@ impl Mode {
                 ("o",   "pane"),
                 ("Esc", "done"),
             ],
+            // NOTE: the status bar renders Terminal hints live (ui::status_hints)
+            // so the bar-open chord stays honest; this static copy is a fallback.
+            // "to editor" (not "detach") — C-g leaves the pane; session detach is
+            // C-x C-d.
             Mode::Terminal => &[
-                ("C-g",   "detach"),
+                ("C-g",   "to editor"),
                 ("C-Spc", "commands"),
                 ("type",  "to shell"),
             ],

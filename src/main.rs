@@ -669,8 +669,10 @@ fn selfcheck() -> Result<()> {
     term.draw(|f| ui::render(f, &mut app))?;
     let t9 = screen_text(&term);
     assert!(t9.contains("Split"), "fuzzy search lost Split");
-    // Shortest binding wins the badge: SplitHorizontal → "C--" (not "C-x 2").
-    assert!(t9.contains("C--"), "dropdown row missing its live keybinding");
+    // Capability-tiered binding wins the badge: SplitVertical → "C-x 3" (universal),
+    // never the kitty-only "C--" a legacy terminal can't send (honesty invariant).
+    assert!(t9.contains("C-x 3"), "dropdown row missing its live (universal) keybinding");
+    assert!(!t9.contains("C--"), "dropdown taught a kitty-only chord (honesty breach)");
     app.handle_key(k(KeyCode::Esc))?;
     println!("[selfcheck] bar fuzzy + live binding ... PASS");
 
@@ -1875,6 +1877,39 @@ fn selfcheck() -> Result<()> {
         assert!(app.term_sel.is_none(), "term_sel not cleared on release");
     }
     println!("[selfcheck] click-no-drag no clobber .. PASS");
+
+    // 37. Capability-tiered, canonical-preferring binding_for (P1.1): teaching
+    //     surfaces must show a chord the terminal can actually send, and the
+    //     canonical one over an alias. Guards the whole honesty-invariant layer.
+    {
+        let app = App::new(None)?;
+        let b = |a| app.keys.binding_for(&a).unwrap_or_default();
+        assert_eq!(b(palette::Action::Save), "C-x C-s", "Save should teach the universal chord, not ⌘-s");
+        assert_eq!(b(palette::Action::SelectAll), "C-x h", "SelectAll should not teach ⌘-a");
+        assert_eq!(b(palette::Action::SplitVertical), "C-x 3", "SplitVertical should not teach C-\\/C-|");
+        assert_eq!(b(palette::Action::Search), "C-s", "Search should teach canonical C-s, not the C-r alias");
+        // No teaching surface should ever advertise a ⌘/super chord.
+        for a in [palette::Action::Save, palette::Action::SelectAll, palette::Action::CopyRegion, palette::Action::Paste] {
+            assert!(!b(a).contains('⌘'), "binding_for taught a kitty-only ⌘ chord");
+        }
+        println!("[selfcheck] tiered binding_for ........ PASS");
+    }
+
+    // 38. A notice up + a focused terminal: Esc dismisses the notice (its "Esc
+    //     dismiss" hint must be honest here) instead of leaking 0x1b to the shell.
+    {
+        let mut app = App::new(None)?;
+        app.open_terminal();
+        assert!(app.mode == mode::Mode::Terminal, "not focused on the terminal");
+        app.notices.push(app::Notice {
+            text: "build failed".into(),
+            kind: app::NoticeKind::Failure,
+        });
+        app.handle_key(k(KeyCode::Esc))?;
+        assert!(app.notices.is_empty(), "Esc did not dismiss the notice from a terminal");
+        assert!(app.mode == mode::Mode::Terminal, "notice-dismiss should keep terminal focus");
+        println!("[selfcheck] terminal Esc dismisses .... PASS");
+    }
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())
