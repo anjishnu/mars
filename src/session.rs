@@ -46,6 +46,9 @@ pub enum ClientFrame {
     Kill,
     /// Rename the session (used by `mars rename <old> <new>`).
     Rename { to: String },
+    /// Open a file as a new tab in the running session (used by a nested
+    /// `mars <file>` run from a terminal pane inside this session).
+    Open { path: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -221,6 +224,8 @@ enum SrvEvent {
     Kill,
     /// `mars rename <old> <new>`.
     Rename(String),
+    /// A nested `mars <file>` — open it as a new tab here.
+    OpenFile(String),
 }
 
 fn make_terminal(
@@ -335,6 +340,10 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                 app.autosave();
                 app.should_quit = true; // forced: `mars kill` skips the dirty guard
             }
+            Ok(SrvEvent::OpenFile(path)) => {
+                app.open_file_in_new_tab(&path);
+                app.needs_redraw = true;
+            }
             Ok(SrvEvent::Rename(to)) => {
                 app.rename_session_to = Some(to);
             }
@@ -433,6 +442,11 @@ fn client_connection(
         Ok(ClientFrame::Rename { to }) => {
             let _ = tx.send(SrvEvent::Rename(to.clone()));
             let _ = send_exit(&stream, &format!("rename to '{to}' requested"));
+            return;
+        }
+        Ok(ClientFrame::Open { path }) => {
+            let _ = tx.send(SrvEvent::OpenFile(path.clone()));
+            let _ = send_exit(&stream, &format!("opening '{path}'"));
             return;
         }
         _ => {}
@@ -736,6 +750,24 @@ pub fn list_main(prompt: bool) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Open a file as a new tab in a running session (nested `mars <file>`).
+/// Relative paths resolve against the caller's cwd (the shell's), so the file
+/// opens correctly even though the daemon has a different working directory.
+pub fn open_in_session(name: &str, path: &str) -> Result<()> {
+    let sock = socket_path(name)?;
+    let stream = UnixStream::connect(&sock)
+        .map_err(|_| anyhow!("session '{name}' is not running"))?;
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+    let mut w = stream.try_clone()?;
+    write_frame(&mut w, &ClientFrame::Open { path: abs.to_string_lossy().to_string() })?;
     Ok(())
 }
 

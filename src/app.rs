@@ -1610,6 +1610,29 @@ impl App {
         self.active_tab = self.tabs.len() - 1;
     }
 
+    /// Open a file in a NEW tab and switch to it — used when a nested `mars <file>`
+    /// (run from a terminal pane inside this session) routes the open here instead
+    /// of launching a second Mars.
+    pub fn open_file_in_new_tab(&mut self, path: &str) {
+        match self.open_file(path) {
+            Ok(buf_id) => {
+                let pane_id = self.alloc_pane(buf_id);
+                let id = self.alloc_tab_id();
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| (self.tabs.len() + 1).to_string());
+                let tab = Tab::new(id, name.clone(), pane_id);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+                self.mode = Mode::Edit;
+                self.status_msg = Some(format!("Opened {name}"));
+            }
+            Err(e) => self.status_msg = Some(format!("Open failed: {e}")),
+        }
+    }
+
     pub fn close_tab(&mut self) {
         if self.tabs.len() == 1 {
             self.request_quit();
@@ -3343,7 +3366,7 @@ impl App {
         // The first opened file's dir if any, else where `mars` was launched —
         // never portable-pty's default (which lands the shell at /).
         let cwd = self.startup_cwd.clone().or_else(|| self.run_cwd.clone());
-        match terminal::spawn(id, rows, cols, scrollback, cwd, self.term_tx.clone()) {
+        match terminal::spawn(id, rows, cols, scrollback, cwd, self.session_name.as_deref(), self.term_tx.clone()) {
             Ok(term) => {
                 self.terms.insert(id, term);
                 let pid = self.focused_pane_id();

@@ -188,6 +188,28 @@ fn main() -> Result<()> {
     let standalone = matches!(first.as_deref(), Some("-s") | Some("--standalone"));
     let file = if standalone { args.next() } else { first };
     if !standalone {
+        // Already inside a Mars session's terminal? Route the open to the running
+        // daemon (as a new tab) instead of nesting a whole second Mars.
+        if let Ok(session) = std::env::var("MARS_SESSION") {
+            match &file {
+                Some(f) => match session::open_in_session(&session, f) {
+                    Ok(()) => {
+                        println!("opened '{f}' in Mars session '{session}' (new tab)");
+                        return Ok(());
+                    }
+                    // Session gone/stale (e.g. renamed) → fall through, start fresh.
+                    Err(_) => {}
+                },
+                None => {
+                    eprintln!(
+                        "You're already inside Mars session '{session}'.\n  \
+                         mars <file>       open a file here (new tab)\n  \
+                         mars new <name>   start a separate session"
+                    );
+                    return Ok(());
+                }
+            }
+        }
         let name = session::next_auto_name()?;
         return session::session_main(&name, file);
     }
@@ -722,7 +744,7 @@ fn selfcheck() -> Result<()> {
 
     // 15. A real terminal PTY spawns and echoes.
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut sh = terminal::spawn(0, 24, 80, 1000, None, tx)?;
+    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, tx)?;
     sh.send_bytes(b"echo ares_pty_ok\n");
     std::thread::sleep(std::time::Duration::from_millis(700));
     while rx.try_recv().is_ok() {}
@@ -750,6 +772,26 @@ fn selfcheck() -> Result<()> {
         assert_eq!(text, "COPYME123", "terminal selection extraction wrong: {text:?}");
     }
     println!("[selfcheck] terminal mouse-copy ....... PASS");
+
+    // 15b. Nested open: `mars <file>` from inside a session routes here and opens
+    //      the file in a NEW tab, switched-to (instead of nesting a second Mars).
+    {
+        let mut app = App::new(None)?;
+        let tabs_before = app.tabs.len();
+        let f = std::env::temp_dir().join(format!("mars-nest-{}.txt", std::process::id()));
+        std::fs::write(&f, "nested_open_content")?;
+        app.open_file_in_new_tab(f.to_str().unwrap());
+        assert_eq!(app.tabs.len(), tabs_before + 1, "open did not add a tab");
+        assert_eq!(app.active_tab, app.tabs.len() - 1, "did not switch to the new tab");
+        assert!(app.mode == mode::Mode::Edit, "not in edit mode after nested open");
+        let shows = match app.focused_pane().content {
+            pane::PaneContent::Editor(id) => app.buffers[&id].rope.to_string().contains("nested_open_content"),
+            _ => false,
+        };
+        assert!(shows, "new tab's focused pane is not the opened file");
+        let _ = std::fs::remove_file(&f);
+    }
+    println!("[selfcheck] nested open (new tab) ..... PASS");
 
     // 15b. Scrollback: history survives past the viewport and the view can
     //      scroll back through it, then snap to live.

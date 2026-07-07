@@ -39,6 +39,7 @@ pub fn spawn(
     cols: u16,
     scrollback: usize,
     cwd: Option<std::path::PathBuf>,
+    session: Option<&str>,
     tx: mpsc::Sender<TermEvent>,
 ) -> Result<Term> {
     let rows = rows.max(1);
@@ -56,6 +57,11 @@ pub fn spawn(
     let mut cmd = CommandBuilder::new(shell);
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.cwd(dir);
+    }
+    // Mark the shell as living inside this Mars session, so a nested `mars <file>`
+    // opens a tab in the running instance instead of launching a new one.
+    if let Some(name) = session {
+        cmd.env("MARS_SESSION", name);
     }
     let child = pair.slave.spawn_command(cmd)?;
     // Drop the slave so the master reader sees EOF when the shell exits.
