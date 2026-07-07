@@ -2,7 +2,7 @@
 # `mars` is taken on crates.io, so the package/crate name is `mars-terminal`.
 # The installed binary stays `mars` regardless (see [[bin]] below).
 name = "mars-terminal"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A terminal editor, multiplexer, and built-in AI agent in one binary — non-modal and Emacs-compatible, with tmux-style persistent sessions."
 license = "MIT"
