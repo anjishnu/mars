@@ -143,13 +143,18 @@ impl Term {
     }
 
     /// Scroll the view within the scrollback: positive = further back in
-    /// history, negative = toward live. Clamped to [0, scrollback_limit].
+    /// history, negative = toward live. Clamped to [0, real history depth].
     pub fn scroll_view(&mut self, delta: i64) {
-        let next = (self.view_offset as i64 + delta)
+        let requested = (self.view_offset as i64 + delta)
             .clamp(0, self.scrollback_limit as i64) as usize;
-        self.view_offset = next;
         if let Ok(mut p) = self.parser.lock() {
-            p.set_scrollback(next);
+            p.set_scrollback(requested);
+            // vt100 clamps to the ACTUAL available history; mirror that real
+            // value so the "↑N" indicator is honest and a wheel-down doesn't
+            // have to burn through a phantom offset past the top of history.
+            self.view_offset = p.screen().scrollback();
+        } else {
+            self.view_offset = requested;
         }
     }
 

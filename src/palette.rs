@@ -214,6 +214,7 @@ fn edit_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Kill to line end",  Action::KillLine,       "Cut from the cursor to the end of the line"),
         MenuItem::run_desc("Kill word forward", Action::KillWordForward, "Cut the word after the cursor"),
         MenuItem::run_desc("Kill word back",    Action::KillWordBackward, "Cut the word before the cursor"),
+        MenuItem::run_desc("Close file (kill buffer)", Action::KillBuffer, "Close the current buffer (C-x k)"),
     ]
 }
 
@@ -240,6 +241,7 @@ fn tab_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Prev tab",       Action::PrevTab,      "Switch to the previous tab"),
         MenuItem::run_desc("Move tab right", Action::MoveTabRight, "Reorder: move this tab right"),
         MenuItem::run_desc("Move tab left",  Action::MoveTabLeft,  "Reorder: move this tab left"),
+        MenuItem::run_desc("Space warp mode…", Action::TabMode,    "One-key tab/pane verbs with an on-screen cheat panel (C-t)"),
     ]
 }
 

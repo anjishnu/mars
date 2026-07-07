@@ -1447,9 +1447,16 @@ impl App {
             }
         }
         // Autosave is silent when it works — but a failing write (disk full,
-        // permission, path gone) must not be swallowed: surface it.
+        // permission, path gone) must survive: the status line is cleared by the
+        // next keypress, so a fast typist would never see it. Route it to the
+        // notices queue, which persists until Esc-dismissed. De-dupe so repeated
+        // autosave ticks don't stack the same warning.
         if !failed.is_empty() {
-            self.status_msg = Some(format!("⚠ autosave FAILED: {}", failed.join(", ")));
+            let text = format!("⚠ autosave FAILED: {} — check disk/permissions", failed.join(", "));
+            if !self.notices.iter().any(|n| n.text == text) {
+                self.notices.push(Notice { text, kind: NoticeKind::Failure });
+                self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
+            }
         }
     }
 
@@ -1752,6 +1759,18 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         self.show_splash = false; // any keypress dismisses the banner
+        // One gesture rules everything (doctrine §2): the bar opens from any
+        // mode. Edit/Terminal/Bar handle bar-open themselves (prefix-aware /
+        // submode-toggling), and a focused minibuffer keeps the keystroke — but
+        // the transient nav modes (space warp, tree, time-travel) used to swallow
+        // it. Handle those centrally so C-Space never intermittently dies.
+        let chord = chord_of(&key);
+        let bar_open = self.pending_prefix.is_empty()
+            && (self.keys.bar_open.contains(&chord) || matches!(key.code, KeyCode::Null));
+        if bar_open && matches!(self.mode, Mode::Tab | Mode::Tree | Mode::Undo) {
+            self.open_bar(BarMode::Command);
+            return Ok(());
+        }
         match self.mode.clone() {
             Mode::Edit     => self.handle_edit(key),
             Mode::Bar      => self.handle_bar(key),

@@ -1911,6 +1911,45 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] terminal Esc dismisses .... PASS");
     }
 
+    // 39. One gesture rules everything (P1.5): Ctrl+Space opens the bar from the
+    //     transient nav modes that used to swallow it (space warp, time-travel,
+    //     file tree).
+    let mut app = App::new(None)?;
+    app.handle_key(kc(KeyCode::Char('t')))?; // C-t → space warp
+    assert!(app.mode == mode::Mode::Tab, "C-t did not enter space warp");
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    assert!(app.mode == mode::Mode::Bar, "Ctrl+Space dead in space warp");
+    app.handle_key(k(KeyCode::Esc))?;
+    app.handle_key(kc(KeyCode::Char('u')))?; // C-u → time-travel
+    assert!(app.mode == mode::Mode::Undo, "C-u did not enter time-travel");
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    assert!(app.mode == mode::Mode::Bar, "Ctrl+Space dead in time-travel");
+    app.handle_key(k(KeyCode::Esc))?;
+    app.toggle_file_tree();
+    assert!(app.mode == mode::Mode::Tree, "file tree did not open");
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    assert!(app.mode == mode::Mode::Bar, "Ctrl+Space dead in the file tree");
+    println!("[selfcheck] bar opens from any mode .. PASS");
+
+    // 40. Previously-invisible actions now have searchable menu rows (P1.9) — a
+    //     capability for one actor is a capability for all four.
+    {
+        use std::collections::HashMap;
+        let frec: HashMap<String, u32> = HashMap::new();
+        let mut p = palette::Palette::root();
+        p.query = "space warp".to_string();
+        assert!(
+            p.visible_items(&frec).iter().any(|r| matches!(r.kind, palette::ItemKind::Run(palette::Action::TabMode))),
+            "TabMode not searchable in the command bar"
+        );
+        p.query = "kill buffer".to_string();
+        assert!(
+            p.visible_items(&frec).iter().any(|r| matches!(r.kind, palette::ItemKind::Run(palette::Action::KillBuffer))),
+            "KillBuffer not searchable in the command bar"
+        );
+        println!("[selfcheck] orphan actions now in menu PASS");
+    }
+
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())
 }
