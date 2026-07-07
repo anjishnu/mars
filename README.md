@@ -117,6 +117,12 @@ different-sized terminal just reflows.
 
 ## The agent
 
+> **Beta.** The AI features — the `?` ask flow, agent-proposed `RUN:`/`TYPE:`
+> directives, refactors, triage, watch summaries, and the away digest — are new and
+> still being tuned. Treat the agent as an assistant, not an authority: review what it
+> proposes before running it (destructive actions are gated, but read them). The core
+> editor, multiplexer, and sessions are stable.
+
 Works out of the box with a free-tier key from any of:
 
 ```bash
@@ -140,9 +146,9 @@ mars ask "how do I move a pane to the other side?"
 ### The agent works on every box — your key never leaves home
 
 > **Beta.** The SSH features (`mars ssh`, `mars keyd`, the fleet view, and the
-> remote installer) are new and still being hardened. The core editor, multiplexer,
-> sessions, and agent are stable; the remote/tunnel path may have rough edges — please
-> report anything you hit.
+> remote installer) are new and still being hardened — as are the AI features they
+> carry (see [The agent](#the-agent)). The core editor, multiplexer, and sessions are
+> stable; the remote/tunnel path may have rough edges — please report anything you hit.
 
 You set your key **once**, on your own machine, and the agent works on every host you
 SSH into — without the key ever landing on a remote box (not in its env, not in its

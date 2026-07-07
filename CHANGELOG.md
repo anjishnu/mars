@@ -5,6 +5,9 @@
 The first substantial release since 0.1.0 — remote agents, a unified terminal
 composer, reattach briefings, and a top-to-bottom ergonomics pass.
 
+> **Beta:** the AI/agent features and the SSH/remote path are new and still being
+> hardened. The core editor, multiplexer, and sessions are stable.
+
 ### Added
 - **SSH broker** (`mars ssh <host>`, `mars keyd`) — **beta**, still being hardened:
   your LLM key stays home and is

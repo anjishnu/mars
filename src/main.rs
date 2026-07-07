@@ -60,7 +60,7 @@ SESSIONS  (work survives closed windows and disconnects)
   Reattach greets you with a \"while away\" line if anything happened;
   C-x g opens the full Away Digest (timeline + durations).
 
-AGENT
+AGENT  (BETA — an assistant, not an authority; review what it proposes)
   mars ask \"<question>\"          one-shot answer from the LLM agent
                                  (needs GEMINI_API_KEY, GROQ_API_KEY,
                                   or MARS_LLM_KEY + MARS_LLM_URL)
