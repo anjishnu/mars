@@ -36,3 +36,7 @@ coverage/
 # Private: forward-looking product strategy + vision docs — kept local, not published
 design_ideas/
 eval/results/
+
+# Python
+__pycache__/
+*.pyc
