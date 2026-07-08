@@ -35,3 +35,4 @@ coverage/
 .env.local
 # Private: forward-looking product strategy + vision docs — kept local, not published
 design_ideas/
+eval/results/

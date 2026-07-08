@@ -51,7 +51,12 @@ impl MemoryMode {
 // ── Command memory: the corrective-memory store ───────────────────────────────
 
 /// `~/.mars/cmd_memory.jsonl` — one `{request, command}` per accepted translation.
+/// `MARS_CMD_MEMORY` overrides the path so the eval harness can seed a controlled
+/// memory without touching the user's real store.
 pub fn command_memory_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MARS_CMD_MEMORY") {
+        return Some(PathBuf::from(p));
+    }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("cmd_memory.jsonl"))
 }
 

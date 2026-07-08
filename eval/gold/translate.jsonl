@@ -1,0 +1,37 @@
+{"id": "a01", "request": "list all files including hidden ones with details", "gold": "ls -la", "personalized": false}
+{"id": "a02", "request": "show disk usage of the current directory sorted by size", "gold": "du -sh * | sort -h", "personalized": false}
+{"id": "a03", "request": "find all python files under the current directory", "gold": "find . -name '*.py'", "personalized": false}
+{"id": "a04", "request": "count the number of lines in all rust source files", "gold": "wc -l src/*.rs", "personalized": false}
+{"id": "a05", "request": "search for the word TODO in all files recursively", "gold": "grep -rn TODO .", "personalized": false}
+{"id": "a06", "request": "show the last 50 lines of the training log and keep following it", "gold": "tail -f -n 50 train.log", "personalized": false}
+{"id": "a07", "request": "kill the process listening on port 8080", "gold": "kill $(lsof -t -i:8080)", "personalized": false}
+{"id": "a08", "request": "show running processes sorted by memory usage", "gold": "ps aux --sort=-%mem | head", "personalized": false}
+{"id": "a09", "request": "create a new git branch called experiment and switch to it", "gold": "git checkout -b experiment", "personalized": false}
+{"id": "a10", "request": "show the git commits from the last week in one line each", "gold": "git log --oneline --since='1 week ago'", "personalized": false}
+{"id": "a11", "request": "discard all my uncommitted changes", "gold": "git checkout -- .", "personalized": false}
+{"id": "a12", "request": "show which gpu is being used and how much memory", "gold": "nvidia-smi", "personalized": false}
+{"id": "a13", "request": "compress the results folder into a tarball", "gold": "tar -czf results.tar.gz results/", "personalized": false}
+{"id": "a14", "request": "copy the checkpoint file to the remote gpu box under my home", "gold": "scp checkpoint.pt gpubox:~/", "personalized": false}
+{"id": "a15", "request": "make a new directory called experiments and cd into it", "gold": "mkdir experiments && cd experiments", "personalized": false}
+{"id": "a16", "request": "recursively delete all __pycache__ directories", "gold": "find . -type d -name __pycache__ -exec rm -rf {} +", "personalized": false}
+{"id": "a17", "request": "show the difference between my branch and main", "gold": "git diff main", "personalized": false}
+{"id": "a18", "request": "watch the gpu utilization refreshing every second", "gold": "watch -n 1 nvidia-smi", "personalized": false}
+{"id": "a19", "request": "how much free disk space is on this machine", "gold": "df -h", "personalized": false}
+{"id": "a20", "request": "find the ten largest files under the current directory", "gold": "find . -type f -printf '%s %p\\n' | sort -rn | head", "personalized": false}
+{"id": "a21", "request": "print the current working directory", "gold": "pwd", "personalized": false}
+{"id": "a22", "request": "give the script execute permission", "gold": "chmod +x script.sh", "personalized": false}
+{"id": "a23", "request": "show environment variables containing CUDA", "gold": "env | grep CUDA", "personalized": false}
+{"id": "a24", "request": "download the file from the url and save it locally", "gold": "curl -O https://example.com/file", "personalized": false}
+{"id": "a25", "request": "count how many jsonl records are in the log", "gold": "wc -l data.jsonl", "personalized": false}
+{"id": "p01", "request": "activate the project virtualenv", "gold": "source .venv/bin/activate", "personalized": true}
+{"id": "p02", "request": "run the training job", "gold": "python train.py --config configs/base.yaml", "personalized": true}
+{"id": "p03", "request": "deploy the model", "gold": "./scripts/deploy.sh --prod", "personalized": true}
+{"id": "p04", "request": "run the unit tests", "gold": "cargo test", "personalized": true}
+{"id": "p05", "request": "start the dev server", "gold": "make dev", "personalized": true}
+{"id": "p06", "request": "lint the code", "gold": "ruff check .", "personalized": true}
+{"id": "p07", "request": "sync the dataset from the bucket", "gold": "aws s3 sync s3://our-bucket/data ./data", "personalized": true}
+{"id": "p08", "request": "launch tensorboard for this run", "gold": "tensorboard --logdir runs/", "personalized": true}
+{"id": "p09", "request": "format the code", "gold": "cargo fmt", "personalized": true}
+{"id": "p10", "request": "submit the job to the cluster", "gold": "sbatch job.slurm", "personalized": true}
+{"id": "p11", "request": "build the release binary", "gold": "cargo build --release", "personalized": true}
+{"id": "p12", "request": "evaluate the latest checkpoint", "gold": "python eval.py --ckpt checkpoints/latest.pt", "personalized": true}

@@ -1,0 +1,30 @@
+{"id": "k01", "query": "How do I split the screen vertically in Mars?", "gold": "C-x 3 splits vertically (the SplitVertical action); C-x 2 splits horizontally. You can also use C-t (space warp) then | or -.", "type": "knowledge"}
+{"id": "k02", "query": "How do I save the current file?", "gold": "C-x C-s (the Save action).", "type": "knowledge"}
+{"id": "k03", "query": "How do I quit Mars?", "gold": "C-x C-c (Quit); it prompts if there are unsaved changes.", "type": "knowledge"}
+{"id": "k04", "query": "How do I open the file browser / navigator?", "gold": "C-x C-f opens Navigator (the file sidebar); @ in mission control also opens it.", "type": "knowledge"}
+{"id": "k05", "query": "How do I detach my session so it keeps running?", "gold": "C-x C-d detaches (Detach); or C-t then D. The session daemon keeps running; reattach with mars attach.", "type": "knowledge"}
+{"id": "k06", "query": "How do I search within a buffer?", "gold": "C-s starts incremental search (the Search action).", "type": "knowledge"}
+{"id": "k07", "query": "What does C-t do?", "gold": "C-t enters space-warp mode: one-key verbs for tabs, panes, splits, with an on-screen cheat panel (the TabMode action).", "type": "knowledge"}
+{"id": "k08", "query": "How do I open the command bar?", "gold": "Ctrl+Space (or M-x) opens mission control, the command bar; type to fuzzy-search actions.", "type": "knowledge"}
+{"id": "k09", "query": "How do I ask the built-in agent a question?", "gold": "Type ? in mission control (the command bar) to ask the agent; or mars ask \"...\" from the shell.", "type": "knowledge"}
+{"id": "k10", "query": "How do I run a shell command from the command bar?", "gold": "Type ! in mission control to enter shell mode, then the command (English is translated to a shell command).", "type": "knowledge"}
+{"id": "k11", "query": "How do I undo, and how do I scrub through undo history?", "gold": "C-/ (or C-x u) undoes; C-u enters time-travel mode to scrub back/forward through edit history.", "type": "knowledge"}
+{"id": "k12", "query": "How do I see what happened while I was detached?", "gold": "On reattach a one-line 'while away' briefing greets you; C-x g opens the full Away Digest.", "type": "knowledge"}
+{"id": "k13", "query": "How do I watch a terminal pane and get notified when it finishes?", "gold": "C-x w (or C-t w) watches the pane; the agent summarizes it when it goes quiet or exits, even while detached.", "type": "knowledge"}
+{"id": "k14", "query": "How do I do a find and replace?", "gold": "M-% starts query-replace (the QueryReplace action); step through matches with y/n.", "type": "knowledge"}
+{"id": "k15", "query": "How do I switch between tabs?", "gold": "M-{ and M-} (or C-PageUp/C-PageDown) switch tabs; C-t then h/l or a digit also switches.", "type": "knowledge"}
+{"id": "k16", "query": "How do I open a terminal?", "gold": "C-x C-t (or M-`) opens a terminal in the pane; in space warp (C-t) press T for a terminal in a new tab.", "type": "knowledge"}
+{"id": "k17", "query": "How does Mars keep my API key off a remote GPU box?", "gold": "mars ssh forwards a Unix socket to the home broker (mars keyd); the remote agent proxies the LLM call home, so the key never lands on the remote box.", "type": "knowledge"}
+{"id": "k18", "query": "How do I jump to the top or bottom of the file?", "gold": "M-< goes to the top (GoTop), M-> to the bottom (GoBottom).", "type": "knowledge"}
+{"id": "r01", "query": "How do I change the autosave interval to 60 seconds?", "gold": "Set autosave_secs to 60 in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r02", "query": "How do I turn on line numbers?", "gold": "Set line_numbers to true in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r03", "query": "How do I stop tabs from being auto-named by the agent?", "gold": "Set auto_name_secs to 0 in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r04", "query": "How do I make the agent use a different model?", "gold": "Set the MARS_LLM_MODEL environment variable (e.g. export MARS_LLM_MODEL=gpt-4o-mini).", "type": "reconfigure"}
+{"id": "r05", "query": "How do I let the agent produce longer answers?", "gold": "Increase agent_max_tokens in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r06", "query": "How do I widen the file-tree sidebar?", "gold": "Increase tree_width in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r07", "query": "How do I change how long a pane must be quiet before a watch summary fires?", "gold": "Change watch_quiet_secs in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r08", "query": "How do I increase the terminal scrollback?", "gold": "Increase terminal_scrollback_lines in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r09", "query": "How do I use my local Ollama instead of a cloud provider?", "gold": "Set MARS_LLM_KEY and MARS_LLM_URL (e.g. MARS_LLM_URL=http://localhost:11434/v1) to point at the OpenAI-compatible endpoint.", "type": "reconfigure"}
+{"id": "r10", "query": "How do I reset my keybindings to the defaults?", "gold": "Run the 'Restore default keys' action (RestoreKeybindings) from the command bar; it backs up keys.json first. Or run mars reset.", "type": "reconfigure"}
+{"id": "r11", "query": "How do I make the agent's answers less random / more deterministic?", "gold": "Lower agent_temperature in ~/.config/mars/tuning.json (e.g. to 0).", "type": "reconfigure"}
+{"id": "r12", "query": "How do I turn on the LLM debug log to see token usage?", "gold": "Run with mars --llm-debug (or export MARS_LLM_DEBUG=1); logs to ~/.mars/logs/. Profile it with mars llm-stats.", "type": "reconfigure"}
