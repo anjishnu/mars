@@ -9,6 +9,7 @@ mod llm_log;
 mod mode;
 mod palette;
 mod pane;
+mod retrieval;
 mod project;
 mod session;
 mod tab;
@@ -73,6 +74,9 @@ LLM DEBUG  (calibrate prompts / right-size models per call)
                                  latency) to $TMPDIR/mars-llm/ (or MARS_LLM_DEBUG=1)
   mars llm-stats [--raw]         profile the log: per task×model, ranked by
                                  token use — avg in/out tokens, total, latency
+  mars translate \"<english>\"     headless: English → one shell command (logs it)
+  --memory none|history|docs|full  retrieval variant: history = your own commands
+                                 for translate; docs = Mars's own docs for ask
 
 REMOTE  (BETA — the agent works on every box; the key never leaves home)
   mars ssh <host> [ssh args]     ssh in with the auth socket forwarded; the
@@ -107,7 +111,29 @@ fn main() -> Result<()> {
     if raw_args.iter().any(|a| a == "--llm-debug") {
         std::env::set_var("MARS_LLM_DEBUG", "1");
     }
-    let mut args = raw_args.into_iter().filter(|a| a != "--llm-debug");
+    // `--memory <mode>` (none|history|docs|full) selects the retrieval variant for
+    // this run (sets MARS_MEMORY, read by src/retrieval.rs) — the eval ablation knob.
+    if let Some(i) = raw_args.iter().position(|a| a == "--memory") {
+        if let Some(mode) = raw_args.get(i + 1) {
+            std::env::set_var("MARS_MEMORY", mode);
+        }
+    }
+    let mut args = raw_args
+        .into_iter()
+        .filter(|a| a != "--llm-debug")
+        .scan(false, |skip, a| {
+            // drop `--memory` and its value so they aren't parsed as commands/files
+            if *skip {
+                *skip = false;
+                return Some(None);
+            }
+            if a == "--memory" {
+                *skip = true;
+                return Some(None);
+            }
+            Some(Some(a))
+        })
+        .flatten();
     let first = args.next();
 
     // Bookend this invocation as a session in the debug log (no-op when logging
@@ -135,6 +161,12 @@ fn main() -> Result<()> {
         Some("ask") | Some("--ask") => {
             let question: String = args.collect::<Vec<_>>().join(" ");
             return ask_cli(question);
+        }
+        // Headless shell-translation primitive — the eval harness drives this in
+        // batch (with --llm-debug --memory <mode>) to measure Axis A.
+        Some("translate") => {
+            let request: String = args.collect::<Vec<_>>().join(" ");
+            return translate_cli(request);
         }
         // Session daemon (internal — spawned by `new`).
         Some("--server") => {
@@ -295,6 +327,22 @@ fn main() -> Result<()> {
 
 /// Headless one-shot question through the real agent path (provider detection,
 /// registry context, RUN: parsing) — the live verification `--selfcheck` can't do.
+/// Headless shell-translation: `mars translate "<nl>"` → prints ONE command and
+/// logs the call (with the active memory variant). Used by the Python eval harness.
+fn translate_cli(request: String) -> Result<()> {
+    if request.trim().is_empty() {
+        anyhow::bail!("usage: mars translate \"<english request>\"  [--memory none|history|docs|full]");
+    }
+    let cfg = agent::AgentConfig::from_env();
+    if !cfg.is_configured() {
+        anyhow::bail!("no API key: export ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, \
+                       GEMINI_API_KEY, or MARS_LLM_KEY (+ MARS_LLM_URL for a custom endpoint)");
+    }
+    let (command, _call_id) = agent::translate_once(&cfg, &request, "")?;
+    println!("{command}");
+    Ok(())
+}
+
 fn ask_cli(question: String) -> Result<()> {
     if question.trim().is_empty() {
         anyhow::bail!("usage: mars --ask \"<question>\"");
@@ -2031,6 +2079,24 @@ fn selfcheck() -> Result<()> {
         let _ = std::fs::remove_file(llm_log::log_path());
         let _ = std::fs::remove_file(llm_log::outcomes_path());
         println!("[selfcheck] llm debug log + stats ..... PASS");
+    }
+
+    // 42. Retrieval: BM25 ranks the relevant doc first; memory-mode parsing.
+    {
+        let docs = vec![
+            "git status shows the working tree and staged changes".to_string(),
+            "docker compose up starts the containers".to_string(),
+            "list files in a directory with ls -la".to_string(),
+        ];
+        let top = retrieval::rank("how do I check the git working tree", &docs, 1);
+        assert_eq!(top.first().copied(), Some(0), "BM25 did not rank the git doc first");
+        std::env::set_var("MARS_MEMORY", "history");
+        assert!(retrieval::MemoryMode::from_env().includes_history(), "MARS_MEMORY=history not parsed");
+        std::env::set_var("MARS_MEMORY", "docs");
+        assert!(retrieval::MemoryMode::from_env().includes_docs(), "MARS_MEMORY=docs not parsed");
+        std::env::remove_var("MARS_MEMORY");
+        assert_eq!(retrieval::MemoryMode::from_env().as_str(), "none");
+        println!("[selfcheck] retrieval (bm25 + mode) ... PASS");
     }
 
     println!("\nALL SELFCHECKS PASSED ✓");

@@ -44,7 +44,7 @@ pub enum AgentEvent {
     /// call failed (so one failed request can't wedge all background work).
     BgDone,
     /// W3 shell translate: English → one shell command (fills the SH bar).
-    ShellTranslation { command: String },
+    ShellTranslation { command: String, call_id: u64 },
     Error(String),
 }
 
@@ -279,9 +279,18 @@ pub fn ask(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     std::thread::spawn(move || {
-        let messages = build_messages(&registry, &screen, &history, &question);
-        match chat(&cfg, messages, "ask") {
-            Ok(text) => {
+        // Memory (Axis B): retrieve from Mars's OWN knowledge (docs + tunable knobs)
+        // so the agent can answer "how do I…" and propose self-reconfiguration
+        // accurately. The action registry is already in the base prompt.
+        let mode = crate::retrieval::MemoryMode::from_env();
+        let mut messages = build_messages(&registry, &screen, &history, &question);
+        if mode.includes_docs() {
+            if let Some(ctx) = docs_context(&question) {
+                messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
+            }
+        }
+        match chat_with_id(&cfg, messages, "ask", mode.as_str()) {
+            Ok((text, _call_id)) => {
                 let (display, directive) = parse_directive(&text);
                 let _ = tx.send(AgentEvent::Answer { text: display, directive });
             }
@@ -290,6 +299,20 @@ pub fn ask(
             }
         }
     });
+}
+
+/// Retrieve the most relevant Mars docs + tuning-knob descriptions for `question`,
+/// formatted as a system-context block, or None if nothing is relevant.
+fn docs_context(question: &str) -> Option<String> {
+    use crate::retrieval;
+    let mut corpus = retrieval::doc_chunks();
+    corpus.extend(crate::tuning::knob_descriptions());
+    let hits = retrieval::rank(question, &corpus, 5);
+    if hits.is_empty() {
+        return None;
+    }
+    let body = hits.iter().map(|&i| format!("- {}", corpus[i])).collect::<Vec<_>>().join("\n");
+    Some(format!("Relevant Mars documentation and settings:\n{body}"))
 }
 
 /// Background tab-naming: tiny prompt, no registry, quiet failure.
@@ -374,39 +397,82 @@ pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEven
 
 /// W3: turn an English request into ONE shell command (no prose, no fences).
 /// ALWAYS sends exactly one event so the caller's spinner can never wedge.
+/// Synchronous shell translation with memory retrieval + logging. Returns the
+/// extracted command and its `call_id`. Shared by the async composer and the
+/// headless `mars translate` primitive the Python eval harness drives.
+///
+/// Memory (Axis A): when the active [`crate::retrieval::MemoryMode`] includes
+/// history, the user's own past `(request → command)` pairs + recent shell history
+/// are retrieved and shown as few-shot examples — the "sits at the terminal"
+/// advantage a standalone translator can't have. The variant is logged.
+pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
+    let mode = crate::retrieval::MemoryMode::from_env();
+    let examples = if mode.includes_history() { command_fewshot(request) } else { String::new() };
+    let system = format!(
+        "You convert an English request into ONE shell command. Output the command \
+         and nothing else — no explanation, no markdown, no backticks, no leading $. \
+         Use the visible screen for context (cwd, filenames) when relevant. If the \
+         request is already a shell command, return it unchanged.{}",
+        if examples.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nThis user's own commands (prefer their conventions — e.g. a \
+                 project alias/script over a generic equivalent):\n{examples}"
+            )
+        }
+    );
+    let messages = vec![
+        serde_json::json!({ "role": "system", "content": system }),
+        serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
+    ];
+    let (text, call_id) = chat_with_id(cfg, messages, "shell", mode.as_str())?;
+    let command = text
+        .trim()
+        .trim_matches('`')
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches("$ ")
+        .to_string();
+    Ok((command, call_id))
+}
+
 pub fn translate_shell(cfg: AgentConfig, request: String, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content":
-                "You convert an English request into ONE shell command. Output the \
-                 command and nothing else — no explanation, no markdown, no backticks, \
-                 no leading $. Use the visible screen for context (cwd, filenames) \
-                 when relevant. If the request is already a shell command, return it \
-                 unchanged." }),
-            serde_json::json!({ "role": "user", "content":
-                format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
-        ];
-        let ev = match chat(&cfg, messages, "shell") {
-            Ok(text) => {
-                let command = text
-                    .trim()
-                    .trim_matches('`')
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("$ ")
-                    .to_string();
-                if command.is_empty() {
-                    AgentEvent::Error("couldn't translate that — rephrase and retry".into())
-                } else {
-                    AgentEvent::ShellTranslation { command }
-                }
+        let ev = match translate_once(&cfg, &request, &screen) {
+            Ok((command, _)) if command.is_empty() => {
+                AgentEvent::Error("couldn't translate that — rephrase and retry".into())
             }
+            Ok((command, call_id)) => AgentEvent::ShellTranslation { command, call_id },
             Err(e) => AgentEvent::Error(e.to_string()),
         };
         let _ = tx.send(ev);
     });
+}
+
+/// Format the top few retrieved command-memory / shell-history entries for `request`
+/// as few-shot lines, or "" if memory is empty. Command-memory pairs (request →
+/// command) rank ahead of bare history commands.
+fn command_fewshot(request: &str) -> String {
+    use crate::retrieval;
+    let mem = retrieval::load_command_memory(); // (request, command)
+    let hist = retrieval::shell_history(500); // recent commands
+    // Rank memory pairs by their request text; history by the command text.
+    let mem_docs: Vec<String> = mem.iter().map(|(r, _)| r.clone()).collect();
+    let mut lines: Vec<String> = retrieval::rank(request, &mem_docs, 3)
+        .into_iter()
+        .map(|i| format!("- {} → {}", mem[i].0, mem[i].1))
+        .collect();
+    for i in retrieval::rank(request, &hist, 5) {
+        let cmd = &hist[i];
+        if !lines.iter().any(|l| l.contains(cmd.as_str())) {
+            lines.push(format!("- {cmd}"));
+        }
+    }
+    lines.truncate(6);
+    lines.join("\n")
 }
 
 /// Extract "retry in 14.89s"-style hints from a 429 message → whole seconds.

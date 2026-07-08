@@ -292,6 +292,11 @@ pub struct App {
     /// Shell composer: the query is a ready-to-run command (translated or
     /// typed literally with no key) — the next Enter runs it.
     pub shell_ready: bool,
+    /// Eval instrumentation: the `call_id` of the pending shell translation and the
+    /// English request that produced it, so accept/edit/reject is logged (and the
+    /// accepted command is remembered for corrective memory).
+    translate_call_id: Option<u64>,
+    translate_request: Option<String>,
     /// Session auto-naming: fired once per still-numeric session.
     session_name_attempted: bool,
     /// Undo coalescing: the kind of edit run currently in progress.
@@ -403,6 +408,8 @@ impl App {
             bg_busy: false,
             auto_name_attempted: std::collections::HashSet::new(),
             shell_ready: false,
+            translate_call_id: None,
+            translate_request: None,
             session_name_attempted: false,
             close_confirmed: false,
             force_close_confirm: false,
@@ -2541,6 +2548,12 @@ impl App {
     }
 
     fn close_bar(&mut self) {
+        // A pending, un-accepted translation dismissed here = a reject signal.
+        // (Accept clears translate_call_id first, so this only fires on cancel.)
+        if let Some(id) = self.translate_call_id.take() {
+            crate::llm_log::record_outcome(id, None, false, true);
+        }
+        self.translate_request = None;
         self.palette = None;
         self.mode = self.bar_return.clone();
         self.agent_answer = None;
@@ -2722,7 +2735,15 @@ impl App {
                 }
                 if self.shell_ready || !agent::AgentConfig::from_env().is_configured() {
                     // Command is ready (translated), or there's no key to
-                    // translate with → run what's shown.
+                    // translate with → run what's shown. Record accept BEFORE
+                    // close_bar clears the correlation state, and remember the
+                    // (request → accepted command) pair for corrective memory.
+                    if let Some(id) = self.translate_call_id.take() {
+                        if let Some(req) = self.translate_request.take() {
+                            crate::retrieval::remember_command(&req, &cmd);
+                        }
+                        crate::llm_log::record_outcome(id, Some(&cmd), false, false);
+                    }
                     self.close_bar();
                     self.run_shell_command(&cmd);
                 } else {
@@ -2732,6 +2753,7 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
+                self.on_translation_edited();
                 self.shell_ready = false; // an edit invalidates the translation
                 self.agent_answer = None; // and clears any stale error
                 if let Some(p) = self.palette.as_mut() {
@@ -2743,6 +2765,7 @@ impl App {
                 }
             }
             KeyCode::Char(c) if none || shift => {
+                self.on_translation_edited();
                 self.shell_ready = false;
                 self.agent_answer = None;
                 if let Some(p) = self.palette.as_mut() { p.query.push(c); }
@@ -3070,7 +3093,18 @@ impl App {
             return;
         }
         self.agent_pending = true;
+        self.translate_request = Some(text.clone()); // for the corrective-memory pair
         agent::translate_shell(cfg, text, self.screen_context(), self.agent_tx.clone());
+    }
+
+    /// Editing a ready translation invalidates it — log it as an "edited" outcome
+    /// (once) so the accept/edit/reject split is measurable.
+    fn on_translation_edited(&mut self) {
+        if self.shell_ready {
+            if let Some(id) = self.translate_call_id.take() {
+                crate::llm_log::record_outcome(id, None, true, false);
+            }
+        }
     }
 
     /// Run `cmd` in a terminal pane: reuse one in this tab, else open one here.
@@ -3750,7 +3784,7 @@ impl App {
                         self.rename_session_to = Some(name);
                     }
                 }
-                AgentEvent::ShellTranslation { command } => {
+                AgentEvent::ShellTranslation { command, call_id } => {
                     self.agent_pending = false;
                     // Only meaningful if still composing a shell command.
                     let is_shell = self
@@ -3763,6 +3797,7 @@ impl App {
                             p.query = command;
                         }
                         self.shell_ready = true; // Enter now runs the translated command
+                        self.translate_call_id = Some(call_id); // correlate the outcome
                         self.agent_answer = None; // clear any prior error
                     }
                 }

@@ -112,6 +112,16 @@ fn knob(value: serde_json::Value, description: &str) -> Knob {
     Knob { value, description: description.to_string() }
 }
 
+/// The tunable knobs as human-readable lines (name, default, description) — a
+/// retrieval corpus so the agent can answer/​propose self-reconfiguration
+/// ("set autosave to 60s" → the `autosave_secs` knob).
+pub fn knob_descriptions() -> Vec<String> {
+    default_knobs()
+        .into_iter()
+        .map(|(name, k)| format!("{name} (default {}): {}", k.value, k.description))
+        .collect()
+}
+
 /// The default knob map, with the semantic explanations that make the file
 /// safely editable by a human or an agent.
 fn default_knobs() -> Vec<(&'static str, Knob)> {
