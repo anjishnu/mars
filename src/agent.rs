@@ -434,21 +434,28 @@ fn strip_reasoning(text: &str) -> String {
     out.trim().to_string()
 }
 
-/// Single choke point for every LLM call. `task` tags the call (`ask`, `shell`,
-/// `watch`, …) for the debug log. Times the call, captures real token usage, and
-/// records it when MARS_LLM_DEBUG is on — then returns the reasoning-stripped
-/// reply. Broker mode proxies home (logged there, where the HTTP call happens).
-pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>, task: &str) -> anyhow::Result<String> {
+/// Single choke point for every LLM call. `task` tags the call; `retrieval` names
+/// the memory variant that shaped the prompt ("n/a" when the path doesn't retrieve).
+/// Times the call, captures real token usage, logs it under a fresh `call_id` when
+/// MARS_LLM_DEBUG is on, and returns `(reasoning-stripped reply, call_id)`. The
+/// call_id lets a later behavioral outcome (accept/edit/reject) be correlated.
+pub fn chat_with_id(
+    cfg: &AgentConfig,
+    messages: Vec<serde_json::Value>,
+    task: &str,
+    retrieval: &str,
+) -> anyhow::Result<(String, u64)> {
     // Remote box: proxy the whole call home over the forwarded socket. No key,
-    // no Authorization header, ever constructed here.
+    // no Authorization header, ever constructed here. (Logged home-side.)
     if cfg.provider == "broker" {
         let sock = cfg
             .broker_sock
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("broker mode with no socket"))?;
-        return crate::broker::chat_via_broker(sock, cfg, messages);
+        return crate::broker::chat_via_broker(sock, cfg, messages).map(|t| (t, 0));
     }
 
+    let call_id = crate::llm_log::next_call_id();
     let start = std::time::Instant::now();
     let result = if cfg.provider == "anthropic" {
         chat_anthropic(cfg, &messages)
@@ -460,22 +467,28 @@ pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>, task: &str) -> 
     match &result {
         Ok((text, pt, ct)) => {
             crate::llm_log::record(&crate::llm_log::CallRecord {
-                task, provider: cfg.provider, model: &cfg.model,
+                call_id, task, provider: cfg.provider, model: &cfg.model, retrieval,
                 prompt_tokens: *pt, completion_tokens: *ct, latency_ms,
                 ok: true, error: None, input: &messages, output: text,
             });
-            Ok(strip_reasoning(text))
+            Ok((strip_reasoning(text), call_id))
         }
         Err(e) => {
             let msg = e.to_string();
             crate::llm_log::record(&crate::llm_log::CallRecord {
-                task, provider: cfg.provider, model: &cfg.model,
+                call_id, task, provider: cfg.provider, model: &cfg.model, retrieval,
                 prompt_tokens: 0, completion_tokens: 0, latency_ms,
                 ok: false, error: Some(&msg), input: &messages, output: "",
             });
             Err(anyhow::anyhow!("{msg}"))
         }
     }
+}
+
+/// Convenience wrapper for callers that don't need the `call_id` correlation
+/// (watch / auto-name / session-name / remote) and don't retrieve.
+pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>, task: &str) -> anyhow::Result<String> {
+    chat_with_id(cfg, messages, task, "n/a").map(|(text, _)| text)
 }
 
 /// OpenAI-compatible providers (OpenAI, Groq, Gemini's OpenAI shim, custom,

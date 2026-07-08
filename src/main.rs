@@ -110,6 +110,10 @@ fn main() -> Result<()> {
     let mut args = raw_args.into_iter().filter(|a| a != "--llm-debug");
     let first = args.next();
 
+    // Bookend this invocation as a session in the debug log (no-op when logging
+    // is off). Held for the whole process; session_end fires on any exit path.
+    let _llm_session = llm_log::SessionGuard::start();
+
     match first.as_deref() {
         Some("help") | Some("--help") | Some("-h") => {
             println!("{HELP}");
@@ -2000,24 +2004,32 @@ fn selfcheck() -> Result<()> {
         std::env::set_var("MARS_LLM_DEBUG", "1");
         let input = vec![serde_json::json!({"role": "user", "content": "hi"})];
         llm_log::record(&llm_log::CallRecord {
-            task: "ask", provider: "groq", model: "qwen/qwen3-32b",
+            call_id: 1, task: "ask", provider: "groq", model: "qwen/qwen3-32b", retrieval: "none",
             prompt_tokens: 100, completion_tokens: 20, latency_ms: 500,
             ok: true, error: None, input: &input, output: "hello",
         });
         let logged = std::fs::read_to_string(llm_log::log_path())?;
         assert!(logged.contains("\"task\":\"ask\"") && logged.contains("qwen/qwen3-32b"), "call not logged");
         assert!(logged.contains("\"total_tokens\":120"), "token total not computed");
-        llm_log::stats(false)?; // aggregation runs cleanly
+        assert!(logged.contains("\"call_id\":1") && logged.contains("\"session_id\""), "call_id/session_id not logged");
+        // Session boundary events + outcome sink round-trip.
+        llm_log::session_start();
+        llm_log::record_outcome(1, Some("git status"), false, false);
+        let outc = std::fs::read_to_string(llm_log::outcomes_path())?;
+        assert!(outc.contains("\"call_id\":1") && outc.contains("git status"), "outcome not logged");
+        assert!(std::fs::read_to_string(llm_log::log_path())?.contains("session_start"), "session event not logged");
+        llm_log::stats(false)?; // aggregation runs cleanly, skips session events
         // Disabled → strictly no writes.
         std::env::remove_var("MARS_LLM_DEBUG");
         let before = std::fs::metadata(llm_log::log_path())?.len();
         llm_log::record(&llm_log::CallRecord {
-            task: "ask", provider: "groq", model: "m",
+            call_id: 2, task: "ask", provider: "groq", model: "m", retrieval: "none",
             prompt_tokens: 1, completion_tokens: 1, latency_ms: 1,
             ok: true, error: None, input: &input, output: "x",
         });
         assert_eq!(std::fs::metadata(llm_log::log_path())?.len(), before, "record() wrote while disabled");
         let _ = std::fs::remove_file(llm_log::log_path());
+        let _ = std::fs::remove_file(llm_log::outcomes_path());
         println!("[selfcheck] llm debug log + stats ..... PASS");
     }
 

@@ -9,6 +9,8 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Logging is off unless explicitly enabled (env, or the `--llm-debug` flag,
@@ -26,12 +28,96 @@ pub fn log_dir() -> PathBuf {
 pub fn log_path() -> PathBuf {
     log_dir().join("calls.jsonl")
 }
+/// Behavioral outcomes (accept/edit/reject of a suggestion) land here, keyed by
+/// `call_id`, to be joined against `calls.jsonl` offline. Separate file so the
+/// outcome — which arrives *after* the call returns — never mutates a call line.
+pub fn outcomes_path() -> PathBuf {
+    log_dir().join("outcomes.jsonl")
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A per-process session id, so calls (and session_start/end) can be grouped for
+/// per-session and per-session-hour token stats. Stable for the life of the process.
+pub fn session_id() -> &'static str {
+    static SID: OnceLock<String> = OnceLock::new();
+    SID.get_or_init(|| format!("{}-{}", std::process::id(), now_secs()))
+}
+
+/// Monotonic per-call id (unique within a process) used to correlate a call with
+/// its later behavioral outcome.
+pub fn next_call_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Append a JSON value as one line to the debug log (no-op unless enabled).
+fn append(path: &PathBuf, line: &serde_json::Value) {
+    if !enabled() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(log_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Emit a session boundary event so per-session / per-session-hour rates are
+/// computable offline. `kind` is "session_start" or "session_end".
+pub fn session_event(kind: &str) {
+    append(
+        &log_path(),
+        &serde_json::json!({ "ts": now_secs(), "kind": kind, "session_id": session_id() }),
+    );
+}
+pub fn session_start() {
+    session_event("session_start");
+}
+pub fn session_end() {
+    session_event("session_end");
+}
+
+/// RAII bookend: emits `session_start` on creation and `session_end` on drop, so
+/// every `mars` invocation delimits a session in the log for per-session stats.
+pub struct SessionGuard;
+impl SessionGuard {
+    pub fn start() -> Self {
+        session_start();
+        SessionGuard
+    }
+}
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        session_end();
+    }
+}
+
+/// Record a behavioral outcome for a prior call (accept unedited / edited / reject).
+pub fn record_outcome(call_id: u64, accepted_command: Option<&str>, edited: bool, rejected: bool) {
+    append(
+        &outcomes_path(),
+        &serde_json::json!({
+            "ts": now_secs(),
+            "session_id": session_id(),
+            "call_id": call_id,
+            "accepted_command": accepted_command,
+            "edited": edited,
+            "rejected": rejected,
+        }),
+    );
+}
 
 /// One recorded call. Borrows so the hot path allocates nothing when disabled.
 pub struct CallRecord<'a> {
+    pub call_id: u64,
     pub task: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
+    /// Which memory/retrieval variant was active for this call ("n/a" when the
+    /// path doesn't retrieve; e.g. "none", "history", "docs", "full").
+    pub retrieval: &'a str,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub latency_ms: u64,
@@ -44,19 +130,15 @@ pub struct CallRecord<'a> {
 /// Append a call to the JSONL log (no-op unless debug is enabled). Best-effort:
 /// a logging failure must never disturb the agent.
 pub fn record(r: &CallRecord) {
-    if !enabled() {
-        return;
-    }
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     let line = serde_json::json!({
-        "ts": ts,
+        "ts": now_secs(),
         "pid": std::process::id(),
+        "session_id": session_id(),
+        "call_id": r.call_id,
         "task": r.task,
         "provider": r.provider,
         "model": r.model,
+        "retrieval": r.retrieval,
         "prompt_tokens": r.prompt_tokens,
         "completion_tokens": r.completion_tokens,
         "total_tokens": r.prompt_tokens + r.completion_tokens,
@@ -66,11 +148,7 @@ pub fn record(r: &CallRecord) {
         "input": r.input,
         "output": r.output,
     });
-    let dir = log_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
-        let _ = writeln!(f, "{line}");
-    }
+    append(&log_path(), &line);
 }
 
 #[derive(Default)]
@@ -122,6 +200,9 @@ pub fn stats(raw: bool) -> anyhow::Result<()> {
     let mut total = Agg::default();
     for line in content.lines() {
         let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if j.get("kind").is_some() {
+            continue; // session_start / session_end boundary event, not a call
+        }
         let task = j["task"].as_str().unwrap_or("?").to_string();
         let model = j["model"].as_str().unwrap_or("?").to_string();
         let pt = j["prompt_tokens"].as_u64().unwrap_or(0);
