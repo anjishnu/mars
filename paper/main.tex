@@ -1,0 +1,486 @@
+\documentclass[11pt]{article}
+
+% "preprint" gives a non-anonymous version with page numbers (EMNLP system
+% demonstrations are not anonymized). Switch to "final" for camera-ready.
+\usepackage[preprint]{acl}
+
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{multirow}
+
+% Inline "to be filled from the evaluation run" marker. The evaluation is fully
+% specified but not yet executed; every number it produces is flagged with this.
+\newcommand{\todo}[1]{\textcolor{red}{\small\textsf{[TODO: #1]}}}
+\newcommand{\tbd}{\textcolor{red}{\textsf{TBD}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{MARS: A Memory-Augmented Rust Shell ---\\
+a Terminal-Resident LLM Agent that Sees Your Workspace and Remembers}
+
+\author{Anjishnu Kumar \\
+  \texttt{anjishnu.kr@gmail.com} \\}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+LLM assistants for developers are placed \emph{beside} the work, not inside it: a
+browser tab, a separate CLI, or a cloud IDE that sees only what is pasted into it,
+dies when its window closes, and --- run against a remote GPU box --- either ships
+source and API keys to a machine you do not trust or reasons about a host it cannot
+see. Two structural deficits follow: the agent is \textbf{blind} to the terminal and
+\textbf{amnesiac} across sessions. We present \textbf{MARS} (Memory-Augmented Rust
+Shell), a single-binary terminal editor, multiplexer, and built-in agent whose thesis
+is \emph{memory augmentation}: an agent that lives at the terminal, sees every pane as
+structured context, and \emph{remembers} --- the user's own accepted commands and
+shell history for translation, and MARS's own documentation, action registry, and
+tuning-knob descriptions for self-knowledge and self-reconfiguration, retrieved by
+lightweight BM25. A standalone translator cannot do this: it neither sits at the
+terminal nor accumulates the user's context. Around this core MARS adds the
+\emph{minimum} machinery to make it work: a portable, registry-validated directive
+protocol; corrective memory that turns a once-wrong command right and keeps it right;
+a model cascade that rotates open models for free-tier limits and escalates to closed
+frontier models only on a detected quality failure; a persistent daemon so the agent
+watches and briefs across detach; and a key-never-leaves-home SSH broker for keyless
+remote boxes. We describe the agent, audit an ML-researcher workflow with versus
+without it, detail the enabling architecture, and specify --- but do not yet report ---
+a two-axis, memory-ablated evaluation.
+\end{abstract}
+
+\section{Introduction}
+
+An ML researcher at a terminal is almost never using one tool. They launch and babysit
+training runs in a shell, edit configs and model code in an editor, hold several
+sessions open across remote GPU boxes with a multiplexer, and --- since 2023 --- ask an
+LLM to explain a CUDA out-of-memory trace or draft an \code{rsync} incantation. These
+tools do not share state. The editor does not know what the shell printed; the
+multiplexer cannot reason over its own scrollback; and the assistant, living in a
+separate window, sees only the fragment the user copies into it. The dominant cost of
+the workflow is not thinking but \emph{shuttling context}: select the stack trace,
+switch windows, paste, retype the surrounding situation in prose, read, switch back,
+find the file, jump to the line.
+
+Two deficits make this acute exactly where researchers most need help. The agent is
+\textbf{blind}: it cannot see the adjacent pane's editor buffer or the failing run's
+scrollback, so every question begins with a copy-paste. And it is \textbf{amnesiac}:
+it forgets the project-specific launch command you corrected yesterday, forgets ``where
+was I'' when you return to a detached run, and knows nothing about the tool it is
+embedded in. Worse, in the remote setting that defines GPU work, cloud and
+laptop-resident tools \textbf{leak code and keys}: to reach the work they move source
+and credentials onto boxes the researcher does not own, and they cannot supervise a
+run on a host they were never on.
+
+\paragraph{Thesis: memory augmentation at the terminal.}
+MARS is built on the claim that the assistant belongs \emph{inside the thing that holds
+the work}, and that its defining capability is \emph{memory}. A terminal-resident agent
+can do two things a standalone translator structurally cannot, because it sits where the
+work is and persists alongside it: it can \emph{see} (read every editor buffer, terminal
+pane, scrollback, and the layout as structured context, with no copy-paste), and it can
+\emph{remember} (retrieve the user's own accumulated commands and MARS's own ground truth
+to answer better than a cold model). Memory augmentation is the through-line of this
+paper; sight and persistence are the substrate that makes it possible.
+
+\paragraph{Contributions.}
+(1) A memory-augmented terminal agent (\S\ref{sec:agent}) whose two retrieval axes ---
+over the user's commands and over MARS's own docs/registry --- plus a corrective-memory
+loop are the NLP core, delivered through a deliberately minimal, portable,
+registry-validated directive protocol. (2) A persona-grounded audit
+(\S\ref{sec:audit}) of an ML-researcher workflow with versus without the agent.
+(3) A single-binary architecture (\S\ref{sec:system}) --- source-agnostic core,
+server-renders-ANSI session daemon, and a key-never-leaves-home SSH broker --- framed as
+the substrate the memory-augmented agent requires. (4) A design philosophy
+(\S\ref{sec:philosophy}) of \emph{tasteful minimalism} and an \emph{honesty invariant}.
+(5) A fully specified, memory-ablated evaluation (\S\ref{sec:eval}); the harness ships in
+the binary, results are pending and marked \tbd. MARS is open source (MIT),
+\code{cargo install mars-terminal}, $\sim$9{,}500 lines of Rust.
+
+\section{The Memory-Augmented Agent}
+\label{sec:agent}
+
+\subsection{Tasteful minimalism}
+\label{sec:minimal}
+
+MARS adds the \emph{minimum} machinery that makes memory augmentation work, and no more.
+The agent is not a second subsystem bolted beside the editor; it is a fifth input device
+that resolves, like every other, to one canonical \code{Action} registry. Everything
+runnable is a variant of a single \code{Action} enum, and three interfaces resolve intent
+to it --- a direct chord (procedural retrieval), a fuzzy command bar (recognition), and
+the agent (natural language) --- all terminating in one dispatch point. A capability added
+once is therefore chord-bindable, bar-searchable, and agent-invokable at no extra cost.
+Minimalism here is a feature, not an absence: retrieval is lexical (BM25) rather than a
+vector database; the agent speaks a trailing-line text protocol rather than a bespoke
+tool-calling schema; memory is two append-only files. Each choice is the smallest thing
+that clears the bar, which keeps the system legible and its failure modes few. The rest
+of this section enumerates the NLP features and, for each, \emph{how} it is achieved.
+
+\subsection{The agent as a validated input device}
+
+The agent is provider-agnostic over any OpenAI-compatible endpoint (plus a native
+Anthropic path), with paid-first precedence. Rather than native tool-calling it uses a
+\textbf{trailing-line directive vocabulary}, chosen for model portability (it works with
+local open models) and a human-readable confirm gate. The system prompt hands the model a
+live-generated catalog of every action with its description and current keybinding, and
+asks it to end with exactly one directive:
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Directive} & \textbf{Meaning} \\
+\midrule
+\code{RUN: <Action>}  & fire a registry action \\
+\code{TYPE: <cmd>}    & type a shell command into a pane \\
+\code{OPEN: path:line}& jump to a file/line \\
+\code{NEED: <ctx>}    & request more context; re-ask once \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{How it stays safe:} \emph{registry validation}. A \code{RUN:} whose
+action name does not resolve against the live registry is rejected before it can fire, so
+a hallucinated action is structurally impossible --- the same enum that defines ``what
+MARS can do'' defines what the agent may invoke. A \code{RUN:} on a destructive action
+passes the same confirmation gate a human would; agent output is otherwise inert text
+until the user presses Enter. \code{NEED:} implements a model-driven context selector: the
+model can pull the full scrollback or another tab on demand rather than MARS always
+dumping everything, and MARS supplies the source and re-asks \emph{once} (the depth is
+hard-capped, so a loop cannot form). Parsing tolerates markdown noise and strips
+\code{<think>} blocks from reasoning models.
+
+\subsection{Natural-language shell translation}
+
+In a terminal pane, \code{Ctrl+Space} then plain English (``find the biggest checkpoints
+here'') is translated to a shell command and shown at the cursor for confirmation ---
+never auto-run. \textbf{How:} the request plus on-screen context (current directory,
+recent scrollback) is sent to the cascade (\S\ref{sec:cascade}); the reply is cleaned and
+displayed; if the user instead typed a real MARS command it is recognized and dispatched
+directly, and \code{!} forces raw shell. The situational context and shown-before-run
+teaching are the edge over a context-free translator
+\citep{lin2018nl2bash,lin2017tellina}.
+
+\subsection{Two memory axes: the core}
+\label{sec:memory}
+
+The heart of MARS is retrieval over the agent's \emph{own} context --- deliberately
+lexical (BM25, $k_1{=}1.5$, $b{=}0.75$) because the claim under test is that \emph{sitting
+at the terminal} beats a generic model, not that the retriever is fancy; embeddings do not
+pay their complexity rent below $\sim$1k items \citep{robertson2009bm25,lewis2020rag}.
+Two corpora are ranked and injected as prompt context.
+
+\paragraph{Axis A --- command memory (the user's context).}
+Every accepted \code{(request $\to$ command)} translation is appended to
+\code{\char`~/.mars/cmd\_memory.jsonl}, and recent shell history is read from
+\code{\$HISTFILE}. \textbf{How:} on a new request, BM25 ranks these against it and the top
+pairs are injected as few-shot exemplars. This is what a standalone translator cannot do
+--- it never observed the user run \code{sbatch --gres=gpu:8 train.sh} last week, so it
+cannot reproduce their project-specific idiom; MARS did, and can.
+
+\paragraph{Axis B --- system knowledge (MARS's own context).}
+MARS's documentation, the action registry, and the described tuning knobs are chunked and,
+on a \code{NEED: docs} pull, BM25-ranked into the \code{ask} prompt. \textbf{How:} because
+the registry and knob descriptions are generated from code, this is ground truth --- the
+agent answers ``how do I split the screen?'' and ``make the accent orange'' from the live
+keymap and the actual knob, not from priors, and honestly says ``MARS can't do that yet''
+when retrieval returns nothing.
+
+\subsection{Corrective memory: wrong \texorpdfstring{$\to$}{->} right, compounding}
+
+Command memory is not a static cache but a \emph{corrective} loop. \textbf{How:} when the
+user edits or rejects a proposed command and runs a different one, the \emph{accepted}
+pair is what gets stored (an outcome hook records accept/edit/reject, joined by call id).
+The next similar request retrieves that correction as an exemplar, so a translation that
+was once wrong is answered right thereafter --- and the effect compounds as the store
+grows. This wrong-to-right lift, measured against a no-memory baseline, is the central
+quantity of the evaluation (\S\ref{sec:eval}), and it is a capability only a
+terminal-resident, persistent agent can accumulate.
+
+\subsection{The model cascade}
+\label{sec:cascade}
+
+Most terminal LLM traffic is cheap (naming a tab, summarizing a quiet pane: automatic,
+tiny, latency-insensitive, free if wrong); the quality-critical traffic (triaging a
+failure and proposing a possibly-destructive action) is narrow. A per-task \emph{cascade}
+exploits this with two moves it never confuses. \textbf{Rotate for limits (horizontal):}
+every provider meters each model \emph{family} on separate rate-limit counters, so
+rotating a task across $N$ same-tier open models multiplies the effective free-tier ceiling
+by roughly $N$, triggered reactively by a \code{429}, strictly in-tier. \textbf{Escalate
+for quality (vertical):} a task starts at a complexity tier and re-runs one tier up only on
+a \emph{detected} failure --- and MARS detects one deterministically because its output is
+structured and validated: a \code{RUN:} naming an action absent from the registry is a
+free, unambiguous signal a small model erred. Three tiers fall out of the real workloads:
+reflex (auto-naming, watch) on fast open models; utility (shell, normal Q\&A) on strong
+open models; deep (triage, destructive-directive contexts) reaching closed frontier models
+only when the work needs them. Rotation never drops below a task's quality floor.
+
+\section{ML-Researcher Workflow Audit}
+\label{sec:audit}
+
+We ground the value in a concrete persona: an ML engineer training models across a laptop
+and several remote GPU boxes, who launches and monitors long runs, triages failures,
+recalls project-specific commands, and reconfigures tools. Table~\ref{tab:audit} contrasts
+the workflow without and with the memory-augmented terminal agent; the narrative below is
+honest about where the gain is real and where it is modest.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}p{2.0cm}p{2.35cm}p{2.4cm}@{}}
+\toprule
+\textbf{Task} & \textbf{Without} & \textbf{With MARS} \\
+\midrule
+Recall a project's launch command &
+retype from memory or \code{grep} history by hand &
+BM25 over your own accepted commands returns it \\[2pt]
+A once-wrong command &
+wrong again next time &
+corrective memory: right thereafter \\[2pt]
+Monitor a 40-min run, then walk away &
+babysit, or miss the failure &
+watch fires in the daemon while detached \\[2pt]
+Return after a meeting &
+scroll panes to reconstruct state &
+Away Digest: what finished / failed / changed \\[2pt]
+Triage a CUDA OOM trace &
+copy trace to a chat tab, retype context &
+agent sees the pane; jump to \code{file:line} \\[2pt]
+Agent on a keyless GPU box &
+export key onto the box (leaks) &
+broker proxies home; key never lands \\[2pt]
+Reconfigure the tool &
+read docs, edit JSON by hand &
+``autosave more often'' $\to$ validated knob edit \\
+\bottomrule
+\end{tabular}
+\caption{The ML-researcher workflow without versus with the memory-augmented terminal
+agent. The recurring gain is \emph{context that is preserved and recalled} rather than
+reconstructed.}
+\label{tab:audit}
+\end{table}
+
+The largest, most honest win is \textbf{context preservation and recall}. Command recall
+(rows 1--2) is where memory augmentation is decisive: the agent reproduces \emph{your}
+idiom because it saw you use it, and a correction sticks. \textbf{Persistence} (rows 3--4)
+turns sight into across-time vigilance --- a run watched while the laptop is closed, and a
+failures-first briefing on return --- which no window-bound tool offers. \textbf{Remote
+safety} (row 6) is categorical: the key is structurally incapable of landing on a box the
+researcher does not own. We are candid that NL$\to$shell translation itself (implicit in
+several rows) is contested territory; its MARS-specific edge is the memory and situational
+context, not the translation.
+
+\section{System Architecture}
+\label{sec:system}
+
+The architecture exists to make the memory-augmented agent possible; it is deliberately
+small.
+
+\paragraph{One source-agnostic core.}
+The application core (\code{App}) owns all state --- buffers, panes, tabs, terminals, the
+agent conversation --- and never reads or writes a TTY. Input arrives as source-neutral
+\code{InputEvent} values; output is a stateless render pass painting a \code{ratatui}
+backend. The identical \code{App} therefore runs in three configurations with no forks:
+standalone on a real TTY, a headless session daemon over a socket, and a test backend
+(\S\ref{sec:eval-honest}). PTY panes (\code{portable-pty} + a \code{vt100} parser) and LLM
+calls run on their own threads, producing on channels that a per-frame \code{tick()} drains;
+they never depend on anyone watching.
+
+\paragraph{Persistence: thin client, server renders.}
+Session persistence is a process split, not a save/restore layer. The server runs the whole
+\code{App} headless and emits \code{ratatui}'s own ANSI byte stream over a Unix socket; the
+client owns the real TTY and is a thin pump. We chose server-renders-ANSI over a structured
+protocol because it reuses 100\% of the rendering pipeline with no second renderer to build.
+Because terminal and agent threads never depended on the render loop, \code{tick()} keeps
+running with no client attached --- which is exactly why a watched run keeps being watched
+while detached, and why the agent can accumulate memory and brief across sessions.
+
+\paragraph{The sigil command bar.}
+One gesture (\code{Ctrl+Space}) opens the bar, and its \emph{first character declares the
+namespace}: plain text fuzzy-searches actions, \code{!} runs a shell command, \code{?} asks
+the agent, \code{@} opens the file finder. This is \emph{not} an intent classifier ---
+routing is deterministic sigil dispatch, so it never mispredicts and needs no model to
+decide where input goes (hence no classification metric to report; \S\ref{sec:eval}).
+
+\paragraph{Key-never-leaves-home SSH broker.}
+A secret is a fact about \emph{you}, not a machine, yet exporting your key on every GPU box
+scatters it into environments, shell histories, and dotfiles you do not control. MARS
+relocates \emph{where the call fires}: a home daemon (\code{mars keyd}) holds the key; when
+you \code{mars ssh <host>} its socket is reverse-forwarded (riding the system \code{ssh}, so
+jump hosts and hardware keys work unchanged); the remote agent serializes the request
+\emph{home}, the broker injects \code{Authorization}, calls the provider, and streams the
+completion back. The key never lands on the remote --- not on disk, in env, or in memory ---
+so a compromised box has nothing to steal, and access ends the instant you detach. Because
+escalation happens home-side, a keyless box transparently gets frontier-quality triage.
+
+\paragraph{Self-instrumentation.}
+Running with \code{--llm-debug} logs every call --- task, model, real token counts, latency,
+full prompt and reply --- as one JSONL stream that is at once a cost profile
+(\code{mars llm-stats} ranks per task$\times$model by tokens), a behavioral signal (an
+outcomes file records accept/edit/reject), and the benchmark corpus the evaluation draws on.
+
+\section{Design Philosophy}
+\label{sec:philosophy}
+
+\paragraph{Tasteful minimalism (lead).}
+Every subsystem above is the smallest mechanism that clears its bar: lexical retrieval over
+two flat files, a text directive protocol, one action registry serving all actors, a daemon
+that reuses the render pipeline. The discipline is to \emph{not} add a vector store, a
+tool-calling schema, or a second renderer until a shipped feature demands it. A small,
+legible system has fewer failure modes and is auditable end-to-end --- which is why the
+primary test suite can drive the real thing with no mocks.
+
+\paragraph{The honesty invariant (condensed).}
+No surface may display a keybinding it did not read from the live keymap. Every hint ---
+status bar, dropdown, which-key panel --- derives its binding text from one function at
+render time, so a remap updates every surface at once and no hint can lie. The invariant
+extends to the agent: it is fed the live keymap and cites real bindings, and it is
+capability-tiered, teaching only chords the user's terminal can actually send. Trust in
+hints is the precondition for the editor's self-teaching pedagogy; the same discipline makes
+the agent's citations trustworthy.
+
+\section{Evaluation}
+\label{sec:eval}
+
+\emph{The evaluation is specified in full; the harness ships in the binary (the memory-mode
+flag of \S\ref{sec:memory} and the call log of \S\ref{sec:system}). The study is not yet
+run, so all numbers are placeholders marked \tbd.}
+
+\paragraph{What we do and do not measure.}
+\label{sec:eval-honest}
+System correctness is covered by \code{mars --selfcheck}: a headless run driving the real
+\code{App} with \textbf{no mocks} --- real PTYs, a real daemon over a real socket, covering
+detach/reattach, PTY survival, client takeover, and the directive re-ask cap end-to-end;
+screen assertions parse a real \code{vt100} interpreter rather than substring-matching raw
+bytes. The \emph{agent} evaluation below measures answer quality, and turns one knob: the
+memory variant.
+
+\paragraph{Axis A --- command translation.}
+Given an English request and terminal context, is the produced command correct? We score
+with an LLM judge \citep{zheng2023judging} against a gold set drawn from NL2Bash-style data
+\citep{lin2018nl2bash} and the logged real distribution. The distinctive measurement is the
+\textbf{corrective-memory lift}: replay a previously-corrected request and measure the
+wrong$\to$right rate. Memory here is the user's own commands.
+
+\paragraph{Axis B --- self-knowledge and reconfigure.}
+Can the agent answer questions about MARS and propose correct config edits (``make the
+accent orange'' $\to$ the right knob)? We score with a Claude oracle against a gold set;
+memory here is MARS's own docs and registry.
+
+\paragraph{Ablation and cost.}
+Both axes run across the four memory variants
+(\code{none}/\code{history}/\code{docs}/\code{full}) and across model tiers. Cost is reported
+in \textbf{tokens per session-hour} (from the log's session boundaries), not dollars, because
+the free-tier multi-provider setting makes a dollar figure volatile.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}llcc@{}}
+\toprule
+\textbf{Axis / Task} & \textbf{Memory} & \textbf{Score\%} & \textbf{$\Delta$} \\
+\midrule
+\multirow{2}{*}{A: translate (T2 open)}   & none    & \tbd & --- \\
+                                          & history & \tbd & \tbd \\
+\multirow{2}{*}{A: translate (T3 closed)} & none    & \tbd & --- \\
+                                          & history & \tbd & \tbd \\
+\midrule
+\multirow{2}{*}{B: self-Q\&A}   & none & \tbd & --- \\
+                                & docs & \tbd & \tbd \\
+\multirow{2}{*}{B: reconfigure} & none & \tbd & --- \\
+                                & docs & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy by axis, model tier, and memory variant. \todo{fill from eval}}
+\label{tab:axes}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Memory} & \textbf{Wrong$\to$right} & \textbf{Right$\to$wrong} & \textbf{Tok/sess-hr} \\
+\midrule
+none    & ---  & ---  & \tbd \\
+history & \tbd & \tbd & \tbd \\
+docs    & \tbd & \tbd & \tbd \\
+full    & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\caption{Corrective-memory lift and token cost. The right$\to$wrong column audits whether
+memory ever \emph{harms} a correct answer. \todo{fill from eval}}
+\label{tab:lift}
+\end{table}
+
+Tables~\ref{tab:axes}--\ref{tab:lift} give the reporting shape. Our hypotheses (not results):
+command memory lifts open-model accuracy toward the closed-model baseline; doc memory sharply
+raises self-Q\&A while a memoryless model confabulates features; and memory's token overhead
+is modest against a session-hour's baseline traffic.
+
+\paragraph{Limitations.}
+(1) \textbf{No exit-code evaluation}: commands are typed into a PTY fire-and-forget, so Axis~A
+is judged on command \emph{text}, not observed success. (2) \textbf{Tokens, not dollars}, for
+the reason above. (3) \textbf{BM25, not embeddings}: recall is bounded by lexical overlap, a
+deliberate choice at sub-1k corpus size. (4) \textbf{No intent-classification metric}: the bar
+routes by sigil, so routing is deterministic by construction.
+
+\section{Comparison, Availability, Conclusion}
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Capability} & \textbf{MARS} & \textbf{tmux+CC} & \textbf{Warp} & \textbf{Cursor} \\
+\midrule
+Cross-pane sight        & \checkmark & --- & partial & --- \\
+Persistent daemon       & \checkmark & \checkmark & --- & --- \\
+User-command memory     & \checkmark & --- & partial & --- \\
+Watch while detached    & \checkmark & --- & --- & --- \\
+Key never leaves home   & \checkmark & --- & --- & --- \\
+Single local binary     & \checkmark & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\caption{MARS versus tmux+Claude Code (CC), Warp \citep{warp}, and Cursor \citep{cursor}.}
+\label{tab:compare}
+\end{table}
+
+Table~\ref{tab:compare} situates MARS. tmux+Claude Code has a daemon and an agent, but the
+agent runs in one pane and cannot see the adjacent buffer or accumulate the user's
+cross-session command memory. Warp does AI command search well but sees its own blocks, not
+your editor, and is not persistence-first. Cursor runs its intelligence on the laptop while
+remote state lives on the box, and dies with its window. Matching MARS's memory augmentation
+would require each to grow a persistent, terminal-resident memory their architectures do not
+host. MARS's posture toward strong code agents is to be the substrate they run
+\emph{inside}, giving them sight of the other panes \citep{yao2023react,schick2023toolformer},
+not to reimplement them.
+
+\paragraph{Availability.}
+MARS is MIT-licensed and installs with \code{cargo install mars-terminal} (binary \code{mars};
+source \url{https://github.com/anjishnu/mars}); it needs Rust $\geq 1.85$ and runs on macOS and
+Linux, working out of the box with a free-tier key from any supported provider or any
+OpenAI-compatible endpoint. The demonstration shows, live: recalling a previously-corrected
+command from memory, triaging a failure across two panes, watching a training run while
+detached and reattaching to its verdict, and the key-never-leaves-home broker serving an agent
+on a keyless remote GPU box.
+
+\paragraph{Conclusion.}
+MARS argues that a developer's LLM assistant should live \emph{inside} the terminal and that
+its defining capability is \emph{memory}: retrieval over the user's own commands and over the
+tool's own ground truth, accumulated by an agent that sees every pane and persists across
+detach. Built with tasteful minimalism and kept honest by the keymap invariant, MARS turns a
+blind, amnesiac chat window into a terminal-resident colleague that remembers. Running the
+specified evaluation, and filling the numbers that read \tbd, is the immediate next step.
+
+\bibliography{refs}
+
+\end{document}
