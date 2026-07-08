@@ -847,6 +847,23 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("  ", Style::default()),
     ];
 
+    // Recording indicator: when LLM debug logging is on, an unmistakable red chip
+    // (+ the active memory variant) so a full day of eval capture is never silently
+    // lost. Derived live from llm_log::enabled().
+    if crate::llm_log::enabled() {
+        let mem = crate::retrieval::MemoryMode::from_env();
+        let label = if matches!(mem, crate::retrieval::MemoryMode::None) {
+            " ● REC ".to_string()
+        } else {
+            format!(" ● REC mem:{} ", mem.as_str())
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("  ", Style::default()));
+    }
+
     for (key, action) in status_hints(app) {
         spans.push(Span::styled(
             format!(" {} ", key),

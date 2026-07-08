@@ -1,7 +1,7 @@
 //! LLM call observability (debug mode).
 //!
 //! When `MARS_LLM_DEBUG=1` (or `mars --llm-debug`), every `agent::chat()` call
-//! appends one JSON line to `$TMPDIR/mars-llm/calls.jsonl` recording the task,
+//! appends one JSON line to `~/.mars/logs/calls.jsonl` recording the task,
 //! provider, model, real input/output token counts, latency, and the full
 //! prompt + reply. `mars llm-stats` aggregates it into a per-task×model profile
 //! ranked by token consumption — so you can see where the budget goes and
@@ -22,8 +22,18 @@ pub fn enabled() -> bool {
     )
 }
 
+/// Where the debug log lives. Durable by default (`~/.mars/logs/`) so a full day
+/// of dogfooding survives reboots/`$TMPDIR` sweeps; `MARS_LLM_LOG_DIR` overrides
+/// (tests point it at a temp dir so they never touch real captured data). Falls
+/// back to `$TMPDIR/mars-llm` only when `$HOME` is unset.
 pub fn log_dir() -> PathBuf {
-    std::env::temp_dir().join("mars-llm")
+    if let Some(d) = std::env::var_os("MARS_LLM_LOG_DIR") {
+        return PathBuf::from(d);
+    }
+    match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h).join(".mars").join("logs"),
+        None => std::env::temp_dir().join("mars-llm"),
+    }
 }
 pub fn log_path() -> PathBuf {
     log_dir().join("calls.jsonl")

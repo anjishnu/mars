@@ -71,7 +71,8 @@ AGENT  (BETA — an assistant, not an authority; review what it proposes)
 
 LLM DEBUG  (calibrate prompts / right-size models per call)
   mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
-                                 latency) to $TMPDIR/mars-llm/ (or MARS_LLM_DEBUG=1)
+                                 latency) to ~/.mars/logs/ (or MARS_LLM_DEBUG=1;
+                                 export it so session daemons inherit it all day)
   mars llm-stats [--raw]         profile the log: per task×model, ranked by
                                  token use — avg in/out tokens, total, latency
   mars translate \"<english>\"     headless: English → one shell command (logs it)
@@ -2048,6 +2049,12 @@ fn selfcheck() -> Result<()> {
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
     //     stats aggregates it, and logging is a strict no-op when disabled.
     {
+        // SAFETY: isolate the log to a temp dir so the suite NEVER touches the
+        // user's real ~/.mars/logs (a day of captured eval data).
+        let sc_dir = std::env::temp_dir().join(format!("mars-llmtest-{}", std::process::id()));
+        std::fs::create_dir_all(&sc_dir)?;
+        std::env::set_var("MARS_LLM_LOG_DIR", &sc_dir);
+        assert!(llm_log::log_path().starts_with(&sc_dir), "log path not isolated to temp dir!");
         let _ = std::fs::remove_file(llm_log::log_path()); // start clean
         std::env::set_var("MARS_LLM_DEBUG", "1");
         let input = vec![serde_json::json!({"role": "user", "content": "hi"})];
@@ -2078,6 +2085,8 @@ fn selfcheck() -> Result<()> {
         assert_eq!(std::fs::metadata(llm_log::log_path())?.len(), before, "record() wrote while disabled");
         let _ = std::fs::remove_file(llm_log::log_path());
         let _ = std::fs::remove_file(llm_log::outcomes_path());
+        let _ = std::fs::remove_dir_all(&sc_dir);
+        std::env::remove_var("MARS_LLM_LOG_DIR");
         println!("[selfcheck] llm debug log + stats ..... PASS");
     }
 
