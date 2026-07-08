@@ -412,7 +412,8 @@ pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow:
         "You convert an English request into ONE shell command. Output the command \
          and nothing else — no explanation, no markdown, no backticks, no leading $. \
          Use the visible screen for context (cwd, filenames) when relevant. If the \
-         request is already a shell command, return it unchanged.{}",
+         request is already a shell command, return it unchanged. Keep any internal \
+         reasoning to at most 50 tokens, then output only the command.{}",
         if examples.is_empty() {
             String::new()
         } else {
