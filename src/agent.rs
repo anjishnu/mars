@@ -307,12 +307,20 @@ fn docs_context(question: &str) -> Option<String> {
     use crate::retrieval;
     let mut corpus = retrieval::doc_chunks();
     corpus.extend(crate::tuning::knob_descriptions());
+    corpus.extend(retrieval::env_var_reference());
     let hits = retrieval::rank(question, &corpus, 5);
     if hits.is_empty() {
         return None;
     }
     let body = hits.iter().map(|&i| format!("- {}", corpus[i])).collect::<Vec<_>>().join("\n");
-    Some(format!("Relevant Mars documentation and settings:\n{body}"))
+    // Frame it: for a how-to / configuration question, ANSWER by explaining the
+    // exact setting/keybinding/variable and where to set it — do not emit a RUN
+    // directive. This is what fixes the "[would run: X]" non-answers.
+    Some(format!(
+        "Use this Mars reference to answer the user's how-to/configuration question directly — \
+         name the exact keybinding, setting (with its file), or environment variable, and how to \
+         change it. Do not propose a RUN action for a how-to question.\n{body}"
+    ))
 }
 
 /// Background tab-naming: tiny prompt, no registry, quiet failure.

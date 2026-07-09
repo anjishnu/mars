@@ -112,13 +112,19 @@ fn knob(value: serde_json::Value, description: &str) -> Knob {
     Knob { value, description: description.to_string() }
 }
 
-/// The tunable knobs as human-readable lines (name, default, description) — a
-/// retrieval corpus so the agent can answer/​propose self-reconfiguration
-/// ("set autosave to 60s" → the `autosave_secs` knob).
+/// The tunable knobs as self-contained, actionable retrieval lines — each names
+/// the knob, WHERE to set it, and the default — so the agent answers
+/// self-reconfiguration questions with the exact `knob = value in tuning.json`
+/// rather than hallucinating the file or the knob name.
 pub fn knob_descriptions() -> Vec<String> {
     default_knobs()
         .into_iter()
-        .map(|(name, k)| format!("{name} (default {}): {}", k.value, k.description))
+        .map(|(name, k)| {
+            format!(
+                "To change {}: set `{name}` in ~/.config/mars/tuning.json (default {}).",
+                k.description, k.value
+            )
+        })
         .collect()
 }
 

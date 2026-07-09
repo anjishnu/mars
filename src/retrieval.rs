@@ -150,6 +150,22 @@ pub fn doc_chunks() -> Vec<String> {
     chunks
 }
 
+/// Environment-variable reference for the system-knowledge corpus (Axis B). These
+/// are the runtime knobs that live in the env, not tuning.json — the agent tends to
+/// hallucinate their names ("MARS_AGENT_MODEL") without this.
+pub fn env_var_reference() -> Vec<String> {
+    [
+        "To use a different LLM model: set the MARS_LLM_MODEL environment variable (e.g. export MARS_LLM_MODEL=gpt-4o-mini).",
+        "To point the agent at a custom or local OpenAI-compatible endpoint (e.g. Ollama): set MARS_LLM_KEY and MARS_LLM_URL.",
+        "Provider keys (paid-first detection): ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, GEMINI_API_KEY. Export one to select that provider.",
+        "To turn on memory retrieval: set MARS_MEMORY to history (your commands), docs (system knowledge), or full (both).",
+        "To log every LLM call (tokens, latency) for debugging: run mars --llm-debug or export MARS_LLM_DEBUG=1; the log lands in ~/.mars/logs/ and mars llm-stats profiles it.",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 // ── BM25 ranking ──────────────────────────────────────────────────────────────
 
 fn tokenize(s: &str) -> Vec<String> {
