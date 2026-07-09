@@ -60,8 +60,23 @@ pub fn command_memory_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("cmd_memory.jsonl"))
 }
 
-/// Persist a `(request → accepted command)` pair. Best-effort; called from the
-/// accept-outcome hook so the *next* similar request can be answered correctly.
+/// One temporally-situated command memory. We store atomic events with time,
+/// session, and working directory; sequences (prev/next), recency, and per-project
+/// scoping are *derived* at read time by grouping on `session` and ordering by `ts`
+/// — the substrate for temporal reasoning and procedure/skill mining (§future work).
+#[derive(Clone)]
+#[allow(dead_code)] // ts/session/cwd stored for temporal reasoning + procedure mining
+pub struct CommandMemory {
+    pub request: String,
+    pub command: String,
+    pub ts: u64,           // unix seconds
+    pub session: String,   // which session it was run in
+    pub cwd: String,       // working directory (project scope)
+}
+
+/// Persist a `(request → accepted command)` event with temporal context. Best-effort;
+/// called from the accept-outcome hook so the *next* similar request can be answered
+/// correctly — and so later work can reason over *when* and *where* commands were run.
 pub fn remember_command(request: &str, command: &str) {
     let req = request.trim();
     let cmd = command.trim();
@@ -72,26 +87,50 @@ pub fn remember_command(request: &str, command: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let line = serde_json::json!({ "request": req, "command": cmd });
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let line = serde_json::json!({
+        "request": req,
+        "command": cmd,
+        "ts": ts,
+        "session": crate::llm_log::session_id(),
+        "cwd": cwd,
+    });
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
     }
 }
 
-/// Load the stored `(request, command)` memory pairs (most-recent last).
-pub fn load_command_memory() -> Vec<(String, String)> {
+/// Load the full temporal memory records (chronological as written). Tolerant of the
+/// legacy `{request, command}`-only format (missing fields default).
+pub fn load_command_records() -> Vec<CommandMemory> {
     let Some(path) = command_memory_path() else { return Vec::new() };
     let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
     content
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|j| {
-            let r = j["request"].as_str()?.to_string();
-            let c = j["command"].as_str()?.to_string();
-            Some((r, c))
+            Some(CommandMemory {
+                request: j["request"].as_str()?.to_string(),
+                command: j["command"].as_str()?.to_string(),
+                ts: j["ts"].as_u64().unwrap_or(0),
+                session: j["session"].as_str().unwrap_or("").to_string(),
+                cwd: j["cwd"].as_str().unwrap_or("").to_string(),
+            })
         })
         .collect()
+}
+
+/// Load the stored `(request, command)` pairs (most-recent last) — the view the
+/// few-shot retrieval uses. Thin wrapper over [`load_command_records`].
+pub fn load_command_memory() -> Vec<(String, String)> {
+    load_command_records().into_iter().map(|m| (m.request, m.command)).collect()
 }
 
 /// Recent, de-duplicated shell history commands (newest first), read from the

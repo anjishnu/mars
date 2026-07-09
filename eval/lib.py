@@ -73,10 +73,14 @@ def _run_env(model_cfg, memory, cmd_memory=None):
 import time
 
 def _run_mars(args, env, timeout, parse):
-    """Run a mars subcommand, retrying once on empty output (transient free-tier
-    429s produce an error on stderr + empty stdout). EVAL_SLEEP paces calls."""
+    """Run a mars subcommand, retrying on empty output with EXPONENTIAL BACKOFF so a
+    free-tier 429 (empty stdout) is waited out — TPM limits reset each minute, so a
+    few backed-off retries get through. EVAL_SLEEP paces calls to avoid 429s in the
+    first place (set it high for large-prompt axes). Returns '' only if all retries
+    are exhausted."""
     slp = float(os.environ.get("EVAL_SLEEP", "0"))
-    for attempt in range(2):
+    backoff = [8, 20, 40]  # 3 retries, ~68s max; a daily-quota wall will not recover in-run
+    for attempt in range(len(backoff) + 1):
         try:
             p = subprocess.run([mars_bin(), *args], env=env, capture_output=True, text=True, timeout=timeout)
             out = parse(p.stdout)
@@ -86,8 +90,8 @@ def _run_mars(args, env, timeout, parse):
                 return out
         except (subprocess.TimeoutExpired, OSError):
             pass
-        if attempt == 0:
-            time.sleep(3)  # back off a rate limit, retry once
+        if attempt < len(backoff):
+            time.sleep(backoff[attempt])
     return ""
 
 def mars_translate(request, model_cfg, memory="none", cmd_memory=None, timeout=45):
@@ -112,7 +116,9 @@ def _judge_cfg():
         return ("openai", os.environ.get("JUDGE_MODEL", "gemini-3.1-flash-lite"),
                 os.environ["GEMINI_API_KEY"], "https://generativelanguage.googleapis.com/v1beta/openai")
     if os.environ.get("GROQ_API_KEY"):
-        return ("openai", os.environ.get("JUDGE_MODEL", "qwen/qwen3-32b"),
+        # Non-reasoning cross-model judge (not the qwen under test → no self-grading;
+        # separate Groq per-model quota → higher combined throughput).
+        return ("openai", os.environ.get("JUDGE_MODEL", "llama-3.3-70b-versatile"),
                 os.environ["GROQ_API_KEY"], "https://api.groq.com/openai/v1")
     raise SystemExit("No judge key: set ANTHROPIC_API_KEY (preferred oracle), GEMINI_API_KEY, or GROQ_API_KEY")
 
