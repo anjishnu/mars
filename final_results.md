@@ -14,8 +14,8 @@
 ## Axis A — NL → shell translation (base, no memory)
 | Slice | Accuracy |
 |---|---|
-| General ($n=88$) | **89%** (79/88) |
-| Personalized ($n=24$) | 41% (10/24) |
+| General ($n=88$) | **90%** (79/88) |
+| Personalized ($n=24$) | 42% (10/24) |
 | Overall ($n=112$) | 79% (89/112) |
 
 The model is a competent general shell author (89%) but cannot know project-specific
@@ -25,22 +25,22 @@ conventions (41%), dragging the overall number down — the gap memory closes.
 Three conditions, all **tested on the original request**:
 | Condition | Accuracy | What it measures |
 |---|---|---|
-| cold (no memory) | 37% (9/24) | base guess |
-| **paraphrase memory** | **95% (23/24)** | **generalization** — a *reworded* prior request is in the store (mean word-Jaccard 0.36 to the query); retrieval must bridge the gap |
+| cold (no memory) | 38% (9/24) | base guess |
+| **paraphrase memory** | **96% (23/24)** | **generalization** — a *reworded* prior request is in the store (mean word-Jaccard 0.36 to the query); retrieval must bridge the gap |
 | verbatim memory | 100% (24/24) | lookup ceiling — the exact prior request is in the store |
 
-15/24 cold→paraphrase flips. The paraphrase number is the honest result: simple BM25 memory
-lifts a small model **37%→95%** by generalizing across a paraphrase gap, not by looking up a
+15/24 cold→paraphrase flips, and one regression (p19: `make benchmark`, judged correct cold, became `cargo bench` with memory) — 9 + 15 − 1 = 23. The paraphrase number is the honest result: simple BM25 memory
+lifts a small model **38%→96%** by generalizing across a paraphrase gap, not by looking up a
 planted answer. (This design controls the leakage a naive verbatim-seed protocol would have.)
 
 ## Axis B — self-knowledge / self-reconfiguration Q&A
 | Question type | none | +docs memory |
 |---|---|---|
-| Knowledge (how-do-I) | 57% (30/52) | 65% (34/52) |
-| Reconfigure (change setting X) | 16% (5/30) | **93% (28/30)** |
-| Overall ($n=82$) | 42% (35/82) | **75% (62/82)** |
+| Knowledge (how-do-I) | 58% (30/52) | 65% (34/52) |
+| Reconfigure (change setting X) | 17% (5/30) | **93% (28/30)** |
+| Overall ($n=82$) | 43% (35/82) | **76% (62/82)** |
 
-Docs memory lifts overall 42%→75%. The reconfigure gain (16%→93%) is the payoff of the
+Docs memory lifts overall 43%→76%. The reconfigure gain (17%→93%) is the payoff of the
 corpus fix: actionable knob lines (name + file + default), an env-var reference, and an
 explain-don't-act instruction — so the agent answers with the exact `knob = value in
 tuning.json` / `MARS_LLM_MODEL` instead of hallucinating a file or emitting a bare directive.

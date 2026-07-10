@@ -1,0 +1,231 @@
+\section{Qualitative Examples and Error Analysis}
+\label{app:examples}
+
+Every example in this appendix is quoted verbatim from the frozen result files the
+evaluation was scored on: \code{axis\_a.jsonl} (112 translation items),
+\code{lift.jsonl} (24 leakage-controlled cold/paraphrase/verbatim items), and
+\code{axis\_b.jsonl} (self-knowledge, 164 rows over the two memory conditions), with the
+model under test claude-haiku-4-5 and the judge claude-sonnet-5 throughout. We organize
+the analysis by experiment, and within each by impressive behavior, unexpected errors,
+phenomena worth naming, and concrete recommendations. The purpose is to show, from the
+raw data, exactly where a simple local-memory mechanism helps, where it does not, and
+where the measurement itself is the limiting factor.
+
+\subsection{Axis A: NL$\rightarrow$shell translation}
+
+\paragraph{Impressive behavior.}
+On general commands the small model is a competent shell author, and its correct outputs
+are not only the easy one-liners: it composes multi-stage pipelines with the right
+utility at each stage, including summation and column projection in \code{awk}, buffered
+streaming, and process substitution. These were all judged correct:
+
+\begin{footnotesize}
+\begin{verbatim}
+a20  find the ten largest files under the cwd
+   -> find . -type f -printf '%s %p\n' \
+        | sort -rn | head -10
+a66  count total lines across all python files
+   -> find . -name "*.py" -type f -exec wc -l {} + \
+        | tail -1
+a07  kill the process listening on port 8080
+   -> lsof -ti:8080 | xargs kill -9
+a30  count how many times each unique line appears
+   -> sort | uniq -c
+a80  print columns 1 and 3 of a comma-separated file
+   -> awk -F',' '{print $1,$3}' filename
+\end{verbatim}
+\end{footnotesize}
+
+\noindent This is the premise of the paper made concrete: general shell translation is a
+near-solved commodity even on a small, inexpensive model (79 of 88 general items
+correct), so the accuracy that matters is the personalized slice, which the model cannot
+know from the request text alone.
+
+\paragraph{Unexpected errors.}
+Two error classes account for the general-command failures, and, unlike the free-tier
+runs of \S\ref{sec:setup}, this run produced zero empty completions, so every failure
+is a real answer rather than a token-wall blank. The first class is \emph{placeholder and
+precision misses}: the model guesses a stand-in filename that the gold set spells
+differently (\code{a69} ``print the contents of a file with line numbers''
+$\rightarrow$ \code{cat -n}, gold \code{cat -n file.txt}; \code{a31}
+\code{grep error log file} vs.\ \code{grep error app.log}), or picks a plausible but
+semantically different tool (\code{a38} ``show my current IP'' $\rightarrow$
+\code{ip addr show}, a LAN address, where the reference wants \code{curl ifconfig.me};
+\code{a86} reads from \code{/dev/stdin} where the gold splits a file into words). The
+second class dominates the personalized slice: \emph{ecosystem blindness}, in which the
+model answers a Rust or \code{uv} project with the statistically commonest ecosystem:
+\code{p04} ``run the unit tests'' $\rightarrow$ \code{npm test} (gold \code{cargo test}),
+\code{p06} ``lint the code'' $\rightarrow$ \code{eslint .} (gold \code{ruff check .}),
+\code{p11} ``build the release binary'' $\rightarrow$ \code{make release} (gold
+\code{cargo build --release}), \code{p18} ``install project dependencies'' $\rightarrow$
+\code{npm install} (gold \code{uv sync}). A milder personalized pattern is \emph{honest
+abstention}: on the hardest project commands the model declines rather than bluff
+(\code{p03} ``deploy the model,'' \code{p12} ``evaluate the latest checkpoint''
+$\rightarrow$ ``I need more context\dots''), which is safe behavior but still scored
+wrong against a gold command. Both classes are unknowable from the request text, and both
+are exactly what corrective memory targets.
+
+\paragraph{Phenomena.}
+Even under the stronger claude-sonnet-5 oracle, the judge assigns a \emph{partial} band
+that captures near-misses, and reading it is informative: the general failures split into
+6 outright wrong and 3 partial, and the partials are precisely the placeholder-filename
+cases (\code{a22} \code{chmod +x script} vs.\ gold \code{script.sh}; \code{a77}
+\code{zip -r archive.zip .} vs.\ \code{\dots folder/}) where the model understood the
+task but guessed a different stand-in. The same slack explains why the two no-memory
+measurements of the 24 personalized items disagree: the base row of
+Table~\ref{tab:axisA} (42\%, 10/24) and the lift experiment's cold condition (38\%,
+9/24) come from separate runs, and they differ on five items. Three differ because the
+cold completions were regenerated and the model produced a different command
+(\code{p10}, \code{p14}, \code{p17}); two differ because the judge graded the identical
+output differently across runs (\code{p01} \code{source venv/bin/activate}, correct
+vs.\ partial; \code{p22} \code{docker push}, wrong vs.\ correct). The disagreements move
+in both directions and net to one item. The practical consequence is that every point
+estimate in this paper carries a couple of points of generation-and-judging slack, and
+we read the results through that band.
+
+\paragraph{Recommendations.}
+Two inexpensive fixes would tighten the measurement without changing the system's
+thesis. Firstly, placeholder-normalized scoring, or explicit partial credit, so that a
+filename stand-in is not counted as a comprehension error; the 6 cold \emph{partials} of
+the lift set (below) show how much signal lives in this band. Secondly, marking honest
+abstentions distinctly from wrong guesses, since ``I need more context'' on a
+personalized command is a different failure mode from confidently emitting the wrong
+ecosystem. Neither fix touches the model or the memory mechanism; both are evaluation
+hygiene.
+
+\subsection{Corrective memory}
+
+\paragraph{Impressive behavior.}
+This is the headline result, and the per-item data shows the mechanism cleanly, under the
+leakage-controlled protocol in which the store holds only a \emph{paraphrase} of each
+prior request (mean word-Jaccard 0.36 to the test query). With those reworded exemplars
+retrieved by BM25 into the prompt, 23 of 24 project-specific items are correct, up from 9
+correct cold: 15 items flip from wrong-or-partial to correct, and one regresses (below).
+Table~\ref{tab:lift-examples} quotes representative flips verbatim. Two sub-mechanisms
+are visible. The first is \emph{ecosystem correction}: a Rust or \code{uv}-native project
+answered with the commonest default (\code{npm}, \code{eslint}, \code{shellcheck}) is
+corrected to the user's real toolchain. The second is \emph{exact-argument recall}: the
+model already had the right utility but the wrong specifics, and memory supplies the
+precise config, path, or split the user expects reproduced (\code{p02} ``run the training
+job'' gains \code{--config configs/base.yaml}; \code{p14} ``run inference on the test
+set'' becomes \code{python infer.py --split test}).
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Request} & \textbf{Cold (no memory)} & \textbf{+\,Paraphrase memory} \\
+\midrule
+run the unit tests             & \texttt{npm test}                & \texttt{cargo test} \\
+lint the code                  & \texttt{eslint .}                & \texttt{ruff check .} \\
+build the release binary       & \texttt{make release}            & \texttt{cargo build --release} \\
+install project dependencies   & \texttt{npm install}             & \texttt{uv sync} \\
+check code formatting          & \texttt{shellcheck *.sh}         & \texttt{black --check .} \\
+clean the build artifacts      & \texttt{rm -rf build/ dist/ \dots} & \texttt{cargo clean} \\
+run the training job           & \texttt{python train.py}         & \texttt{python train.py --config configs/base.yaml} \\
+deploy the model               & \textit{(asks for more context)} & \texttt{./scripts/deploy.sh --prod} \\
+\bottomrule
+\end{tabular}
+\caption{Representative wrong/partial$\rightarrow$correct flips from the
+leakage-controlled experiment (\code{lift.jsonl}). The store held only a
+\emph{paraphrase} of each prior request (mean word-Jaccard 0.36) and the model was tested
+on the original, so a warm win requires generalization across the paraphrase gap, not
+lookup. The top block shows \emph{ecosystem correction} (a Rust/\code{uv} project
+answered with \code{npm}/\code{eslint}/\code{shellcheck} defaults); the last two rows
+show \emph{exact-argument recall} and \emph{abstention rescue}. All warm outputs match
+gold.}
+\label{tab:lift-examples}
+\end{table*}
+
+\paragraph{Unexpected errors.}
+The paraphrase column has a single error out of 24, and it is also the experiment's one
+\emph{regression}: an item that was correct cold became wrong with memory, which is why
+9 cold-correct plus 15 flips yields 23 warm-correct rather than 24. Cold, \code{p19}
+``run the benchmark suite'' was answered \code{make benchmark}, which the judge accepted
+as a plausible route to the gold \code{python -m benchmarks.run}. With the paraphrased
+exemplar retrieved, the model instead answered \code{cargo bench}: it resolved the
+ecosystem to Rust, and the retriever did not surface the paraphrased Python exemplar
+strongly enough to override that prior. This is a retrieval-plus-prior miss, not a
+lookup failure, and it is the honest residual of a method that must generalize rather
+than copy. The shape of the cold column is also informative: of the 15 non-correct
+items, 9 are outright wrong and 6 partial, so memory is repairing a mix of
+fundamentally-wrong ecosystem guesses and last-mile precision misses, not merely
+polishing near-correct commands.
+
+\paragraph{Phenomena.}
+The gap between the two warm conditions is the cleanest measure of what BM25 buys here.
+Verbatim memory (the exact prior request in the store) scores 100\% (24/24), the trivial
+lookup ceiling, while paraphrase memory scores 96\% (23/24). The paraphrase condition
+falls only one item short of verbatim lookup despite a mean word-Jaccard of just 0.36
+between the stored exemplar and the query: the retriever bridges a substantial rewording
+gap on 23 of 24 items, so the personalization win is a genuine generalization result
+rather than an artifact of a planted answer. The one-item gap is the price of that
+generalization.
+
+\paragraph{Recommendations.}
+The residual is a \emph{retrieval} miss, not a generation miss: when the paraphrase
+drifts far enough and a strong ecosystem prior competes, lexical BM25 does not surface
+the stored pair decisively. The cheapest next lever, given that stored commands now carry
+\code{ts}/\code{session}/\code{cwd} fields, is recency-and-project weighting: when
+several exemplars tie lexically, prefer the user's recent and same-directory commands.
+Semantic retrieval with embeddings is the rung after that, and is warranted only once the
+domain broadens enough that the paraphrase gap dominates
+(\S\ref{sec:conclusion}).
+
+\paragraph{A note on token cost.}
+Memory's effect on token cost is model-dependent, an observation that cuts against a
+claim an earlier draft of this work made. On non-reasoning claude-haiku-4-5, retrieved
+exemplars add a small input cost (mean 95$\rightarrow$161 tokens per call, $+66$). On a
+\emph{reasoning} model (Qwen3-32B, from the free-tier runs of \S\ref{sec:setup}),
+however, the same few-shot grounding suppresses the verbose chain-of-thought the model
+otherwise emits when unsure, so net cost falls (385$\rightarrow$217 per call, $-44\%$).
+Memory as a token \emph{reduction} is therefore a reasoning-model phenomenon, not a
+universal property; we report the per-model effect rather than headline the favorable
+case.
+
+\subsection{Axis B: self-knowledge}
+
+Docs memory lifts overall accuracy from 43\% to 76\% (35$\rightarrow$62 of 82), but the
+two question types behave very differently, and the split between them is informative.
+Retrieval turns a plausible guess into a grounded fact:
+
+\begin{footnotesize}
+\begin{verbatim}
+k02 "How do I save the current file?"
+ none: "Use the Save action."
+       [would run: Save]              (acts, no key)
+ docs: "Press C-x C-s to save
+        the current buffer."          (correct)
+r16 "How do I change the accent color?"
+ none: "Mars doesn't have built-in
+        theme color settings ..."     (wrong)
+ docs: set theme_accent to an [r,g,b]
+       array in tuning.json           (correct)
+\end{verbatim}
+\end{footnotesize}
+
+\noindent The reconfigure slice is where memory is decisive, rising from 17\% to 93\%
+(5$\rightarrow$28 of 30). Without docs the model invents plausible config locations:
+\code{r16} ``change the accent color'' is answered ``Mars doesn't have built-in theme
+color settings,'' and \code{r04} ``use a different model'' points at a
+\code{\char`\~/.mars/config.json} that does not exist. With the retrieved knob descriptions,
+which carry the exact name, file, and default, the agent answers \code{theme\_accent} /
+\code{MARS\_LLM\_MODEL} in \code{tuning.json} correctly. Two failure families that
+motivated the corpus design, \emph{acts-instead-of-explains} (answering a how-to question
+with a bare \code{[would run: \dots]} directive, \code{k02}, \code{k09}) and
+\emph{hallucinated identifiers} (a right-idea knob under the wrong filename), are largely
+eliminated on this slice by the actionable, path-carrying knob descriptions and an
+explain-don't-act instruction on the docs path.
+
+Knowledge questions gain far less, from 58\% to 65\%, for an instructive reason: they
+turn on an \emph{exact keybinding}, and even with the docs retrieved the model sometimes
+prefers a plausible chord over the one the docs state (\code{k05} ``detach my session''
+$\rightarrow$ \code{C-x C-c}, gold \code{C-x C-d}; \code{k06} ``search within a buffer''
+$\rightarrow$ \code{C-f}, gold \code{C-s}; \code{k18} ``jump to top/bottom''
+$\rightarrow$ \code{C-x Home}, gold \code{M-<}). A knob \emph{name} is a token the
+retriever can hand over intact; a chord is a specific fact the model will still overwrite
+with a more common default, which is why doc memory helps reconfiguration far more than
+keybinding recall. A residual limit is judge slack: a few correct-but-differently-phrased
+answers are marked wrong, so the reported knowledge number is a mild lower bound even
+under the stronger claude-sonnet-5 oracle.
