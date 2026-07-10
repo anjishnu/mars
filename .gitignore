@@ -40,3 +40,4 @@ eval/results/
 # Python
 __pycache__/
 *.pyc
+paper/main.blg
