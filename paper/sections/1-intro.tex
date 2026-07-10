@@ -6,8 +6,8 @@ babysits long runs in a shell, edits configs, holds sessions open with a multipl
 and asks an assistant to explain a CUDA out-of-memory trace or draft an \code{rsync}
 command. In practice the assistant is the weakest link, for two reasons that compound. It is generic: it runs in a separate window,
 sees only the fragment the user pastes into it, and does not know that in this project a
-training run is launched with a particular \code{sbatch} invocation settled on last week.
-It is also amnesiac: it forgets the command the user corrected yesterday, forgets ``where
+training run is launched with a particular \code{sbatch} invocation settled on last
+week. It is also amnesiac: it forgets the command the user corrected yesterday, forgets ``where
 was I'' on reattach, and knows nothing about the editor
 it sits beside. In the remote setting that defines GPU work there is a third problem:
 reaching the work at all usually means exporting an API key onto a machine the user does
@@ -42,5 +42,5 @@ keeps the API key off remote machines. Finally, a self-instrumenting evaluation
 (\S\ref{sec:eval}) in which corrective memory takes a small model from 38\% to 96\% on
 personalized commands under a leakage-controlled protocol. MARS is open source under the
 MIT license~\citep{kumar2026mars}, installs with \code{cargo install mars-terminal}, and
-is about 9{,}500 lines of Rust; the gold sets, seeded memory stores, and frozen result
-files ship with the source.
+is about 9{,}500 lines of Rust; the gold sets and frozen result files ship with the
+source.

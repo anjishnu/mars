@@ -51,8 +51,8 @@ stricter typing a schema provides.
 \bottomrule
 \end{tabular}
 \caption{The directive protocol. A \code{RUN:} naming an action absent from the live
-registry is rejected before it fires, so a hallucinated action cannot execute; a
-destructive action passes the same confirmation gate a human would.}
+registry is rejected before it fires; a destructive action passes the same confirmation
+gate a human would.}
 \label{tab:directives}
 \end{table}
 
@@ -95,11 +95,10 @@ together with up to three ranked lines of recent shell history.
 
 The loop is corrective in the precise sense that a command the model got wrong once
 becomes one it gets right thereafter, because the user's correction is what enters the
-store; a per-invocation assistant never observes the correction. Nothing in this loop is novel as
-information retrieval; the contribution is the observation that in this domain the
-retrieval can be this simple and still be decisive (\S\ref{sec:eval}). The cost is a bounded prompt
-inflation of a few exemplars per request, which \S\ref{sec:eval} measures and finds small relative to
-the accuracy gain.
+store; a per-invocation assistant never observes the correction. Nothing in this loop is
+novel as information retrieval; the contribution is that in this domain retrieval this
+simple is still decisive (\S\ref{sec:eval}), at a bounded cost of a few exemplars per
+request.
 
 \subsection{Memory 2: the tool's own documentation}
 \label{sec:m2}
@@ -124,12 +123,12 @@ is a constrained domain, and the constraint favors lexical retrieval in three wa
 Firstly, a user's command vocabulary is small, repetitive, and lexically stable: the same
 flags, paths, and tool names recur verbatim, so a query and its useful memory tend to
 share surface tokens, exactly the regime in which BM25 is strong and dense retrieval's
-paraphrase advantage is marginal. Secondly, the corpora are small, on
-the order of hundreds of entries, so there is no scaling pressure to justify an index.
+paraphrase advantage is marginal. Secondly, the corpora are small (hundreds of
+entries), so there is no scaling pressure to justify an index.
 Thirdly, the payoff is asymmetric: a single relevant exemplar of the user's own command
 is worth more than semantic breadth, because it supplies the exact string the user wants
 reproduced. We therefore treat embeddings as a cost to be deferred until the domain
-broadens (\S\ref{sec:conclusion}). The empirical support is the corrective-memory result
+broadens (\S\ref{sec:future}). The empirical support is the corrective-memory result
 of \S\ref{sec:eval}, in which BM25 bridges a mean word-Jaccard gap of 0.36 with nothing
 more than a prompt, a local file, and a standard ranking function.
 

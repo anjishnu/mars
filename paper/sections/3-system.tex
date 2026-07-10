@@ -32,8 +32,8 @@ fuzzy-searches the action registry. Plain text that matches nothing in the regis
 falls back to the agent: the bar treats it as a natural-language command request and
 hands it to the translator of \S\ref{sec:translate}, whose proposal the user confirms
 before it runs. Routing remains deterministic under the fallback, triggered by a
-registry miss rather than a classifier score, so there is no routing model to train,
-evaluate, or explain.
+registry miss rather than a classifier score, so there is no routing model to train or
+explain.
 
 \paragraph{The key never leaves home.}
 \emph{A secret is a fact about the user, not the machine, and should live in one place.}
@@ -44,7 +44,7 @@ proxying each request home, where the broker injects the credential and streams 
 completion back. The key never lands on the remote machine, on disk, in the environment,
 or in memory, so a compromised box has nothing to exfiltrate. The remaining exposure is
 the open tunnel: a compromised box can use the credential while the tunnel is up, though
-it cannot steal it, and access ends the moment the tunnel closes.
+it cannot steal it; access ends when the tunnel closes.
 
 \paragraph{The log is the benchmark.}
 Running with \code{--llm-debug} appends one JSON line per model call (task, model, real

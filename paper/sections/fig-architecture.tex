@@ -1,7 +1,7 @@
 \begin{figure*}[t]
 \centering
 \begin{tikzpicture}[
-  scale=0.73, transform shape,
+  scale=0.70, transform shape,
   font=\footnotesize,
   >={Latex[length=2mm]},
   term/.style={draw, rounded corners, align=center, minimum width=23mm, minimum height=11mm, fill=black!4},
@@ -52,10 +52,9 @@
 \draw[->, dotted, black!55] (brk.north) -- (llm.south);
 
 \end{tikzpicture}
-\caption{MARS augments a terminal LLM agent with local memory over the user's own
-context. Seeing the multiplexer's panes, the agent retrieves with lexical BM25 from two
-local stores (M1, the user's past commands, and M2, the tool's own docs and registry) and
-injects the results as few-shot exemplars. Only the model call leaves the machine; on a
-remote box even the key stays home, and every call is logged.}
+\caption{MARS retrieves with lexical BM25 from two local stores (M1, the user's past
+commands; M2, the tool's own docs and registry) and injects the results as few-shot
+exemplars. Only the model call leaves the machine; on a remote box even the key stays
+home, and every call is logged.}
 \label{fig:arch}
 \end{figure*}

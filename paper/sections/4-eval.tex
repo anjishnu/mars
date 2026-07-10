@@ -4,16 +4,16 @@
 \subsection{Setup}
 \label{sec:setup}
 
-We evaluate the two memory axes on frozen gold sets, fixed before any system was run
-against them, and a single small model under test: 112 command-translation items (88
+We evaluate the two memory axes on frozen, a-priori gold sets and a single small model
+under test: 112 command-translation items (88
 general, 24 project-specific) and 82 self-knowledge question--answer items (52
-knowledge, 30 reconfiguration). The model under test is claude-haiku-4-5, a small,
-inexpensive model. The thesis requires the model to be \emph{small}, so that
-personalization has a gap to close, but not necessarily free: both free tiers we tried
+knowledge, 30 reconfiguration). The model under test is claude-haiku-4-5: the thesis
+requires the model to be \emph{small}, so that
+personalization has a gap to close, but not necessarily free. Both free tiers we tried
 first (Qwen3-32B on Groq, Gemini Flash-Lite) exhausted their daily token quotas partway
 through the roughly 350-call batch and began returning empty completions (the quota wall
 the cascade of \S\ref{sec:cascade} routes around), so we ran the final numbers on a
-small paid model. Across all reported runs there were zero empty completions.
+small paid model; across all reported runs there were zero empty completions.
 
 Correctness is scored by a stronger judge, claude-sonnet-5 \citep{zheng2023judging}, so
 that the model under test does not grade itself; judge and testee share a model family,
@@ -50,43 +50,40 @@ runs; they differ by one borderline item (Appendix~\ref{app:examples}).}
 \label{tab:axisA}
 \end{table}
 
-The base numbers in Table~\ref{tab:axisA} confirm the premise of the paper. The small
-model is already a competent general shell author at 90\%, but it falls to 42\% on
-project-specific commands it cannot know, which drags overall accuracy to 79\%. These
-are missing-knowledge failures, not reasoning failures, and they are exactly what local
-memory targets.
+The base numbers in Table~\ref{tab:axisA} confirm the premise: the small model is a
+competent general shell author at 90\% but falls to 42\% on project-specific commands it
+cannot know, dragging overall accuracy to 79\%. These are missing-knowledge failures,
+exactly what local memory targets.
 
-The corrective-memory experiment isolates that fix, under a protocol designed to rule out
-the objection that memory is mere lookup. For each of the 24 tasks the store is seeded
+The corrective-memory experiment isolates that fix under a protocol that rules out mere
+lookup. For each of the 24 tasks the store is seeded
 not with the prior request verbatim but with an independently generated \emph{paraphrase}
 (mean word-level Jaccard 0.36 to the test query), while the model is tested on the
 \emph{original} request. A warm win therefore
-requires bridging the paraphrase gap, not copying a planted answer. Under this setup, cold
-accuracy is 38\% (9/24) and paraphrase memory raises it to 96\% (23/24). Fifteen items
-flip from wrong-or-partial to correct, and one item regresses, from correct cold to wrong
-with memory; the appendix examines both directions. A verbatim-memory condition, with the
+requires bridging the paraphrase gap, not copying a planted answer. Under this setup,
+cold accuracy is 38\% (9/24); paraphrase memory raises it to 96\% (23/24), with fifteen
+items flipping to correct and one regressing from correct to wrong (both examined in the
+appendix). A verbatim-memory condition, with the
 exact prior request in the store, reaches the lookup ceiling of 100\% (24/24). The
 headline is the paraphrase number: simple BM25 over a local file recovers almost all of
-the personalization gap by generalizing, not by lookup. Memory costs about 66 extra
-tokens per call, and the sign of that cost is model-dependent
-(Appendix~\ref{app:examples}).
+the personalization gap by generalizing, not by lookup. Memory adds about 66 tokens per
+call; the sign of that cost is model-dependent (Appendix~\ref{app:examples}).
 
 \subsection{Axis B: learning the tool itself}
 
 The second axis asks whether documentation memory lets the agent answer questions about
 MARS and reconfigure it. Retrieved documentation lifts overall accuracy from 43\% to
 76\% (Table~\ref{tab:axisB}), but the gain is unevenly distributed.
-On ``how-do-I'' knowledge questions the gain is modest, from 58\% to 65\%, because the
-no-memory model already answers many correctly, and even with docs it sometimes
-hallucinates a keybinding the docs state exactly (Appendix~\ref{app:examples}). The decisive gain is on \emph{reconfiguration}, turning a
+On ``how-do-I'' knowledge questions the gain is modest (58\% to 65\%): the no-memory
+model already answers many correctly, and even with docs it sometimes hallucinates a
+keybinding the docs state exactly (Appendix~\ref{app:examples}). The decisive gain is on \emph{reconfiguration}, turning a
 request like ``autosave more often'' into a concrete knob edit, which rises from 17\% to
-93\%. Without the docs the model invents config filenames and knob names; with the
-tuning-knob descriptions retrieved, it emits the exact \code{knob = value} in
-\code{tuning.json} that the user needs. One caveat applies: the docs condition also adds
-an instruction to explain rather than act, which accounts for part of the repair of
-answers that fired a directive instead of explaining; the identifier-level repair (the
-exact knob, file, and default) requires the retrieved text
-(Appendix~\ref{app:examples}).
+93\%. Without the docs the model invents config filenames and knob names; with the knob
+descriptions retrieved, it emits the exact \code{knob = value} in
+\code{tuning.json}. One caveat: the docs condition also adds an
+explain-don't-act instruction, which accounts for part of the repair of answers that
+fired a directive instead of explaining; the identifier-level repair (exact knob, file,
+default) requires the retrieved text (Appendix~\ref{app:examples}).
 
 \begin{table}[t]
 \centering

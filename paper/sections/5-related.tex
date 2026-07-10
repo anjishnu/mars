@@ -23,8 +23,8 @@ personalizing translation with the user's own history.
 
 \paragraph{Agents and retrieval.}
 Directive-style acting relates to ReAct \citep{yao2023react} and tool use to Toolformer
-\citep{schick2023toolformer}, though we deliberately use a portable text protocol with
-registry grounding rather than provider-native tool calls. Our memory is
+\citep{schick2023toolformer}, though we use a portable text protocol with registry
+grounding rather than provider-native tool calls. Our memory is
 retrieval-augmented generation \citep{lewis2020rag} in its simplest lexical form; the
 novelty is the setting, retrieval over the user's \emph{own} local context, embedded
 where it is produced.
@@ -37,7 +37,5 @@ computer use \citep{anthropic2024computeruse} operates GUIs from screenshots, OS
 Plan-and-Act \citep{erdogan2025planandact} separates a planner from an executor to
 survive long-horizon tasks. The terminal offers the same ambitions a simpler substrate:
 the action space is already text, so grounding is a registry lookup rather than a vision
-problem, and a plan is a command sequence the user can read. These
-techniques map onto the rungs above single-command recall
-(\S\ref{sec:conclusion}): procedure mining is a planning problem, and workflow
-understanding is the terminal's analogue of GUI-state tracking.
+problem, and a plan is a command sequence the user can read; \S\ref{sec:future} builds
+on these techniques.
