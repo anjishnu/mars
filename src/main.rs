@@ -20,7 +20,9 @@ mod project;
 mod session;
 mod tab;
 mod terminal;
+mod prompts;
 mod tiers;
+mod worklog;
 mod tuning;
 mod ui;
 
@@ -370,26 +372,32 @@ fn ask_cli(question: String) -> Result<()> {
         Vec::new(),
         tx,
     );
-    match rx.recv_timeout(std::time::Duration::from_secs(60))? {
-        agent::AgentEvent::Answer { text, directive } => {
-            println!("{}", text);
-            match directive {
-                Some(agent::AgentDirective::Run(name)) => println!("[would run: {name}]"),
-                Some(agent::AgentDirective::Type(cmd)) => {
-                    println!("[would type into terminal: {cmd}]")
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(60))? {
+            agent::AgentEvent::Answer { text, directive } => {
+                println!("{}", text);
+                match directive {
+                    Some(agent::AgentDirective::Run(name)) => println!("[would run: {name}]"),
+                    Some(agent::AgentDirective::Type(cmd)) => {
+                        println!("[would type into terminal: {cmd}]")
+                    }
+                    Some(agent::AgentDirective::Open(loc)) => println!("[would open: {loc}]"),
+                    Some(agent::AgentDirective::Need(_)) => {}
+                    None => {}
                 }
-                Some(agent::AgentDirective::Open(loc)) => println!("[would open: {loc}]"),
-                Some(agent::AgentDirective::Need(_)) => {}
-                None => {}
+                return Ok(());
             }
-            Ok(())
+            // Streaming progress; headless output stays the final text only,
+            // so scripts and the eval harness see an unchanged format.
+            agent::AgentEvent::AnswerStart | agent::AgentEvent::AnswerDelta { .. } => continue,
+            agent::AgentEvent::AutoName { .. }
+            | agent::AgentEvent::SessionName { .. }
+            | agent::AgentEvent::WatchSummary { .. }
+            | agent::AgentEvent::Mission { .. }
+            | agent::AgentEvent::BgDone
+            | agent::AgentEvent::ShellTranslation { .. } => return Ok(()),
+            agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
         }
-        agent::AgentEvent::AutoName { .. }
-        | agent::AgentEvent::SessionName { .. }
-        | agent::AgentEvent::WatchSummary { .. }
-        | agent::AgentEvent::BgDone
-        | agent::AgentEvent::ShellTranslation { .. } => Ok(()),
-        agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
     }
 }
 
@@ -1935,6 +1943,162 @@ fn selfcheck() -> Result<()> {
         }
         let _ = std::fs::remove_file(&cm);
         println!("[selfcheck] memory hygiene ........... PASS");
+    }
+
+    // 29f. Streaming: the incremental reasoning guard never leaks <think>
+    //      content (even split across chunk boundaries) and never retracts
+    //      emitted text; the AnswerStart/Delta/Answer event flow renders a
+    //      live partial turn and resolves into ordinary history.
+    {
+        let chunks = ["Hel", "lo <thi", "nk>secret reasoning</th", "ink> world"];
+        let mut raw = String::new();
+        let mut emitted = 0usize;
+        let mut seen = String::new();
+        for c in chunks {
+            raw.push_str(c);
+            let vis = agent::stream_visible(&raw);
+            assert!(vis.len() >= emitted, "visible prefix retracted at {c:?}");
+            assert!(vis.starts_with(&seen), "emitted text not a stable prefix");
+            if vis.len() > emitted {
+                seen.push_str(&vis[emitted..]);
+                emitted = vis.len();
+            }
+            assert!(!seen.contains("secret"), "reasoning leaked mid-stream: {seen}");
+        }
+        assert_eq!(seen, "Hello  world", "final streamed text wrong: {seen:?}");
+
+        let mut app = App::new(None)?;
+        app.agent_pending = true;
+        app.agent_tx.send(agent::AgentEvent::AnswerStart)?;
+        app.agent_tx.send(agent::AgentEvent::AnswerDelta { text: "streaming ".into() })?;
+        app.agent_tx.send(agent::AgentEvent::AnswerDelta { text: "tokens".into() })?;
+        app.tick();
+        assert_eq!(app.agent_partial.as_deref(), Some("streaming tokens"));
+        // An escalation retry starts a fresh stream — the partial resets.
+        app.agent_tx.send(agent::AgentEvent::AnswerStart)?;
+        app.agent_tx.send(agent::AgentEvent::AnswerDelta { text: "better".into() })?;
+        app.agent_tx.send(agent::AgentEvent::Answer { text: "better answer".into(), directive: None })?;
+        app.tick();
+        assert!(app.agent_partial.is_none(), "final Answer did not clear the partial");
+        assert!(!app.agent_pending, "final Answer left the spinner on");
+        assert_eq!(
+            app.agent_history.last().map(|(r, t)| (r.as_str(), t.as_str())),
+            Some(("assistant", "better answer")),
+            "streamed turn did not land in history"
+        );
+        println!("[selfcheck] streaming ask ............ PASS");
+    }
+
+    // 29h. Prompt templates (src/prompts/*.md, compile-time embedded): every
+    //      template is non-empty and still carries the placeholders its call
+    //      site substitutes — an edited .md can't silently break assembly.
+    {
+        for (name, p, holders) in [
+            ("ask_system", prompts::ASK_SYSTEM, vec!["{registry}", "{screen}"]),
+            ("translate_system", prompts::TRANSLATE_SYSTEM, vec!["{reasoning_cap}", "{examples_block}"]),
+            ("translate_reasoning_cap", prompts::TRANSLATE_REASONING_CAP, vec![]),
+            ("translate_examples", prompts::TRANSLATE_EXAMPLES, vec!["{examples}"]),
+            ("watch_system", prompts::WATCH_SYSTEM, vec!["{hint}"]),
+            ("watch_hint_exit", prompts::WATCH_HINT_EXIT, vec![]),
+            ("watch_hint_quiet", prompts::WATCH_HINT_QUIET, vec![]),
+            ("mission_system", prompts::MISSION_SYSTEM, vec![]),
+            ("auto_name_system", prompts::AUTO_NAME_SYSTEM, vec![]),
+            ("name_session_system", prompts::NAME_SESSION_SYSTEM, vec![]),
+            #[cfg(feature = "memory")]
+            ("docs_context_preamble", prompts::DOCS_CONTEXT_PREAMBLE, vec!["{body}"]),
+            ("explain_this", prompts::EXPLAIN_THIS, vec![]),
+            ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
+        ] {
+            assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
+            for h in holders {
+                assert!(p.contains(h), "prompt template {name}.md lost placeholder {h}");
+            }
+        }
+        // The naming task tags must match the ring's keys, or tier routing
+        // silently skips them (the bug this refactor caught).
+        assert_eq!(tiers::model_for("groq", "auto_name", "x"), "llama-3.1-8b-instant");
+        assert_eq!(tiers::model_for("groq", "name_session", "x"), "llama-3.1-8b-instant");
+        assert_eq!(tiers::model_for("groq", "mission", "x"), "llama-3.1-8b-instant");
+        println!("[selfcheck] prompt templates ......... PASS");
+    }
+
+    // 29g. Work journal + mission + expand-all notices: watch verdicts persist
+    //      as a session-scoped snapshot stream (separate from the LLM call
+    //      log), the inferred mission round-trips for `mars ls`, and the
+    //      expand-all action drains the notice queue into one digest turn.
+    {
+        let wl = std::env::temp_dir().join(format!("mars-worklog-{}", std::process::id()));
+        let _ = std::fs::remove_file(&wl);
+        std::env::set_var("MARS_WORKLOG", &wl);
+        for (i, v) in ["done: build green", "failed: 3 tests red", "done: tests green"]
+            .iter()
+            .enumerate()
+        {
+            worklog::record(&worklog::WorkEntry {
+                ts: 1000 + i as u64,
+                session: "train".into(),
+                tab: "build".into(),
+                verdict: v.to_string(),
+                failed: v.starts_with("failed"),
+                dur_secs: Some(60),
+            });
+        }
+        worklog::record(&worklog::WorkEntry {
+            ts: 2000, session: "other".into(), tab: "t".into(),
+            verdict: "done: unrelated".into(), failed: false, dur_secs: None,
+        });
+        let r = worklog::recent("train", 2);
+        assert_eq!(r.len(), 2, "recent() limit not applied");
+        assert_eq!(r[0].verdict, "failed: 3 tests red", "recent() order/session filter wrong");
+        assert!(r.iter().all(|e| e.session == "train"), "session filter leaked");
+        worklog::save_mission("train", "fixing the red tests", 1234);
+        assert_eq!(
+            worklog::load_mission("train"),
+            Some(("fixing the red tests".to_string(), 1234)),
+            "mission round-trip failed"
+        );
+        assert_eq!(worklog::load_mission("other"), None, "mission leaked across sessions");
+        std::env::remove_var("MARS_WORKLOG");
+        let _ = std::fs::remove_file(&wl);
+        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("mars-worklog-{}", std::process::id())).with_file_name("mission.json"));
+
+        let mut app = App::new(None)?;
+        app.notices.push(app::Notice { text: "failed: run A".into(), kind: app::NoticeKind::Failure });
+        app.notices.push(app::Notice { text: "done: run B".into(), kind: app::NoticeKind::Info });
+        app.run_action(palette::Action::ExpandNotices);
+        assert!(app.notices.is_empty(), "expand-all did not clear the notice queue");
+        let digest = &app.agent_history.last().expect("no digest turn").1;
+        assert!(
+            digest.contains("failed: run A") && digest.contains("done: run B"),
+            "digest missing notices: {digest}"
+        );
+
+        // Reattach briefing: detach → reattach pushes a "where you left off"
+        // turn built from the journal + mission (deterministic, no LLM call).
+        let wl2 = std::env::temp_dir().join(format!("mars-worklog2-{}", std::process::id()));
+        let _ = std::fs::remove_file(&wl2);
+        std::env::set_var("MARS_WORKLOG", &wl2);
+        worklog::record(&worklog::WorkEntry {
+            ts: 1000, session: "standalone".into(), tab: "train".into(),
+            verdict: "failed: OOM at step 40".into(), failed: true, dur_secs: Some(300),
+        });
+        worklog::save_mission("standalone", "debugging the OOM in the training run", 1000);
+        let mut app = App::new(None)?;
+        let turns_before = app.agent_history.len();
+        app.on_detach();
+        app.on_attach();
+        let brief = &app.agent_history.last().expect("no briefing turn").1;
+        assert!(app.agent_history.len() > turns_before, "reattach pushed no briefing");
+        assert!(
+            brief.contains("Where you left off")
+                && brief.contains("debugging the OOM")
+                && brief.contains("failed: OOM at step 40"),
+            "briefing missing mission or journal lines: {brief}"
+        );
+        std::env::remove_var("MARS_WORKLOG");
+        let _ = std::fs::remove_file(&wl2);
+        let _ = std::fs::remove_file(wl2.with_file_name("mission.json"));
+        println!("[selfcheck] worklog + mission + expand PASS");
     }
 
     // 29d. Memory actions are plain palette glue — present in EVERY build; in a

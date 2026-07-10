@@ -723,21 +723,44 @@ pub struct SessionEntry {
     pub connect: String,
 }
 
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
 /// Everything `mars ls` knows about, locals first. The single access path for
 /// both kinds — callers never touch `list_sessions`/`fleet_load` shapes.
 pub fn all_sessions() -> Result<Vec<SessionEntry>> {
     let mut out = Vec::new();
     for (name, alive, attached) in list_sessions()? {
-        let status = match (alive, attached) {
+        let mut status = match (alive, attached) {
             (true, true) => "attached",
             (true, false) => "detached",
             (false, _) => "dead (cleaned up)",
-        };
+        }
+        .to_string();
+        // What the session is FOR, not just whether it's up: the inferred
+        // mission when one exists, else the last work-journal verdict — so the
+        // summary is meaningful even before the first mission inference runs.
+        if alive {
+            if let Some((mission, _)) = crate::worklog::load_mission(&name) {
+                status = format!("{status} — {}", clip(&mission, 48));
+            } else if let Some(last) = crate::worklog::recent(&name, 1).pop() {
+                status = format!(
+                    "{status} — last: {} ({})",
+                    clip(&last.verdict, 40),
+                    crate::broker::ago(last.ts)
+                );
+            }
+        }
         out.push(SessionEntry {
             connect: format!("mars attach {name}"),
             name,
             remote: false,
-            status: status.to_string(),
+            status,
             as_of: None,
         });
     }

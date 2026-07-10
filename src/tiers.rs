@@ -45,6 +45,7 @@ impl Default for Tiers {
             task_tier: m(&[
                 ("auto_name", "low"),
                 ("name_session", "low"),
+                ("mission", "low"),
                 ("watch", "mid"),
                 ("translate", "mid"),
                 ("ask", "high"),

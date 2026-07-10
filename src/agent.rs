@@ -34,12 +34,21 @@ pub enum AgentEvent {
         text: String,
         directive: Option<AgentDirective>,
     },
+    /// A streamed ask reply is starting — reset any partial from a prior turn
+    /// (the escalation retry starts a fresh stream over the same question).
+    AnswerStart,
+    /// One streamed chunk of the in-progress ask reply (reasoning-stripped;
+    /// the final `Answer` still carries the complete, directive-parsed text).
+    AnswerDelta { text: String },
     /// Background tab-naming reply (tab id, proposed name).
     AutoName { tab_id: usize, name: String },
     /// Background session-naming reply (proposed name).
     SessionName { name: String },
     /// W6: one-line verdict on a watched terminal (term id, verdict).
     WatchSummary { term_id: usize, verdict: String },
+    /// Background mission inference over the work journal (one line: what the
+    /// user is working on). Persisted for `mars ls`.
+    Mission { text: String },
     /// A background agent thread finished — clears the `bg_busy` gate even if the
     /// call failed (so one failed request can't wedge all background work).
     BgDone,
@@ -276,28 +285,8 @@ impl AgentConfig {
 }
 
 fn system_prompt(registry: &str, screen: &str) -> String {
-    format!(
-        "You are the assistant inside Mars, a terminal editor + multiplexer. \
-         Be terse: 1-3 sentences, no preamble, no restating the question. When \
-         triaging a failure, say what failed and why, then act — do NOT write an \
-         essay. Always prefer ending with a concrete action over explaining.\n\
-         You can act, always with user confirmation, by ending your reply with \
-         EXACTLY ONE directive on its own final line:\n\
-         RUN: <ActionName>      — run an editor action (e.g. RUN: SplitVertical)\n\
-         TYPE: <shell command>  — type a command into the user's terminal pane \
-         (e.g. TYPE: git status). Prefer TYPE for anything a shell does.\n\
-         OPEN: path:line        — open a file at a line, e.g. OPEN: src/main.rs:42. \
-         Use this to jump to the exact line a stack trace or error points at.\n\
-         If the visible screen is not enough, ask for more instead of guessing, using \
-         EXACTLY one of:\n\
-         NEED: scrollback       — the focused terminal's full history (e.g. \"when did \
-         this first fail?\").\n\
-         NEED: tab <name>       — another tab's panes. You'll be re-asked automatically \
-         with it; do not apologize, just request.\n\
-         Available editor actions:\n{registry}\n\n\
-         LIVE SCREEN (what the user is looking at right now — ground your answers \
-         in it; you may reference file contents, terminal output, errors):\n{screen}"
-    )
+    // Screen content is user-derived — substitute it last (see prompts.rs).
+    crate::prompts::ASK_SYSTEM.replace("{registry}", registry).replace("{screen}", screen)
 }
 
 /// Build the chat messages: system + up to the last 12 conversation turns +
@@ -337,7 +326,14 @@ pub fn ask(
         if let Some(ctx) = crate::retrieval::docs_context_for(&question) {
             messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
         }
-        match chat_with_id(&cfg, messages.clone(), "ask", mode.as_str()) {
+        // Stream: tokens render as they arrive; the final Answer still carries
+        // the complete, directive-parsed text.
+        let _ = tx.send(AgentEvent::AnswerStart);
+        let txd = tx.clone();
+        let mut on_delta = move |d: &str| {
+            let _ = txd.send(AgentEvent::AnswerDelta { text: d.to_string() });
+        };
+        match chat_with_id_streaming(&cfg, messages.clone(), "ask", mode.as_str(), &mut on_delta) {
             Ok((text, _call_id)) => {
                 let (display, directive) = parse_directive(&text);
                 // Escalation-for-quality: a RUN: naming no real action is an
@@ -350,9 +346,14 @@ pub fn ask(
                     if crate::palette::Action::from_name(name).is_none() {
                         if let Some(up) = crate::tiers::model_above(cfg.provider, "ask") {
                             let cfg_up = AgentConfig { model: up, ..cfg.clone() };
-                            if let Ok((text2, _)) =
-                                chat_with_id(&cfg_up, messages, "ask_escalated", mode.as_str())
-                            {
+                            let _ = tx.send(AgentEvent::AnswerStart); // fresh stream
+                            if let Ok((text2, _)) = chat_with_id_streaming(
+                                &cfg_up,
+                                messages,
+                                "ask_escalated",
+                                mode.as_str(),
+                                &mut on_delta,
+                            ) {
                                 let (display2, directive2) = parse_directive(&text2);
                                 let _ = tx.send(AgentEvent::Answer {
                                     text: display2,
@@ -376,13 +377,12 @@ pub fn ask(
 pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
         let messages = vec![
-            serde_json::json!({ "role": "system", "content":
-                "Name this terminal workspace tab from its visible content. Reply with \
-                 ONLY a 1-3 word kebab-case label (e.g. rust-build, api-notes, logs). \
-                 No punctuation, no explanation." }),
+            serde_json::json!({ "role": "system", "content": crate::prompts::AUTO_NAME_SYSTEM.trim_end() }),
             serde_json::json!({ "role": "user", "content": screen }),
         ];
-        if let Ok(text) = chat(&cfg, messages, "auto-name") {
+        // Task tag matches the ring's `auto_name` key (was "auto-name", which
+        // silently skipped tier routing).
+        if let Ok(text) = chat(&cfg, messages, "auto_name") {
             let name = kebab(&text);
             if !name.is_empty() {
                 let _ = tx.send(AgentEvent::AutoName { tab_id, name });
@@ -403,14 +403,12 @@ pub fn watch_summary(
 ) {
     std::thread::spawn(move || {
         let hint = match reason {
-            crate::app::WatchReason::Exit => "The process just exited.",
-            crate::app::WatchReason::Quiet => "The output has gone quiet (it may still be running).",
+            crate::app::WatchReason::Exit => crate::prompts::WATCH_HINT_EXIT,
+            crate::app::WatchReason::Quiet => crate::prompts::WATCH_HINT_QUIET,
         };
         let messages = vec![
-            serde_json::json!({ "role": "system", "content": format!(
-                "You watch a terminal for the user. {hint} In ONE short line, say whether it \
-                 succeeded or failed and the single most important reason. Start with a verb \
-                 or 'failed:'/'done:'. No preamble, no markdown.") }),
+            serde_json::json!({ "role": "system",
+                "content": crate::prompts::WATCH_SYSTEM.trim_end().replace("{hint}", hint.trim_end()) }),
             serde_json::json!({ "role": "user", "content": tail }),
         ];
         match chat(&cfg, messages, "watch") {
@@ -432,17 +430,34 @@ pub fn watch_summary(
     });
 }
 
+/// Background mission inference: read the recent work-journal snapshots and
+/// name, in one line, what the user is working on. Quiet failure — a mission
+/// is a nicety, never worth a notice.
+pub fn infer_mission(cfg: AgentConfig, snapshots: Vec<String>, tx: mpsc::Sender<AgentEvent>) {
+    std::thread::spawn(move || {
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": crate::prompts::MISSION_SYSTEM.trim_end() }),
+            serde_json::json!({ "role": "user", "content": snapshots.join("\n") }),
+        ];
+        if let Ok(text) = chat(&cfg, messages, "mission") {
+            let mission = text.trim().lines().next().unwrap_or("").trim().to_string();
+            if !mission.is_empty() {
+                let _ = tx.send(AgentEvent::Mission { text: mission });
+            }
+        }
+        let _ = tx.send(AgentEvent::BgDone);
+    });
+}
+
 /// Background session-naming — like tab naming but for the whole session.
 pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
         let messages = vec![
-            serde_json::json!({ "role": "system", "content":
-                "Name this terminal session from what the user is doing. Reply with \
-                 ONLY a 1-2 word kebab-case label (e.g. mars-dev, deploy, db-migrate). \
-                 No punctuation, no explanation." }),
+            serde_json::json!({ "role": "system", "content": crate::prompts::NAME_SESSION_SYSTEM.trim_end() }),
             serde_json::json!({ "role": "user", "content": screen }),
         ];
-        if let Ok(text) = chat(&cfg, messages, "session-name") {
+        // Tag matches the ring's `name_session` key (was "session-name").
+        if let Ok(text) = chat(&cfg, messages, "name_session") {
             let name = kebab(&text);
             if !name.is_empty() {
                 let _ = tx.send(AgentEvent::SessionName { name });
@@ -480,24 +495,22 @@ pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow:
     // Haiku) read that same instruction as a cue to reason *silently* and can return an
     // EMPTY completion — so the cap is applied ONLY to reasoning models.
     let reasoning_cap = if is_reasoning_model(&cfg.model) {
-        " Keep any internal reasoning to at most 50 tokens, then output only the command."
+        format!(" {}", crate::prompts::TRANSLATE_REASONING_CAP.trim())
     } else {
-        ""
+        String::new()
     };
-    let system = format!(
-        "You convert an English request into ONE shell command. Output the command \
-         and nothing else — no explanation, no markdown, no backticks, no leading $. \
-         Use the visible screen for context (cwd, filenames) when relevant. If the \
-         request is already a shell command, return it unchanged.{reasoning_cap}{}",
-        if examples.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n\nThis user's own commands (prefer their conventions — e.g. a \
-                 project alias/script over a generic equivalent):\n{examples}"
-            )
-        }
-    );
+    let examples_block = if examples.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n{}",
+            crate::prompts::TRANSLATE_EXAMPLES.trim_end().replace("{examples}", &examples)
+        )
+    };
+    let system = crate::prompts::TRANSLATE_SYSTEM
+        .trim_end()
+        .replace("{reasoning_cap}", &reasoning_cap)
+        .replace("{examples_block}", &examples_block);
     let messages = vec![
         serde_json::json!({ "role": "system", "content": system }),
         serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
@@ -553,6 +566,37 @@ fn strip_reasoning(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// Optional streaming sink: receives each visible chunk as it arrives.
+type DeltaSink<'a> = Option<&'a mut dyn FnMut(&str)>;
+
+/// Reborrow the sink for one call without consuming it (the rotation loop may
+/// hand it to several attempts in sequence).
+fn reborrow<'b>(sink: &'b mut DeltaSink<'_>) -> DeltaSink<'b> {
+    match sink {
+        Some(s) => Some(&mut **s),
+        None => None,
+    }
+}
+
+/// The safely-streamable prefix of a partially-received reply: closed <think>
+/// blocks removed, an unclosed one truncated, and a trailing partial "<think>"
+/// tag held back — so reasoning never flashes on screen and emitted text never
+/// retracts as more chunks land.
+pub(crate) fn stream_visible(raw: &str) -> String {
+    let s = strip_reasoning(raw);
+    let tag = "<think>";
+    let mut cut = s.len();
+    for k in (1..tag.len()).rev() {
+        if s.ends_with(&tag[..k]) {
+            cut = s.len() - k;
+            break;
+        }
+    }
+    // trim_end in EVERY path: strip_reasoning trims, so an untrimmed hold-back
+    // result could exceed a later trimmed one — emitted text must never retract.
+    s[..cut].trim_end().to_string()
+}
+
 /// Single choke point for every LLM call. `task` tags the call; `retrieval` names
 /// the memory variant that shaped the prompt ("n/a" when the path doesn't retrieve).
 /// Times the call, captures real token usage, logs it under a fresh `call_id` when
@@ -564,8 +608,32 @@ pub fn chat_with_id(
     task: &str,
     retrieval: &str,
 ) -> anyhow::Result<(String, u64)> {
+    chat_inner(cfg, messages, task, retrieval, None)
+}
+
+/// `chat_with_id`, streaming: `on_delta` receives each visible chunk as it
+/// arrives. The returned text is the complete reply, identical to what the
+/// non-streaming path produces — directive parsing still needs the whole.
+pub fn chat_with_id_streaming(
+    cfg: &AgentConfig,
+    messages: Vec<serde_json::Value>,
+    task: &str,
+    retrieval: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> anyhow::Result<(String, u64)> {
+    chat_inner(cfg, messages, task, retrieval, Some(on_delta))
+}
+
+fn chat_inner(
+    cfg: &AgentConfig,
+    messages: Vec<serde_json::Value>,
+    task: &str,
+    retrieval: &str,
+    mut sink: DeltaSink,
+) -> anyhow::Result<(String, u64)> {
     // Remote box: proxy the whole call home over the forwarded socket. No key,
     // no Authorization header, ever constructed here. (Logged home-side.)
+    // Frame-at-a-time protocol — the remote path does not stream.
     if cfg.provider == "broker" {
         let sock = cfg
             .broker_sock
@@ -574,13 +642,15 @@ pub fn chat_with_id(
         return crate::broker::chat_via_broker(sock, cfg, messages).map(|t| (t, 0));
     }
 
-    match attempt(cfg, &messages, task, retrieval) {
+    match attempt(cfg, &messages, task, retrieval, reborrow(&mut sink)) {
         // Rotation-for-limits: each provider meters on its own counter, so a
         // throttled call can often complete elsewhere at the same tier. Any
         // alternate failure just moves on; exhaustion surfaces the original 429.
+        // A 429 arrives as an HTTP status BEFORE any token streams, so no
+        // partial output can precede a rotation.
         Err(e) if e.downcast_ref::<RateLimited>().is_some() => {
             for alt in rotation_candidates(cfg.provider) {
-                if let Ok(ok) = attempt(&alt, &messages, task, retrieval) {
+                if let Ok(ok) = attempt(&alt, &messages, task, retrieval, reborrow(&mut sink)) {
                     return Ok(ok);
                 }
             }
@@ -590,13 +660,14 @@ pub fn chat_with_id(
     }
 }
 
-/// One provider attempt: tier-resolve, call, log. Split from `chat_with_id` so
+/// One provider attempt: tier-resolve, call, log. Split from `chat_inner` so
 /// the rotation loop logs every attempt as its own call record.
 fn attempt(
     cfg: &AgentConfig,
     messages: &[serde_json::Value],
     task: &str,
     retrieval: &str,
+    sink: DeltaSink,
 ) -> anyhow::Result<(String, u64)> {
     let call_id = crate::llm_log::next_call_id();
     // Model-tier ring: route this task to its tier's model (an explicit
@@ -604,10 +675,32 @@ fn attempt(
     let resolved = crate::tiers::model_for(cfg.provider, task, &cfg.model);
     let cfg = &AgentConfig { model: resolved, ..cfg.clone() };
     let start = std::time::Instant::now();
-    let result = if cfg.provider == "anthropic" {
-        chat_anthropic(cfg, messages)
-    } else {
-        chat_openai(cfg, messages)
+    let result = {
+        // Guard the caller's sink: accumulate raw chunks, re-strip, and emit
+        // only the growth of the visible prefix — reasoning-model <think>
+        // output never reaches the screen, even split across chunk boundaries.
+        let mut raw = String::new();
+        let mut emitted = 0usize;
+        let mut wrapped;
+        let provider_sink: DeltaSink = match sink {
+            Some(on_delta) => {
+                wrapped = move |d: &str| {
+                    raw.push_str(d);
+                    let vis = stream_visible(&raw);
+                    if vis.len() > emitted {
+                        on_delta(&vis[emitted..]);
+                        emitted = vis.len();
+                    }
+                };
+                Some(&mut wrapped as &mut dyn FnMut(&str))
+            }
+            None => None,
+        };
+        if cfg.provider == "anthropic" {
+            chat_anthropic(cfg, messages, provider_sink)
+        } else {
+            chat_openai(cfg, messages, provider_sink)
+        }
     };
     let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -639,15 +732,28 @@ pub fn chat(cfg: &AgentConfig, messages: Vec<serde_json::Value>, task: &str) -> 
 }
 
 /// OpenAI-compatible providers (OpenAI, Groq, Gemini's OpenAI shim, custom,
-/// Ollama). Returns (raw_text, prompt_tokens, completion_tokens).
-fn chat_openai(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Result<(String, u64, u64)> {
+/// Ollama). Returns (raw_text, prompt_tokens, completion_tokens). With a sink,
+/// requests SSE and forwards each content delta as it arrives.
+fn chat_openai(
+    cfg: &AgentConfig,
+    messages: &[serde_json::Value],
+    sink: DeltaSink,
+) -> anyhow::Result<(String, u64, u64)> {
     let url = format!("{}/chat/completions", cfg.url);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages,
         "max_tokens": cfg.max_tokens,
         "temperature": cfg.temperature
     });
+    if sink.is_some() {
+        body["stream"] = serde_json::json!(true);
+        // Usage-in-final-chunk is an opt-in extension; only request it where
+        // it's known-supported (other shims reject unknown fields).
+        if matches!(cfg.provider, "openai" | "groq") {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
+    }
 
     // Bound the call so a stalled connection surfaces as an error instead of
     // hanging the agent (and the spinner) forever.
@@ -692,6 +798,35 @@ fn chat_openai(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Res
         Err(e) => anyhow::bail!("{e}"),
     };
 
+    if let Some(on_delta) = sink {
+        use std::io::BufRead;
+        let mut text = String::new();
+        let (mut pt, mut ct) = (0u64, 0u64);
+        for line in std::io::BufReader::new(resp.into_reader()).lines() {
+            let line = line?;
+            let Some(data) = line.strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data == "[DONE]" {
+                break;
+            }
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+            if let Some(msg) = j["error"]["message"].as_str() {
+                anyhow::bail!("{msg}");
+            }
+            if let Some(d) = j["choices"][0]["delta"]["content"].as_str() {
+                if !d.is_empty() {
+                    text.push_str(d);
+                    on_delta(d);
+                }
+            }
+            if j["usage"].is_object() {
+                pt = j["usage"]["prompt_tokens"].as_u64().unwrap_or(pt);
+                ct = j["usage"]["completion_tokens"].as_u64().unwrap_or(ct);
+            }
+        }
+        return Ok((text, pt, ct));
+    }
+
     let json: serde_json::Value = resp.into_json()?;
     if let Some(msg) = json["error"]["message"].as_str() {
         anyhow::bail!("{msg}");
@@ -704,8 +839,13 @@ fn chat_openai(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Res
 
 /// Anthropic Messages API — NOT OpenAI-compatible: system is a top-level field
 /// (not a message role), auth is `x-api-key` + `anthropic-version`, the reply is
-/// an array of content blocks, and usage is input/output_tokens.
-fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Result<(String, u64, u64)> {
+/// an array of content blocks, and usage is input/output_tokens. With a sink,
+/// requests SSE (`content_block_delta` events carry the text).
+fn chat_anthropic(
+    cfg: &AgentConfig,
+    messages: &[serde_json::Value],
+    sink: DeltaSink,
+) -> anyhow::Result<(String, u64, u64)> {
     // Split the system message(s) out of the OpenAI-style array.
     let mut system = String::new();
     let mut msgs: Vec<serde_json::Value> = Vec::new();
@@ -722,12 +862,15 @@ fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::
     let url = format!("{}/v1/messages", cfg.url);
     // No `temperature`: the newest Claude models (Sonnet/Haiku 4.5+, Opus 4.x) reject it
     // as deprecated, and all models fall back to a sane default when it is omitted.
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
         "system": system,
         "messages": msgs
     });
+    if sink.is_some() {
+        body["stream"] = serde_json::json!(true);
+    }
     let resp = match ureq::post(&url)
         .timeout(std::time::Duration::from_secs(30))
         .set("x-api-key", &cfg.key)
@@ -758,6 +901,39 @@ fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::
         }
         Err(e) => anyhow::bail!("{e}"),
     };
+
+    if let Some(on_delta) = sink {
+        use std::io::BufRead;
+        let mut text = String::new();
+        let (mut pt, mut ct) = (0u64, 0u64);
+        for line in std::io::BufReader::new(resp.into_reader()).lines() {
+            let line = line?;
+            let Some(data) = line.strip_prefix("data:") else { continue };
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(data.trim()) else { continue };
+            match j["type"].as_str().unwrap_or("") {
+                "content_block_delta" => {
+                    if let Some(d) = j["delta"]["text"].as_str() {
+                        if !d.is_empty() {
+                            text.push_str(d);
+                            on_delta(d);
+                        }
+                    }
+                }
+                "message_start" => {
+                    pt = j["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                }
+                "message_delta" => {
+                    ct = j["usage"]["output_tokens"].as_u64().unwrap_or(ct);
+                }
+                "error" => {
+                    anyhow::bail!("{}", j["error"]["message"].as_str().unwrap_or("stream error"));
+                }
+                _ => {}
+            }
+        }
+        return Ok((text, pt, ct));
+    }
+
     let json: serde_json::Value = resp.into_json()?;
     if let Some(msg) = json["error"]["message"].as_str() {
         anyhow::bail!("{msg}");

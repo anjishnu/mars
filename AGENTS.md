@@ -72,6 +72,10 @@ through a real ANSI interpreter (`vt100`, already a dependency) and check the
 - Behavioral magic numbers belong in `tuning.rs` as a named, described knob — not as
   a literal in the call site. The description field is read by humans *and* meant to
   be safely editable by an agent asked to change editor behavior.
+- Every instruction sent to a model lives as a `.md` file in `src/prompts/`
+  (compile-time embedded via `prompts.rs`; `{name}` placeholders substituted at call
+  sites) — never as a string literal in code. New prompt = new `.md` + a const in
+  `prompts.rs` + a placeholder assertion in the selfcheck's prompt-templates block.
 - Destructive actions (quit, close, kill) go through a confirmation gate before
   firing — this applies equally to direct user input and agent-proposed `RUN:`
   directives (`Action::is_destructive`).

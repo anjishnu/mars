@@ -254,6 +254,9 @@ pub struct App {
     pub agent_tx: mpsc::Sender<AgentEvent>,
     pub agent_rx: mpsc::Receiver<AgentEvent>,
     pub agent_pending: bool,
+    /// The in-progress streamed reply (rendered live in the ask panel); the
+    /// final `Answer` event replaces it with the directive-parsed text.
+    pub agent_partial: Option<String>,
     /// Transient notices only (errors, no-key) — answers live in the history.
     pub agent_answer: Option<String>,
     /// Confirm-gated action the model proposed (RUN:/TYPE: directive).
@@ -390,6 +393,7 @@ impl App {
             agent_tx,
             agent_rx,
             agent_pending: false,
+            agent_partial: None,
             agent_answer: None,
             agent_directive: None,
             refactor_target: None,
@@ -2557,6 +2561,7 @@ impl App {
         self.palette = None;
         self.mode = self.bar_return.clone();
         self.agent_answer = None;
+        self.agent_partial = None;
         self.agent_directive = None;
         self.refactor_target = None;
         self.refactor_replacement = None;
@@ -2646,6 +2651,7 @@ impl App {
         if ctrl && matches!(key.code, KeyCode::Char('l')) {
             self.agent_history.clear();
             self.agent_answer = None;
+            self.agent_partial = None;
             self.agent_directive = None;
             self.refactor_target = None;
             self.refactor_replacement = None;
@@ -3485,14 +3491,10 @@ impl App {
             Action::QueryReplace       => self.start_prompt(PromptKind::ReplaceFrom, "Query replace: "),
             Action::OpenTerminal       => self.open_terminal(),
             Action::AskAgent           => self.open_bar(BarMode::Ask),
-            Action::ExplainThis        => self.ask_prefilled(
-                "Explain what's on screen at my cursor — what is this and what matters about it?",
-            ),
-            Action::ExplainFailure     => self.ask_prefilled(
-                "Why did this fail? Name the cause, cite the exact file:line if there is one, \
-                 and give the fix. Be terse.",
-            ),
+            Action::ExplainThis        => self.ask_prefilled(crate::prompts::EXPLAIN_THIS.trim_end()),
+            Action::ExplainFailure     => self.ask_prefilled(crate::prompts::EXPLAIN_FAILURE.trim_end()),
             Action::WatchPane          => self.toggle_watch_pane(),
+            Action::ExpandNotices      => self.expand_notices(),
             Action::AwayDigest         => self.show_away_digest(),
             Action::Detach             => {
                 if self.session_name.is_some() {
@@ -3815,6 +3817,7 @@ impl App {
                         }
                     }
                     self.agent_pending = false;
+                    self.agent_partial = None;
                     // If the query targeted a selection and the reply carries a code
                     // block, offer it as a confirm-gated replacement (a refactor).
                     if self.refactor_target.is_some() {
@@ -3823,6 +3826,12 @@ impl App {
                     self.agent_history.push(("assistant".into(), text));
                     self.agent_directive = directive;
                     self.ask_scroll = 0; // show the new turn
+                }
+                AgentEvent::AnswerStart => {
+                    self.agent_partial = Some(String::new());
+                }
+                AgentEvent::AnswerDelta { text } => {
+                    self.agent_partial.get_or_insert_with(String::new).push_str(&text);
                 }
                 AgentEvent::AutoName { tab_id, name } => {
                     self.bg_busy = false;
@@ -3865,6 +3874,7 @@ impl App {
                 }
                 AgentEvent::Error(e) => {
                     self.agent_pending = false;
+                    self.agent_partial = None;
                     self.bg_busy = false;
                     self.agent_answer = Some(format!("⚠ {}", e));
                     self.agent_directive = None;
@@ -3895,6 +3905,29 @@ impl App {
                         format!("{verdict}{tab}"),
                         dur,
                     );
+                    // And into the work journal — the persistent stream of
+                    // what-was-happening snapshots (mission inference, mars ls).
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::record(&crate::worklog::WorkEntry {
+                        ts,
+                        session: self.session_label(),
+                        tab: tab.trim_start_matches(" · ").trim().to_string(),
+                        verdict: verdict.clone(),
+                        failed,
+                        dur_secs: dur.map(|t| t * self.tuning.poll_interval_ms / 1000),
+                    });
+                    self.maybe_infer_mission(ts);
+                }
+                AgentEvent::Mission { text } => {
+                    self.bg_busy = false;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::save_mission(&self.session_label(), &text, ts);
                 }
             }
         }
@@ -3996,6 +4029,29 @@ impl App {
             );
             self.push_away(AwayKind::Context, text, None);
         }
+        // Reattach briefing: mission + the last few work-journal snapshots as
+        // an assistant turn — "where was I?" is answerable the moment the ask
+        // panel opens, and the context rides along with follow-up questions
+        // (build_messages sends the recent turns). Deterministic; no LLM call.
+        let session = self.session_label();
+        let mission = crate::worklog::load_mission(&session);
+        let recent = crate::worklog::recent(&session, 5);
+        if mission.is_some() || !recent.is_empty() {
+            let mut brief = String::from("Where you left off\n");
+            if let Some((m, _)) = &mission {
+                brief.push_str(&format!("  mission: {m}\n"));
+            }
+            for e in &recent {
+                let mark = if e.failed { "✗" } else { "✓" };
+                brief.push_str(&format!(
+                    "  {mark} {} [{}] {}\n",
+                    crate::broker::ago(e.ts),
+                    e.tab,
+                    e.verdict
+                ));
+            }
+            self.agent_history.push(("assistant".into(), brief));
+        }
         // Headline items from the away window: failures lead, then the rest.
         let events: Vec<&AwayEvent> = self.away_log.iter().filter(|e| e.tick >= from).collect();
         let mut items: Vec<String> = Vec::new();
@@ -4071,6 +4127,62 @@ impl App {
                 out.push_str(&format!("  {ago} ago — {}{dur}\n", e.text));
             }
         }
+        self.agent_history.push(("assistant".into(), out));
+        self.ask_scroll = 0;
+        self.open_bar(BarMode::Ask);
+    }
+
+    fn session_label(&self) -> String {
+        self.session_name.clone().unwrap_or_else(|| "standalone".to_string())
+    }
+
+    /// Debounced background mission inference: at most one per
+    /// `mission_refresh_secs`, only with enough journal signal, never while
+    /// another background task holds the gate.
+    fn maybe_infer_mission(&mut self, now: u64) {
+        let refresh = self.tuning.mission_refresh_secs;
+        if refresh == 0 || self.bg_busy {
+            return;
+        }
+        let session = self.session_label();
+        if let Some((_, as_of)) = crate::worklog::load_mission(&session) {
+            if now.saturating_sub(as_of) < refresh {
+                return;
+            }
+        }
+        let entries = crate::worklog::recent(&session, 15);
+        if entries.len() < 2 {
+            return;
+        }
+        let cfg = agent::AgentConfig::from_env();
+        if !cfg.is_configured() {
+            return;
+        }
+        let lines: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                let mark = if e.failed { "✗" } else { "✓" };
+                format!("{} {} [{}] {}", mark, crate::broker::ago(e.ts), e.tab, e.verdict)
+            })
+            .collect();
+        self.bg_busy = true;
+        agent::infer_mission(cfg, lines, self.agent_tx.clone());
+    }
+
+    /// Expand every pending notice into one digest turn in the ask panel and
+    /// clear the queue — the "read them all at once" alternative to Esc-ing
+    /// through notices one by one.
+    fn expand_notices(&mut self) {
+        if self.notices.is_empty() {
+            self.status_msg = Some("no pending notices".into());
+            return;
+        }
+        let mut out = String::from("Pending notices\n");
+        for n in &self.notices {
+            let mark = if n.kind == NoticeKind::Failure { "✗" } else { "·" };
+            out.push_str(&format!("  {mark} {}\n", n.text));
+        }
+        self.notices.clear();
         self.agent_history.push(("assistant".into(), out));
         self.ask_scroll = 0;
         self.open_bar(BarMode::Ask);

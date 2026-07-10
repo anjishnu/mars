@@ -227,11 +227,7 @@ pub fn docs_context_for(question: &str) -> Option<String> {
     // Frame it: for a how-to / configuration question, ANSWER by explaining the
     // exact setting/keybinding/variable and where to set it — do not emit a RUN
     // directive. This is what fixes the "[would run: X]" non-answers.
-    Some(format!(
-        "Use this Mars reference to answer the user's how-to/configuration question directly — \
-         name the exact keybinding, setting (with its file), or environment variable, and how to \
-         change it. Do not propose a RUN action for a how-to question.\n{body}"
-    ))
+    Some(crate::prompts::DOCS_CONTEXT_PREAMBLE.trim_end().replace("{body}", &body))
 }
 
 // ── Redaction: nothing secret-shaped enters a prompt ─────────────────────────

@@ -66,6 +66,8 @@ pub enum Action {
     ExplainFailure,
     /// W6: watch this terminal — summarize it when it goes quiet or exits.
     WatchPane,
+    /// Expand every pending notice into one digest (instead of Esc-ing each).
+    ExpandNotices,
     /// Leave the session running and disconnect this client.
     Detach,
     RenameSession,
@@ -137,6 +139,7 @@ impl Action {
             Action::ExplainThis        => "explain this",
             Action::ExplainFailure     => "why did this fail?",
             Action::WatchPane          => "watch this pane",
+            Action::ExpandNotices      => "show all notices",
             Action::AwayDigest         => "away digest (what happened)",
             Action::Detach             => "detach session",
             Action::RenameSession      => "rename session",
@@ -206,6 +209,7 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Explain this",  Action::ExplainThis,  "Explain what's on screen at the cursor"),
         MenuItem::run_desc("Why did this fail?", Action::ExplainFailure, "Triage the error in the focused terminal"),
         MenuItem::run_desc("Watch this pane", Action::WatchPane, "Summarize this terminal when it goes quiet or exits (even detached)"),
+        MenuItem::run_desc("Show all notices", Action::ExpandNotices, "Expand every pending watch/agent notice into one digest and clear them"),
         MenuItem::run_desc("Away digest",   Action::AwayDigest,   "What happened while you were gone — runs, exits, changed files"),
         MenuItem::run_desc("Open command memory", Action::OpenCommandMemory, "See and edit everything the agent remembers (delete lines to forget)"),
         MenuItem::run_desc("Forget all commands", Action::ClearCommandMemory, "Erase the agent's remembered commands (asks first)"),

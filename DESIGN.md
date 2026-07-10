@@ -77,6 +77,9 @@ terminal.rs  Term: a PTY (portable-pty) + vt100::Parser, pumped by a reader thre
              is watching (the property that makes session-detach free).
 agent.rs     AgentConfig (provider detection: custom/Groq/Gemini via env), the
              OpenAI-compatible chat call, RUN: directive parsing.
+prompts.rs   Every model-facing instruction as editable Markdown in src/prompts/
+             (include_str!-embedded, so the single binary still ships whole);
+             {name} placeholders substituted at call sites.
 retrieval.rs The whole memory subsystem behind a ten-symbol facade: command
              memory + shell history few-shot (fewshot_for), the self-knowledge
              docs corpus (docs_context_for), BM25 ranking, secret redaction.

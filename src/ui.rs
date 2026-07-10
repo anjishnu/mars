@@ -1309,6 +1309,19 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
             ]));
         }
     }
+    // The streamed reply-in-progress renders as a live assistant turn; the
+    // final Answer replaces it (directive stripped, pushed into history).
+    if let Some(partial) = app.agent_partial.as_ref().filter(|p| !p.is_empty()) {
+        let tag_style =
+            Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD);
+        for (i, wrapped) in wrap_text(partial, width.saturating_sub(7)).into_iter().enumerate() {
+            let prefix = if i == 0 { "mars › " } else { "       " };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, tag_style),
+                Span::styled(wrapped, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
     if app.agent_pending {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let speed = app.tuning.spinner_speed_ticks;
