@@ -48,6 +48,9 @@ pub struct Tuning {
     pub tree_width: u16,
     pub watch_quiet_secs: u64,
     pub agent_scrollback_context: usize,
+    pub memory_cwd_boost: f64,
+    pub memory_recency_boost: f64,
+    pub memory_recency_halflife_days: f64,
 }
 
 impl Default for Tuning {
@@ -89,6 +92,9 @@ impl Default for Tuning {
             tree_width: 30,
             watch_quiet_secs: 20,
             agent_scrollback_context: 200,
+            memory_cwd_boost: 0.25,
+            memory_recency_boost: 0.15,
+            memory_recency_halflife_days: 14.0,
         }
     }
 }
@@ -116,6 +122,7 @@ fn knob(value: serde_json::Value, description: &str) -> Knob {
 /// the knob, WHERE to set it, and the default — so the agent answers
 /// self-reconfiguration questions with the exact `knob = value in tuning.json`
 /// rather than hallucinating the file or the knob name.
+#[cfg_attr(not(feature = "memory"), allow(dead_code))] // sole consumer is the docs corpus
 pub fn knob_descriptions() -> Vec<String> {
     default_knobs()
         .into_iter()
@@ -214,6 +221,16 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("agent_scrollback_context", knob(json!(d.agent_scrollback_context),
             "Lines of a watched/focused terminal's screen sent to the agent for a summary \
              or triage.")),
+        ("memory_cwd_boost", knob(json!(d.memory_cwd_boost),
+            "How much a remembered command from the CURRENT working directory outranks a \
+             lexical tie from elsewhere (0 = off). Same-project memories answer \
+             project-specific requests.")),
+        ("memory_recency_boost", knob(json!(d.memory_recency_boost),
+            "How much a RECENT remembered command outranks a lexical tie from long ago \
+             (0 = off); decays with memory_recency_halflife_days.")),
+        ("memory_recency_halflife_days", knob(json!(d.memory_recency_halflife_days),
+            "Days for the recency boost to halve. Smaller = the agent prefers this \
+             week's habits; larger = long memory.")),
     ]
 }
 
@@ -318,6 +335,10 @@ pub fn load() -> Tuning {
         t.watch_quiet_secs = get_u64(&map, "watch_quiet_secs", t.watch_quiet_secs);
         t.agent_scrollback_context =
             get_u64(&map, "agent_scrollback_context", t.agent_scrollback_context as u64) as usize;
+        t.memory_cwd_boost = get_f64(&map, "memory_cwd_boost", t.memory_cwd_boost);
+        t.memory_recency_boost = get_f64(&map, "memory_recency_boost", t.memory_recency_boost);
+        t.memory_recency_halflife_days =
+            get_f64(&map, "memory_recency_halflife_days", t.memory_recency_halflife_days);
         if let Some(list) = map.get("project_ignore").and_then(|e| e.value.as_array()) {
             let dirs: Vec<String> =
                 list.iter().filter_map(|v| v.as_str().map(String::from)).collect();

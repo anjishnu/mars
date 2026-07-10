@@ -3502,7 +3502,69 @@ impl App {
                         Some("Not in a session — start one with: mars --session <name>".into());
                 }
             }
+            Action::OpenCommandMemory  => self.open_command_memory(),
+            Action::ClearCommandMemory => self.clear_command_memory(),
+            Action::OpenDenylist       => self.open_denylist(),
             Action::Quit               => self.request_quit(),
+        }
+    }
+
+    // ── Memory management ────────────────────────────────────────────────────
+    // The stores are plain local files, so "manage memory" is "edit a buffer":
+    // ownership means the user can read, edit, and delete what the agent knows.
+
+    fn open_command_memory(&mut self) {
+        match crate::retrieval::command_memory_path() {
+            Some(p) if p.exists() => {
+                let path = p.to_string_lossy().into_owned();
+                if let Err(e) = self.open_file(&path) {
+                    self.status_msg = Some(format!("couldn't open {path}: {e}"));
+                }
+            }
+            _ => {
+                self.status_msg =
+                    Some("no command memory yet — accept a translated command first".into());
+            }
+        }
+    }
+
+    fn clear_command_memory(&mut self) {
+        let n = crate::retrieval::load_command_records().len();
+        if n == 0 {
+            self.status_msg = Some("command memory is already empty".into());
+            return;
+        }
+        if !self.close_confirmed {
+            self.start_prompt(
+                PromptKind::ConfirmAction(Action::ClearCommandMemory),
+                &format!("Forget all {n} remembered command(s)?  y forget · n cancel "),
+            );
+            return;
+        }
+        if let Some(p) = crate::retrieval::command_memory_path() {
+            let _ = std::fs::write(&p, "");
+        }
+        self.status_msg = Some(format!("forgot {n} remembered command(s)"));
+    }
+
+    fn open_denylist(&mut self) {
+        let Some(p) = crate::retrieval::denylist_path() else {
+            self.status_msg = Some("no HOME — can't locate ~/.mars/denylist".into());
+            return;
+        };
+        if !p.exists() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(
+                &p,
+                "# One entry per line. Any line's text appearing in command memory or\n\
+                 # shell history is replaced with [REDACTED] before entering an LLM prompt.\n",
+            );
+        }
+        let path = p.to_string_lossy().into_owned();
+        if let Err(e) = self.open_file(&path) {
+            self.status_msg = Some(format!("couldn't open {path}: {e}"));
         }
     }
 
@@ -4278,30 +4340,58 @@ impl App {
                     None => {}
                 }
             }
-            MouseEventKind::ScrollUp => {
+            // Terminal wheel = tmux's three-way dispatch. Mars's own scrollback
+            // is only ONE of the destinations: a full-screen app (alternate
+            // screen — Claude Code, less, vim) has no scrollback at all, so the
+            // wheel must become input to the app, not a silent no-op.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(m.kind, MouseEventKind::ScrollUp);
                 let n = self.tuning.wheel_scroll_lines;
+                let fid = self.focused_pane_id();
+                let rect = self.pane_rects.iter().find(|(id, _)| *id == fid).map(|(_, r)| *r);
                 match self.focused_pane().content {
                     PaneContent::Terminal(tid) => {
-                        if let Some(t) = self.terms.get_mut(&tid) {
-                            t.scroll_view(n as i64); // back through history
+                        let Some(t) = self.terms.get_mut(&tid) else { return };
+                        let screen = t.screen();
+                        let delta = if up { n as i64 } else { -(n as i64) };
+                        if t.view_offset() > 0 {
+                            // Already browsing mars scrollback: the wheel keeps
+                            // operating on the view until it returns to live,
+                            // so scrollback is always escapable.
+                            t.scroll_view(delta);
+                        } else if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+                            // The inner app owns the mouse — forward the wheel
+                            // press in the app's own encoding, pane-relative,
+                            // 1-based (inner area starts past the border cell).
+                            let (mut x, mut y) = (1u16, 1u16);
+                            if let Some(r) = rect {
+                                if m.column > r.x && m.row > r.y {
+                                    x = (m.column - r.x).min(r.width.saturating_sub(2).max(1));
+                                    y = (m.row - r.y).min(r.height.saturating_sub(2).max(1));
+                                }
+                            }
+                            let bytes = encode_wheel(&screen, up, x, y);
+                            t.send_bytes(&bytes);
+                        } else if screen.alternate_screen() {
+                            // Full-screen app without mouse reporting: translate
+                            // each notch into arrow keys, honoring DECCKM.
+                            let seq: &[u8] = match (up, screen.application_cursor()) {
+                                (true, false) => b"\x1b[A",
+                                (true, true) => b"\x1bOA",
+                                (false, false) => b"\x1b[B",
+                                (false, true) => b"\x1bOB",
+                            };
+                            for _ in 0..n {
+                                t.send_bytes(seq);
+                            }
+                        } else {
+                            t.scroll_view(delta);
                         }
                     }
                     PaneContent::Editor(_) if self.mode == Mode::Edit => {
-                        for _ in 0..n { self.move_up(); }
-                    }
-                    _ => {}
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                let n = self.tuning.wheel_scroll_lines;
-                match self.focused_pane().content {
-                    PaneContent::Terminal(tid) => {
-                        if let Some(t) = self.terms.get_mut(&tid) {
-                            t.scroll_view(-(n as i64)); // toward live
+                        for _ in 0..n {
+                            if up { self.move_up() } else { self.move_down() }
                         }
-                    }
-                    PaneContent::Editor(_) if self.mode == Mode::Edit => {
-                        for _ in 0..n { self.move_down(); }
                     }
                     _ => {}
                 }
@@ -4397,6 +4487,30 @@ pub fn extract_code_block(text: &str) -> Option<String> {
     let body = &after[body_start..];
     let end = body.find("```")?;
     Some(body[..end].trim_end_matches('\n').to_string())
+}
+
+/// Encode a wheel press for an inner app that enabled mouse reporting, in the
+/// app's own negotiated encoding. Coordinates are 1-based, pane-relative.
+fn encode_wheel(screen: &vt100::Screen, up: bool, x: u16, y: u16) -> Vec<u8> {
+    let button: u32 = if up { 64 } else { 65 };
+    match screen.mouse_protocol_encoding() {
+        vt100::MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{x};{y}M").into_bytes(),
+        vt100::MouseProtocolEncoding::Utf8 => {
+            let mut out = vec![0x1b, b'[', b'M'];
+            for v in [32 + button, 32 + x as u32, 32 + y as u32] {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(
+                    char::from_u32(v).unwrap_or(' ').encode_utf8(&mut buf).as_bytes(),
+                );
+            }
+            out
+        }
+        // X10 bytes overflow past coordinate 223 (32 + 223 = 255); clamp.
+        vt100::MouseProtocolEncoding::Default => {
+            let b = |v: u32| (32 + v.min(223)) as u8;
+            vec![0x1b, b'[', b'M', b(button), b(x as u32), b(y as u32)]
+        }
+    }
 }
 
 /// Translate a key event into the byte sequence a PTY expects.

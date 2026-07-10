@@ -475,3 +475,10 @@
   `ARES_DEBUG_LOG=<path>` env var (session.rs `debug_log`) writes timestamped
   diagnostics for hello/parse/read errors — zero-cost when unset, useful for future
   daemon debugging since a detached daemon has no visible stderr.
+
+- Replacing the installed binary (`~/.cargo/bin/mars`) with `cp` over the existing
+  file gets the new binary SIGKILLed on launch (exit 137) — macOS AMFI caches the
+  code signature by inode. `rm` the old binary first, then `cp` (or use `mv`).
+- Two build SKUs since the memory feature gate: `cargo build` and
+  `cargo build --no-default-features` (retrieval_stub.rs) — BOTH must pass
+  --selfcheck when touching retrieval.rs or its facade callers.

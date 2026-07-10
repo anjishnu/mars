@@ -25,6 +25,10 @@ source ~/.cargo/env && cargo build          # cargo is not on the default PATH
 ./target/debug/mars --selfcheck             # the primary test suite — run after every change
 ./target/debug/mars                         # try it interactively
 ./target/debug/mars --ask "how do I split the screen?"   # headless agent smoke test
+cargo build --no-default-features && ./target/debug/mars --selfcheck
+                                            # the memory-free build (retrieval_stub.rs)
+                                            # must ALSO stay green — run it whenever you
+                                            # touch retrieval.rs or its facade callers
 ```
 
 `--selfcheck` is a headless run against `ratatui::TestBackend` that drives the real

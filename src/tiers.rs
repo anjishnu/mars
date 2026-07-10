@@ -14,6 +14,12 @@
 //! is never second-guessed — this is also what keeps the eval pinned to one model).
 //! Otherwise the ring resolves `task → tier → model` for the active provider; an
 //! unmapped task or provider falls back to the provider default unchanged.
+//!
+//! Two runtime moves complete the cascade (both disabled by an explicit model pin):
+//! *rotation for limits* — a rate-limited call retries on another keyed provider's
+//! model for the same tier (`agent::rotation_candidates`) — and *escalation for
+//! quality* — an `ask` reply whose RUN: directive fails the registry check is
+//! retried once on the model one tier up (`model_above`).
 
 use std::collections::BTreeMap;
 
@@ -114,9 +120,40 @@ pub fn model_for(provider: &str, task: &str, default_model: &str) -> String {
         .unwrap_or_else(|| default_model.to_string())
 }
 
+const TIER_ORDER: [&str; 3] = ["low", "mid", "high"];
+
+fn model_above_in(t: &Tiers, provider: &str, task: &str) -> Option<String> {
+    let tier = t.task_tier.get(task)?;
+    let models = t.tiers.get(provider)?;
+    let current = models.get(tier)?;
+    let start = TIER_ORDER.iter().position(|x| *x == tier.as_str())?;
+    // Walk past tiers repointed to the same model — escalating to the model
+    // that just failed would be a no-op (e.g. openai's low and mid coincide).
+    for next in &TIER_ORDER[start + 1..] {
+        if let Some(m) = models.get(*next) {
+            if m != current {
+                return Some(m.clone());
+            }
+        }
+    }
+    None
+}
+
+/// The model one tier above `task`'s tier for `provider` — the escalation
+/// target when a cheap-tier reply fails validation. None when the task is
+/// unmapped, already served by the top tier's model, or the user pinned a
+/// model explicitly (a deliberate choice is never second-guessed).
+pub fn model_above(provider: &str, task: &str) -> Option<String> {
+    if std::env::var("MARS_LLM_MODEL").is_ok() || std::env::var("ARES_LLM_MODEL").is_ok() {
+        return None;
+    }
+    model_above_in(&load(), provider, task)
+}
+
 /// Retrieval lines describing the ring, so the agent answers "which model runs X"
 /// / "how do I change the model for translate" with the real file + tier, not a
 /// hallucinated knob. Mirrors `tuning::knob_descriptions`.
+#[cfg_attr(not(feature = "memory"), allow(dead_code))] // sole consumer is the docs corpus
 pub fn tier_descriptions() -> Vec<String> {
     let t = Tiers::default();
     let mut out = vec![
@@ -131,5 +168,18 @@ pub fn tier_descriptions() -> Vec<String> {
              `task_tier` in ~/.config/mars/tiers.json."
         ));
     }
+    out.push(
+        "On a provider rate limit (HTTP 429) the agent rotates the call to another \
+         configured provider's model for the same tier — set more than one API key \
+         (e.g. GROQ_API_KEY and GEMINI_API_KEY) to enable rotation; an explicit \
+         MARS_LLM_MODEL disables it."
+            .to_string(),
+    );
+    out.push(
+        "If an ask reply proposes an action that fails the registry check, the \
+         question is retried once on the model one tier up (logged as task \
+         `ask_escalated`); an explicit MARS_LLM_MODEL disables escalation."
+            .to_string(),
+    );
     out
 }

@@ -26,6 +26,13 @@ include = ["src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/CHANGELOG.m
 name = "mars"
 path = "src/main.rs"
 
+[features]
+# `memory` is the whole retrieval subsystem (command memory, docs corpus,
+# redaction). Default-on; `cargo build --no-default-features` produces a
+# memory-free terminal that must also pass --selfcheck (retrieval_stub.rs).
+default = ["memory"]
+memory = []
+
 [dependencies]
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["bracketed-paste", "serde"] }

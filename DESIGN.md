@@ -77,6 +77,13 @@ terminal.rs  Term: a PTY (portable-pty) + vt100::Parser, pumped by a reader thre
              is watching (the property that makes session-detach free).
 agent.rs     AgentConfig (provider detection: custom/Groq/Gemini via env), the
              OpenAI-compatible chat call, RUN: directive parsing.
+retrieval.rs The whole memory subsystem behind a ten-symbol facade: command
+             memory + shell history few-shot (fewshot_for), the self-knowledge
+             docs corpus (docs_context_for), BM25 ranking, secret redaction.
+             Compiled behind the default-on `memory` cargo feature; without it,
+             retrieval_stub.rs supplies the same facade with neutral values, so
+             a memory-free build works unchanged (the deletion-proof seam —
+             core never depends on memory, only agent prompt assembly does).
 session.rs   The client/server split: ClientFrame/ServerFrame protocol, FrameWriter
              (ratatui output → socket), server_main/client_main, session lifecycle
              CLI (session_main/resume_main/list_main).

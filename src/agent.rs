@@ -154,6 +154,79 @@ fn env_var(name: &str) -> Result<String, std::env::VarError> {
     std::env::var(format!("MARS_{name}")).or_else(|_| std::env::var(format!("ARES_{name}")))
 }
 
+/// A 429, typed, so the cascade can tell "this family is throttled" (rotate to
+/// another one) from every other failure (don't).
+#[derive(Debug)]
+pub struct RateLimited(pub String);
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+/// Every provider with a key in the ambient env, paid-first: explicit
+/// MARS_LLM_KEY wins, then a set Claude/OpenAI key (you meant it), then the
+/// free Groq/Gemini tiers. Position 0 is what `from_env` picks; the rest are
+/// rotation targets when it rate-limits. Cheap defaults per provider
+/// (right-size, don't reach for the biggest); override any with MARS_LLM_MODEL.
+fn provider_chain() -> Vec<(String, &'static str, &'static str, &'static str)> {
+    let mut chain = Vec::new();
+    if let Ok(k) = env_var("LLM_KEY") {
+        chain.push((k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"));
+    }
+    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
+        // Claude — Anthropic's own Messages API (not OpenAI-compatible; handled
+        // in chat()). Haiku is the cheap/fast default.
+        chain.push((k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5"));
+    }
+    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+        chain.push((k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
+    }
+    if let Ok(k) = std::env::var("GROQ_API_KEY") {
+        // Qwen3-32B: strong open model on Groq's fast free tier.
+        chain.push((k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
+    }
+    if let Ok(k) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY")) {
+        // Flash-Lite: cheapest + highest free-tier limits. (Pinned dated
+        // versions age out of the free tier, so track the lite line.)
+        chain.push((
+            k,
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-3.1-flash-lite",
+        ));
+    }
+    chain
+}
+
+/// Rotation-for-limits targets: the other keyed providers, paid-first. Empty
+/// when the user pinned a model/URL or keyed a custom endpoint (an explicit
+/// choice is never rotated away from) — and, trivially, with one key.
+pub fn rotation_candidates(current_provider: &str) -> Vec<AgentConfig> {
+    if env_var("LLM_MODEL").is_ok()
+        || env_var("LLM_URL").is_ok()
+        || current_provider == "custom"
+    {
+        return Vec::new();
+    }
+    provider_chain()
+        .into_iter()
+        .filter(|(_, p, _, _)| *p != current_provider)
+        .map(|(key, provider, url, model)| AgentConfig {
+            url: url.to_string(),
+            key,
+            model: model.to_string(),
+            provider,
+            max_tokens: 512,
+            temperature: 0.3,
+            broker_sock: None,
+        })
+        .collect()
+}
+
 impl AgentConfig {
     pub fn from_env() -> Self {
         // Highest precedence: a forwarded auth socket (we're on a remote box).
@@ -175,37 +248,13 @@ impl AgentConfig {
                 };
             }
         }
-        // Provider detection, paid-first: explicit MARS_LLM_KEY wins, then a set
-        // Claude/OpenAI key (you meant it), then the free Groq/Gemini tiers.
-        // Cheap defaults per provider (right-size, don't reach for the biggest);
-        // override any with MARS_LLM_MODEL.
         let (key, provider, default_url, default_model) =
-            if let Ok(k) = env_var("LLM_KEY") {
-                (k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant")
-            } else if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
-                // Claude — Anthropic's own Messages API (not OpenAI-compatible;
-                // handled in chat()). Haiku is the cheap/fast default.
-                (k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5")
-            } else if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-                (k, "openai", "https://api.openai.com/v1", "gpt-4o-mini")
-            } else if let Ok(k) = std::env::var("GROQ_API_KEY") {
-                // Qwen3-32B: strong open model on Groq's fast free tier.
-                (k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b")
-            } else if let Ok(k) =
-                std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            {
-                (
-                    k,
-                    "gemini",
-                    "https://generativelanguage.googleapis.com/v1beta/openai",
-                    // Flash-Lite: cheapest + highest free-tier limits. Override
-                    // with MARS_LLM_MODEL. (Pinned dated versions age out of the
-                    // free tier, so track the lite line.)
-                    "gemini-3.1-flash-lite",
-                )
-            } else {
-                (String::new(), "none", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant")
-            };
+            provider_chain().into_iter().next().unwrap_or((
+                String::new(),
+                "none",
+                "https://api.groq.com/openai/v1",
+                "llama-3.1-8b-instant",
+            ));
 
         // Explicit URL/model overrides apply to any provider.
         let url = env_var("LLM_URL").unwrap_or_else(|_| default_url.to_string());
@@ -285,14 +334,35 @@ pub fn ask(
         // accurately. The action registry is already in the base prompt.
         let mode = crate::retrieval::MemoryMode::from_env();
         let mut messages = build_messages(&registry, &screen, &history, &question);
-        if mode.includes_docs() {
-            if let Some(ctx) = docs_context(&question) {
-                messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
-            }
+        if let Some(ctx) = crate::retrieval::docs_context_for(&question) {
+            messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
         }
-        match chat_with_id(&cfg, messages, "ask", mode.as_str()) {
+        match chat_with_id(&cfg, messages.clone(), "ask", mode.as_str()) {
             Ok((text, _call_id)) => {
                 let (display, directive) = parse_directive(&text);
+                // Escalation-for-quality: a RUN: naming no real action is an
+                // unambiguous cheap-model failure — retry ONCE, one tier up.
+                // The retry is logged as `ask_escalated`, which is unmapped in
+                // the ring, so the escalated model passes through model_for
+                // unclobbered. A still-bad directive surfaces honestly at the
+                // confirm gate.
+                if let Some(AgentDirective::Run(name)) = &directive {
+                    if crate::palette::Action::from_name(name).is_none() {
+                        if let Some(up) = crate::tiers::model_above(cfg.provider, "ask") {
+                            let cfg_up = AgentConfig { model: up, ..cfg.clone() };
+                            if let Ok((text2, _)) =
+                                chat_with_id(&cfg_up, messages, "ask_escalated", mode.as_str())
+                            {
+                                let (display2, directive2) = parse_directive(&text2);
+                                let _ = tx.send(AgentEvent::Answer {
+                                    text: display2,
+                                    directive: directive2,
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
                 let _ = tx.send(AgentEvent::Answer { text: display, directive });
             }
             Err(e) => {
@@ -300,29 +370,6 @@ pub fn ask(
             }
         }
     });
-}
-
-/// Retrieve the most relevant Mars docs + tuning-knob descriptions for `question`,
-/// formatted as a system-context block, or None if nothing is relevant.
-fn docs_context(question: &str) -> Option<String> {
-    use crate::retrieval;
-    let mut corpus = retrieval::doc_chunks();
-    corpus.extend(crate::tuning::knob_descriptions());
-    corpus.extend(retrieval::env_var_reference());
-    corpus.extend(crate::tiers::tier_descriptions());
-    let hits = retrieval::rank(question, &corpus, 5);
-    if hits.is_empty() {
-        return None;
-    }
-    let body = hits.iter().map(|&i| format!("- {}", corpus[i])).collect::<Vec<_>>().join("\n");
-    // Frame it: for a how-to / configuration question, ANSWER by explaining the
-    // exact setting/keybinding/variable and where to set it — do not emit a RUN
-    // directive. This is what fixes the "[would run: X]" non-answers.
-    Some(format!(
-        "Use this Mars reference to answer the user's how-to/configuration question directly — \
-         name the exact keybinding, setting (with its file), or environment variable, and how to \
-         change it. Do not propose a RUN action for a how-to question.\n{body}"
-    ))
 }
 
 /// Background tab-naming: tiny prompt, no registry, quiet failure.
@@ -427,7 +474,7 @@ fn is_reasoning_model(model: &str) -> bool {
 
 pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
     let mode = crate::retrieval::MemoryMode::from_env();
-    let examples = if mode.includes_history() { command_fewshot(request) } else { String::new() };
+    let examples = crate::retrieval::fewshot_for(request);
     // Reasoning models (Qwen3, R1, o-series) burn the token budget on a <think> block,
     // so we cap their reasoning. Non-reasoning models (Gemini Flash-Lite, gpt-4o-mini,
     // Haiku) read that same instruction as a cue to reason *silently* and can return an
@@ -481,29 +528,6 @@ pub fn translate_shell(cfg: AgentConfig, request: String, screen: String, tx: mp
     });
 }
 
-/// Format the top few retrieved command-memory / shell-history entries for `request`
-/// as few-shot lines, or "" if memory is empty. Command-memory pairs (request →
-/// command) rank ahead of bare history commands.
-fn command_fewshot(request: &str) -> String {
-    use crate::retrieval;
-    let mem = retrieval::load_command_memory(); // (request, command)
-    let hist = retrieval::shell_history(500); // recent commands
-    // Rank memory pairs by their request text; history by the command text.
-    let mem_docs: Vec<String> = mem.iter().map(|(r, _)| r.clone()).collect();
-    let mut lines: Vec<String> = retrieval::rank(request, &mem_docs, 3)
-        .into_iter()
-        .map(|i| format!("- {} → {}", mem[i].0, mem[i].1))
-        .collect();
-    for i in retrieval::rank(request, &hist, 5) {
-        let cmd = &hist[i];
-        if !lines.iter().any(|l| l.contains(cmd.as_str())) {
-            lines.push(format!("- {cmd}"));
-        }
-    }
-    lines.truncate(6);
-    lines.join("\n")
-}
-
 /// Extract "retry in 14.89s"-style hints from a 429 message → whole seconds.
 pub fn retry_secs(msg: &str) -> Option<u64> {
     let after = msg.split("retry in ").nth(1)?;
@@ -550,6 +574,30 @@ pub fn chat_with_id(
         return crate::broker::chat_via_broker(sock, cfg, messages).map(|t| (t, 0));
     }
 
+    match attempt(cfg, &messages, task, retrieval) {
+        // Rotation-for-limits: each provider meters on its own counter, so a
+        // throttled call can often complete elsewhere at the same tier. Any
+        // alternate failure just moves on; exhaustion surfaces the original 429.
+        Err(e) if e.downcast_ref::<RateLimited>().is_some() => {
+            for alt in rotation_candidates(cfg.provider) {
+                if let Ok(ok) = attempt(&alt, &messages, task, retrieval) {
+                    return Ok(ok);
+                }
+            }
+            Err(e)
+        }
+        r => r,
+    }
+}
+
+/// One provider attempt: tier-resolve, call, log. Split from `chat_with_id` so
+/// the rotation loop logs every attempt as its own call record.
+fn attempt(
+    cfg: &AgentConfig,
+    messages: &[serde_json::Value],
+    task: &str,
+    retrieval: &str,
+) -> anyhow::Result<(String, u64)> {
     let call_id = crate::llm_log::next_call_id();
     // Model-tier ring: route this task to its tier's model (an explicit
     // MARS_LLM_MODEL still wins — that check lives inside model_for).
@@ -557,29 +605,29 @@ pub fn chat_with_id(
     let cfg = &AgentConfig { model: resolved, ..cfg.clone() };
     let start = std::time::Instant::now();
     let result = if cfg.provider == "anthropic" {
-        chat_anthropic(cfg, &messages)
+        chat_anthropic(cfg, messages)
     } else {
-        chat_openai(cfg, &messages)
+        chat_openai(cfg, messages)
     };
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    match &result {
+    match result {
         Ok((text, pt, ct)) => {
             crate::llm_log::record(&crate::llm_log::CallRecord {
                 call_id, task, provider: cfg.provider, model: &cfg.model, retrieval,
-                prompt_tokens: *pt, completion_tokens: *ct, latency_ms,
-                ok: true, error: None, input: &messages, output: text,
+                prompt_tokens: pt, completion_tokens: ct, latency_ms,
+                ok: true, error: None, input: messages, output: &text,
             });
-            Ok((strip_reasoning(text), call_id))
+            Ok((strip_reasoning(&text), call_id))
         }
         Err(e) => {
             let msg = e.to_string();
             crate::llm_log::record(&crate::llm_log::CallRecord {
                 call_id, task, provider: cfg.provider, model: &cfg.model, retrieval,
                 prompt_tokens: 0, completion_tokens: 0, latency_ms,
-                ok: false, error: Some(&msg), input: &messages, output: "",
+                ok: false, error: Some(&msg), input: messages, output: "",
             });
-            Err(anyhow::anyhow!("{msg}"))
+            Err(e)
         }
     }
 }
@@ -636,6 +684,9 @@ fn chat_openai(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::Res
                 ),
                 _ => api_msg.unwrap_or_else(|| format!("HTTP {code}")),
             };
+            if code == 429 {
+                return Err(anyhow::Error::new(RateLimited(msg)));
+            }
             anyhow::bail!("{msg}");
         }
         Err(e) => anyhow::bail!("{e}"),
@@ -700,6 +751,9 @@ fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::
                 ),
                 _ => api_msg.unwrap_or_else(|| format!("HTTP {code}")),
             };
+            if code == 429 {
+                return Err(anyhow::Error::new(RateLimited(msg)));
+            }
             anyhow::bail!("{msg}");
         }
         Err(e) => anyhow::bail!("{e}"),

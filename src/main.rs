@@ -9,6 +9,12 @@ mod llm_log;
 mod mode;
 mod palette;
 mod pane;
+// The deletion-proof seam: without the `memory` feature the whole retrieval
+// subsystem is replaced by a neutral stub and the terminal works unchanged.
+#[cfg(feature = "memory")]
+mod retrieval;
+#[cfg(not(feature = "memory"))]
+#[path = "retrieval_stub.rs"]
 mod retrieval;
 mod project;
 mod session;
@@ -1810,6 +1816,154 @@ fn selfcheck() -> Result<()> {
     }
     println!("[selfcheck] provider detection ........ PASS");
 
+    // 29b. Cascade: one-tier-up escalation + same-tier rotation targets (pure
+    //      logic, no network — the HTTP paths are exercised by the live eval).
+    {
+        for v in ["MARS_LLM_MODEL", "ARES_LLM_MODEL", "MARS_LLM_URL", "ARES_LLM_URL",
+                  "MARS_LLM_KEY", "ARES_LLM_KEY"] {
+            std::env::remove_var(v);
+        }
+        assert_eq!(
+            tiers::model_above("groq", "translate").as_deref(),
+            Some("llama-3.3-70b-versatile"),
+            "mid-tier translate must escalate to groq high"
+        );
+        assert_eq!(
+            tiers::model_above("openai", "auto_name").as_deref(),
+            Some("gpt-4o"),
+            "escalation must walk past a tier repointed to the same model"
+        );
+        assert_eq!(tiers::model_above("groq", "ask"), None, "top tier must not escalate");
+        assert_eq!(tiers::model_above("groq", "no_such_task"), None);
+        std::env::set_var("MARS_LLM_MODEL", "pinned");
+        assert_eq!(tiers::model_above("groq", "translate"), None, "pin disables escalation");
+        std::env::remove_var("MARS_LLM_MODEL");
+        // The escalated retry is logged as `ask_escalated` — unmapped in the
+        // ring, so the pinned higher model must pass through model_for untouched.
+        assert_eq!(tiers::model_for("groq", "ask_escalated", "escalated-model"), "escalated-model");
+
+        std::env::set_var("GROQ_API_KEY", "test-key");
+        std::env::set_var("GEMINI_API_KEY", "test-key");
+        let alts = agent::rotation_candidates("groq");
+        assert_eq!(alts.len(), 1, "expected exactly one alternate");
+        assert_eq!(alts[0].provider, "gemini");
+        assert_eq!(agent::rotation_candidates("gemini")[0].provider, "groq");
+        std::env::set_var("MARS_LLM_MODEL", "pinned");
+        assert!(agent::rotation_candidates("groq").is_empty(), "pin disables rotation");
+        std::env::remove_var("MARS_LLM_MODEL");
+        std::env::set_var("MARS_LLM_KEY", "test-key");
+        assert!(agent::rotation_candidates("custom").is_empty(), "custom key never rotates away");
+        for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "MARS_LLM_KEY"] {
+            std::env::remove_var(v);
+        }
+        // A 429 is typed so the rotation loop can tell throttling from real failures.
+        let e = anyhow::Error::new(agent::RateLimited("throttled".into()));
+        assert!(e.downcast_ref::<agent::RateLimited>().is_some());
+        println!("[selfcheck] cascade rotate+escalate .. PASS");
+    }
+
+    // 29c. Memory hygiene: redaction before prompt injection, denylist, and
+    //      recency/cwd-weighted memory ranking (memory builds only).
+    #[cfg(feature = "memory")]
+    {
+        use retrieval::redact;
+        // Credential prefixes are scrubbed; short lookalikes and prose survive.
+        let r = redact("export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghij0123456789XYZ");
+        assert!(r.contains("[REDACTED]") && !r.contains("sk-ant"), "provider key survived: {r}");
+        assert_eq!(redact("a risk-free plan"), "a risk-free plan", "prose false positive");
+        assert_eq!(redact("sk-12"), "sk-12", "short token wrongly redacted");
+        // Assignment values are scrubbed, the command shape kept.
+        let r = redact("mysql -u root --password=hunter2 db");
+        assert!(r.contains("--password=[REDACTED]") && !r.contains("hunter2"), "{r}");
+        let r = redact("curl -H 'Authorization: Bearer abc123def456' api");
+        assert!(r.contains("Bearer [REDACTED]") && !r.contains("abc123"), "{r}");
+        // URL credentials: password goes, user and host stay.
+        let r = redact("git clone https://bob:s3cret@github.com/x.git");
+        assert!(r.contains("bob:[REDACTED]@github.com") && !r.contains("s3cret"), "{r}");
+        // Denylist: literal strings force-redacted; comments ignored.
+        let dl = std::env::temp_dir().join(format!("mars-denylist-{}", std::process::id()));
+        std::fs::write(&dl, "# comment\nmy-secret-host.internal\n")?;
+        std::env::set_var("MARS_DENYLIST", &dl);
+        let r = redact("ssh my-secret-host.internal");
+        assert!(!r.contains("my-secret-host") && r.contains("[REDACTED]"), "{r}");
+        assert_eq!(redact("# comment"), "# comment", "denylist comment line applied");
+        std::env::remove_var("MARS_DENYLIST");
+        let _ = std::fs::remove_file(&dl);
+
+        // Weighted memory rank: lexical ties break toward same-cwd and recent;
+        // metadata-free records (seeded eval stores) rank purely lexically; a
+        // zero-score record is never resurrected by boosts.
+        let mem = |req: &str, cmd: &str, ts: u64, cwd: &str| retrieval::CommandMemory {
+            request: req.into(), command: cmd.into(), ts, session: String::new(), cwd: cwd.into(),
+        };
+        let now = 1_800_000_000u64;
+        let records = vec![
+            mem("run the tests", "npm test", now - 90 * 86_400, "/other"),
+            mem("run the tests", "cargo test", now - 3_600, "/proj"),
+            mem("deploy the site", "make deploy", now, "/proj"),
+        ];
+        let top = retrieval::rank_memories(&records, "run the tests", 2, "/proj", now, 0.25, 0.15, 14.0);
+        assert_eq!(top[0], 1, "same-cwd + recent must win the lexical tie");
+        assert_eq!(top[1], 0);
+        assert!(!top.contains(&2), "lexically-irrelevant record resurrected by boost");
+        let bare = vec![
+            mem("run the tests", "npm test", 0, ""),
+            mem("run the tests", "cargo test", 0, ""),
+        ];
+        let top = retrieval::rank_memories(&bare, "run the tests", 2, "/proj", now, 0.25, 0.15, 14.0);
+        assert_eq!(top[0], 0, "metadata-free records must keep pure lexical order");
+
+        // The facade gates on MARS_MEMORY internally (what the stub mirrors).
+        std::env::remove_var("MARS_MEMORY");
+        assert_eq!(retrieval::fewshot_for("run the tests"), "", "fewshot must gate on mode");
+        assert!(retrieval::docs_context_for("how do I").is_none(), "docs must gate on mode");
+        std::env::set_var("MARS_MEMORY", "docs");
+        assert!(
+            retrieval::docs_context_for("how do I turn on memory retrieval").is_some(),
+            "docs mode must retrieve from the always-present reference corpus"
+        );
+        let cm = std::env::temp_dir().join(format!("mars-cm-{}", std::process::id()));
+        std::fs::write(&cm, "{\"request\":\"ship it\",\"command\":\"cargo publish\"}\n")?;
+        std::env::set_var("MARS_CMD_MEMORY", &cm);
+        std::env::set_var("MARS_MEMORY", "history");
+        assert!(
+            retrieval::fewshot_for("ship it").contains("cargo publish"),
+            "history mode must surface the seeded pair"
+        );
+        for v in ["MARS_MEMORY", "MARS_CMD_MEMORY"] {
+            std::env::remove_var(v);
+        }
+        let _ = std::fs::remove_file(&cm);
+        println!("[selfcheck] memory hygiene ........... PASS");
+    }
+
+    // 29d. Memory actions are plain palette glue — present in EVERY build; in a
+    //      no-memory build the stub facade returns neutral values so all their
+    //      code paths degrade to status messages.
+    {
+        assert!(palette::Action::from_name("OpenCommandMemory").is_some());
+        assert!(palette::Action::from_name("OpenDenylist").is_some());
+        let clear = palette::Action::from_name("ClearCommandMemory").expect("action");
+        assert!(clear.is_destructive(), "memory wipe must be confirmation-gated");
+        println!("[selfcheck] memory actions ........... PASS");
+    }
+
+    // 29e. The stub build: MARS_MEMORY is inert, every facade call is neutral,
+    //      and nothing panics — the terminal works with memory deleted.
+    #[cfg(not(feature = "memory"))]
+    {
+        std::env::set_var("MARS_MEMORY", "full");
+        assert_eq!(retrieval::MemoryMode::from_env().as_str(), "none", "stub mode must be inert");
+        assert!(retrieval::fewshot_for("x").is_empty());
+        assert!(retrieval::docs_context_for("x").is_none());
+        assert!(retrieval::command_memory_path().is_none());
+        assert!(retrieval::denylist_path().is_none());
+        assert!(retrieval::load_command_records().is_empty());
+        retrieval::remember_command("a", "b");
+        std::env::remove_var("MARS_MEMORY");
+        println!("[selfcheck] memory stub (feature off)  PASS");
+    }
+
     // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
     {
         use std::io::{BufRead, BufReader};
@@ -1890,6 +2044,41 @@ fn selfcheck() -> Result<()> {
         let f = broker::fleet_load();
         assert_eq!(f.len(), 2, "fleet upsert duplicated a host");
         assert_eq!(f[0].host, "prod-7", "fleet not ordered most-recent-first");
+        // The status push (what a brokered agent call reports home) refreshes
+        // session + last_status — the "latest status" mars ls renders.
+        broker::fleet_status("gpubox", Some("train".into()), "agent active");
+        let f = broker::fleet_load();
+        let g = f.iter().find(|e| e.host == "gpubox").expect("status push dropped the host");
+        assert_eq!(g.last_status.as_deref(), Some("agent active"));
+        assert_eq!(g.session.as_deref(), Some("train"));
+        assert!(
+            f.iter().all(|e| g.as_of >= e.as_of),
+            "status push did not refresh recency"
+        );
+        // The unified list: locals and remotes share one shape, one ordinal
+        // space, and one status field; remotes carry the pushed status.
+        let entries = session::all_sessions()?;
+        let g = entries
+            .iter()
+            .find(|e| e.name == "gpubox")
+            .expect("remote host missing from all_sessions");
+        assert!(g.remote && g.as_of.is_some(), "remote entry lost its provenance");
+        assert!(
+            g.status.contains("agent active") && g.status.contains("session train"),
+            "pushed status not plumbed into ls: {}",
+            g.status
+        );
+        assert_eq!(g.connect, "mars ssh gpubox");
+        assert!(
+            entries.iter().all(|e| e.remote || e.as_of.is_none()),
+            "a local session carried a stale as_of"
+        );
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(
+            broker::resolve_target(&names, "gpub").as_deref(),
+            Some("gpubox"),
+            "unified resolver lost prefix matching"
+        );
         match saved {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
@@ -1974,6 +2163,82 @@ fn selfcheck() -> Result<()> {
         assert!(app.term_sel.is_none(), "term_sel not cleared on release");
     }
     println!("[selfcheck] click-no-drag no clobber .. PASS");
+
+    // 36b. Terminal wheel = tmux's three-way dispatch: alternate-screen apps
+    //      get arrow keys (DECCKM-aware), mouse-mode apps get encoded wheel
+    //      events, the plain shell scrolls mars scrollback. Assertions read the
+    //      PARSED screen (tty echo renders ESC as ^[), never raw bytes.
+    {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        fn wheel(up: bool) -> MouseEvent {
+            MouseEvent {
+                kind: if up { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown },
+                column: 5, row: 5, modifiers: KeyModifiers::NONE,
+            }
+        }
+        fn term_with(app: &mut App, setup: &[u8]) -> usize {
+            app.open_terminal();
+            let tid = match app.focused_pane().content {
+                pane::PaneContent::Terminal(id) => id,
+                _ => panic!("no terminal"),
+            };
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            app.tick();
+            app.terms.get_mut(&tid).unwrap().send_bytes(setup);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            app.tick();
+            tid
+        }
+        fn wait_for(app: &mut App, tid: usize, needle: &str) -> bool {
+            for _ in 0..30 {
+                app.tick();
+                if app.terms.get(&tid).unwrap().screen().contents().contains(needle) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        }
+
+        // (a) Alternate screen, no mouse reporting → arrows, not a silent no-op.
+        let mut app = App::new(None)?;
+        let tid = term_with(&mut app, b"printf '\\033[?1049h'; cat\n");
+        assert!(app.terms.get(&tid).unwrap().screen().alternate_screen(), "alt screen not entered");
+        app.handle_mouse(wheel(true));
+        assert!(wait_for(&mut app, tid, "^[[A^[[A^[[A"),
+            "alt-screen wheel-up did not become arrow keys");
+        assert_eq!(app.terms.get(&tid).unwrap().view_offset(), 0);
+
+        // (b) DECCKM set → application-cursor arrows (^[OA), not ^[[A.
+        let mut app = App::new(None)?;
+        let tid = term_with(&mut app, b"printf '\\033[?1049h\\033[?1h'; cat\n");
+        app.handle_mouse(wheel(true));
+        assert!(wait_for(&mut app, tid, "^[OA^[OA^[OA"),
+            "DECCKM wheel-up did not send application-cursor arrows");
+
+        // (c) Inner app enabled SGR mouse reporting → the wheel press itself is
+        //     forwarded, encoded, for the app to interpret.
+        let mut app = App::new(None)?;
+        let tid = term_with(&mut app, b"printf '\\033[?1002h\\033[?1006h'; cat\n");
+        assert!(
+            app.terms.get(&tid).unwrap().screen().mouse_protocol_mode()
+                != vt100::MouseProtocolMode::None,
+            "mouse mode not entered"
+        );
+        app.handle_mouse(wheel(true));
+        assert!(wait_for(&mut app, tid, "[<64;1;1M"), "SGR wheel-up not forwarded");
+        app.handle_mouse(wheel(false));
+        assert!(wait_for(&mut app, tid, "[<65;1;1M"), "SGR wheel-down not forwarded");
+
+        // (d) Plain shell (no modes): the wheel still browses mars scrollback.
+        let mut app = App::new(None)?;
+        let tid = term_with(&mut app, b"seq 1 100\n");
+        app.handle_mouse(wheel(true));
+        assert!(app.terms.get(&tid).unwrap().view_offset() > 0,
+            "plain-shell wheel-up no longer scrolls mars scrollback");
+        app.handle_mouse(wheel(false));
+        println!("[selfcheck] terminal wheel dispatch .. PASS");
+    }
 
     // 37. Capability-tiered, canonical-preferring binding_for (P1.1): teaching
     //     surfaces must show a chord the terminal can actually send, and the
@@ -2091,7 +2356,9 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] llm debug log + stats ..... PASS");
     }
 
-    // 42. Retrieval: BM25 ranks the relevant doc first; memory-mode parsing.
+    // 42. Retrieval: BM25 ranks the relevant doc first; memory-mode parsing
+    //     (memory builds only — the stub has no ranker and an inert mode).
+    #[cfg(feature = "memory")]
     {
         let docs = vec![
             "git status shows the working tree and staged changes".to_string(),

@@ -34,6 +34,12 @@ pub enum BrokerRequest {
         messages: Vec<serde_json::Value>,
         max_tokens: u32,
         temperature: f64,
+        /// Self-reported by the remote so the home fleet reflects live activity
+        /// (`mars ls`). Optional — older remotes simply omit them.
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        session: Option<String>,
     },
 }
 
@@ -130,7 +136,13 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let BrokerRequest::Chat { version, model, messages, max_tokens, temperature } = req;
+        let BrokerRequest::Chat { version, model, messages, max_tokens, temperature, host, session } =
+            req;
+        // Status push: a brokered call is proof the remote's agent is alive —
+        // refresh the fleet so `mars ls` shows it as current, not stale.
+        if let Some(h) = &host {
+            fleet_status(h, session, "agent active");
+        }
         let resp = if version != BROKER_VERSION {
             BrokerResponse::Error {
                 message: format!("broker version mismatch (home {BROKER_VERSION}, remote {version})"),
@@ -176,6 +188,8 @@ pub fn chat_via_broker(
             messages,
             max_tokens: cfg.max_tokens,
             temperature: cfg.temperature,
+            host: hostname(),
+            session: std::env::var("MARS_SESSION").ok(),
         },
     )?;
     let mut line = String::new();
@@ -190,8 +204,10 @@ pub fn chat_via_broker(
 
 // ── Fleet cache: which hosts you've been on, for `mars ls` ───────────────────
 
-/// One host you've connected to — the home machine's view of the fleet. `cwd` /
-/// `last_status` are filled by a later status-push; today only `host`/`as_of`.
+/// One host you've connected to — the home machine's view of the fleet.
+/// `session` / `last_status` are refreshed by the status push in `handle_conn`
+/// (every brokered agent call self-reports host + session); `cwd` is recorded
+/// by `mars ssh`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FleetEntry {
     pub host: String,
@@ -242,6 +258,34 @@ pub fn fleet_record(host: &str, cwd: Option<String>) {
             as_of: now_secs(),
         }),
     }
+    fleet_save(v);
+}
+
+/// The status-push half of the fleet cache: every brokered agent call from a
+/// remote refreshes the home view of that host, so `mars ls` shows current
+/// activity instead of only "when you last ssh'd there".
+pub fn fleet_status(host: &str, session: Option<String>, status: &str) {
+    let mut v = fleet_load();
+    match v.iter_mut().find(|e| e.host == host) {
+        Some(e) => {
+            e.as_of = now_secs();
+            e.last_status = Some(status.to_string());
+            if session.is_some() {
+                e.session = session;
+            }
+        }
+        None => v.push(FleetEntry {
+            host: host.to_string(),
+            cwd: None,
+            session,
+            last_status: Some(status.to_string()),
+            as_of: now_secs(),
+        }),
+    }
+    fleet_save(v);
+}
+
+fn fleet_save(mut v: Vec<FleetEntry>) {
     v.sort_by(|a, b| b.as_of.cmp(&a.as_of));
     v.truncate(50);
     if let Ok(p) = fleet_path() {
@@ -249,6 +293,19 @@ pub fn fleet_record(host: &str, cwd: Option<String>) {
             let _ = std::fs::write(p, s);
         }
     }
+}
+
+/// This machine's hostname — what a remote self-reports over the broker.
+fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    let ok =
+        unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+    if !ok {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// A short "how long ago" for a unix timestamp: "just now" / "12m ago" / "3h ago" / "2d ago".

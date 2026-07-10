@@ -707,46 +707,98 @@ pub fn resume_main(name: Option<String>) -> Result<()> {
     }
 }
 
-/// `mars ls`
+/// One row of `mars ls`: local daemon sessions and remote fleet hosts behind a
+/// single shape, so rendering, ordinals, and the follow-up resolver are one
+/// code path and the freshest known status flows through the same field for
+/// both — a live probe for locals, the broker status push for remotes.
+pub struct SessionEntry {
+    /// Session name (local) or host name (remote).
+    pub name: String,
+    pub remote: bool,
+    pub status: String,
+    /// When the status was observed: `None` = right now (live local probe);
+    /// `Some(ts)` = the last time the remote self-reported.
+    pub as_of: Option<u64>,
+    /// The command that gets you there (`mars attach x` / `mars ssh h`).
+    pub connect: String,
+}
+
+/// Everything `mars ls` knows about, locals first. The single access path for
+/// both kinds — callers never touch `list_sessions`/`fleet_load` shapes.
+pub fn all_sessions() -> Result<Vec<SessionEntry>> {
+    let mut out = Vec::new();
+    for (name, alive, attached) in list_sessions()? {
+        let status = match (alive, attached) {
+            (true, true) => "attached",
+            (true, false) => "detached",
+            (false, _) => "dead (cleaned up)",
+        };
+        out.push(SessionEntry {
+            connect: format!("mars attach {name}"),
+            name,
+            remote: false,
+            status: status.to_string(),
+            as_of: None,
+        });
+    }
+    for e in crate::broker::fleet_load() {
+        let mut status = e.last_status.clone().unwrap_or_else(|| "seen".to_string());
+        if let Some(s) = &e.session {
+            status = format!("{status} · session {s}");
+        }
+        out.push(SessionEntry {
+            connect: format!("mars ssh {}", e.host),
+            name: e.host,
+            remote: true,
+            status,
+            as_of: Some(e.as_of),
+        });
+    }
+    Ok(out)
+}
+
+/// `mars ls` — one numbered table over local and remote alike; the follow-up
+/// prompt resolves an ordinal/name to `attach` or `ssh` through the same list.
 pub fn list_main(prompt: bool) -> Result<()> {
-    let sessions = list_sessions()?;
-    let fleet = crate::broker::fleet_load();
-
-    // Local sessions on this machine.
-    if sessions.is_empty() {
-        println!("no local sessions — start one with: mars new <name>");
-    } else {
-        println!("{:<20} {}", "SESSION", "STATUS");
-        for (name, alive, attached) in &sessions {
-            let status = match (alive, attached) {
-                (true, true) => "attached".to_string(),
-                (true, false) => format!("detached — reattach: mars attach {name}"),
-                (false, _) => "dead (cleaned up)".to_string(),
-            };
-            println!("{name:<20} {status}");
-        }
+    let entries = all_sessions()?;
+    if entries.is_empty() {
+        println!("no sessions — start one with: mars new <name>, or reach a box with: mars ssh <host>");
+        return Ok(());
+    }
+    println!("  #  {:<20} {:<7} {:<30} {}", "SESSION", "WHERE", "STATUS", "AS OF");
+    for (i, e) in entries.iter().enumerate() {
+        let seen = match e.as_of {
+            None => "now".to_string(),
+            Some(t) => crate::broker::ago(t),
+        };
+        println!(
+            "  {:<2} {:<20} {:<7} {:<30} {}",
+            i + 1,
+            e.name,
+            if e.remote { "remote" } else { "local" },
+            e.status,
+            seen
+        );
     }
 
-    // Remote hosts you've been on — numbered, so the follow-up can take an ordinal.
-    let hosts: Vec<String> = fleet.iter().map(|e| e.host.clone()).collect();
-    if !fleet.is_empty() {
-        println!("\nRECENT HOSTS");
-        for (i, e) in fleet.iter().enumerate() {
-            println!("  {}. {:<18} last seen {}", i + 1, e.host, crate::broker::ago(e.as_of));
-        }
-    }
-
-    // Interactive follow-up: type an ordinal or a host name to `mars ssh` there.
+    // Interactive follow-up: an ordinal or (prefix of a) name attaches a local
+    // session or sshes to a remote host — same resolver over the same list.
     // Skipped by --no-prompt or when stdin isn't a TTY (scripts).
     let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
-    if prompt && is_tty && !hosts.is_empty() {
+    if prompt && is_tty {
         use std::io::Write;
-        print!("\n→ ssh (number/name, Enter to skip): ");
+        print!("\n→ open (number/name, Enter to skip): ");
         io::stdout().flush().ok();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_ok() {
-            if let Some(host) = crate::broker::resolve_target(&hosts, &line) {
-                return crate::broker::ssh_main(host, Vec::new());
+            let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+            if let Some(name) = crate::broker::resolve_target(&names, &line) {
+                let e = entries.iter().find(|e| e.name == name).unwrap();
+                return if e.remote {
+                    crate::broker::ssh_main(e.name.clone(), Vec::new())
+                } else {
+                    client_main(&e.name)
+                };
             }
         }
     }

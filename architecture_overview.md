@@ -69,6 +69,7 @@ Three ideas shape everything:
 | Data model | `buffer.rs`, `pane.rs`, `layout.rs`, `tab.rs`, `mode.rs` | 460 |
 | Command surface | `palette.rs`, `config.rs`, `tuning.rs` | 1,060 |
 | Subsystems | `terminal.rs`, `agent.rs`, `session.rs`, `project.rs`, `banner.rs` | 1,450 |
+| Memory (feature `memory`, default-on) | `retrieval.rs` (`retrieval_stub.rs` when off) | 700 |
 
 Dependencies point downward-ish: `main` → `session`/`app`; `session` → `app`;
 `app` → everything; `ui` reads `app`; the data-model and subsystem files depend
