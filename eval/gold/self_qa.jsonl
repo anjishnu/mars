@@ -28,3 +28,55 @@
 {"id": "r10", "query": "How do I reset my keybindings to the defaults?", "gold": "Run the 'Restore default keys' action (RestoreKeybindings) from the command bar; it backs up keys.json first. Or run mars reset.", "type": "reconfigure"}
 {"id": "r11", "query": "How do I make the agent's answers less random / more deterministic?", "gold": "Lower agent_temperature in ~/.config/mars/tuning.json (e.g. to 0).", "type": "reconfigure"}
 {"id": "r12", "query": "How do I turn on the LLM debug log to see token usage?", "gold": "Run with mars --llm-debug (or export MARS_LLM_DEBUG=1); logs to ~/.mars/logs/. Profile it with mars llm-stats.", "type": "reconfigure"}
+{"id": "k19", "query": "How do I close the current pane?", "gold": "C-x 0 (ClosePane); C-x 1 closes the other panes.", "type": "knowledge"}
+{"id": "k20", "query": "How do I move to the next pane?", "gold": "C-x o (or C-o) focuses the next pane (NextPane).", "type": "knowledge"}
+{"id": "k21", "query": "How do I split the screen horizontally (top/bottom)?", "gold": "C-x 2 (SplitHorizontal).", "type": "knowledge"}
+{"id": "k22", "query": "How do I open a new tab?", "gold": "In space warp (C-t) press t or n; or the New tab action from mission control.", "type": "knowledge"}
+{"id": "k23", "query": "How do I copy the selection?", "gold": "M-w copies the region (CopyRegion); C-c also copies.", "type": "knowledge"}
+{"id": "k24", "query": "How do I cut/kill the selected region?", "gold": "C-w (KillRegion).", "type": "knowledge"}
+{"id": "k25", "query": "How do I paste?", "gold": "C-y yanks the last kill (Yank); C-v pastes the system clipboard.", "type": "knowledge"}
+{"id": "k26", "query": "How do I kill to the end of the line?", "gold": "C-k (KillLine).", "type": "knowledge"}
+{"id": "k27", "query": "How do I cycle through earlier kills after pasting?", "gold": "M-y (YankPop) after a C-y.", "type": "knowledge"}
+{"id": "k28", "query": "How do I redo an undone edit?", "gold": "M-/ (Redo); or C-x C-u.", "type": "knowledge"}
+{"id": "k29", "query": "How do I go to a specific line number?", "gold": "M-g (GotoLine).", "type": "knowledge"}
+{"id": "k30", "query": "How do I select the whole buffer?", "gold": "C-x h (SelectAll).", "type": "knowledge"}
+{"id": "k31", "query": "How do I jump to the matching bracket?", "gold": "C-x m (MatchBracket).", "type": "knowledge"}
+{"id": "k32", "query": "How do I jump to the next function or definition?", "gold": "C-x } jumps to the next symbol/def (JumpSymbolNext); C-x { goes to the previous.", "type": "knowledge"}
+{"id": "k33", "query": "How do I recenter the view on the cursor?", "gold": "C-l (Recenter).", "type": "knowledge"}
+{"id": "k34", "query": "How do I ask the agent to explain what is on screen?", "gold": "C-x e (ExplainThis).", "type": "knowledge"}
+{"id": "k35", "query": "How do I ask why the last command failed?", "gold": "C-x ? (ExplainFailure); or 'why did this fail?' in the command bar.", "type": "knowledge"}
+{"id": "k36", "query": "How do I delete the word after the cursor?", "gold": "M-d (KillWordForward).", "type": "knowledge"}
+{"id": "k37", "query": "How do I move the current tab left or right?", "gold": "In space warp (C-t) press H to move it left and L to move it right.", "type": "knowledge"}
+{"id": "k38", "query": "How do I reattach to a session after detaching?", "gold": "mars attach (or mars attach <name>) from the shell.", "type": "knowledge"}
+{"id": "k39", "query": "How do I list my running sessions?", "gold": "mars ls (or mars list).", "type": "knowledge"}
+{"id": "k40", "query": "How do I zoom a pane to fill the screen?", "gold": "In space warp (C-t) press z to toggle zoom on the focused pane.", "type": "knowledge"}
+{"id": "k41", "query": "How do I ask the agent a one-off question from the shell?", "gold": "mars ask \"<question>\".", "type": "knowledge"}
+{"id": "k42", "query": "How do I profile the LLM token usage?", "gold": "mars llm-stats (after enabling logging with mars --llm-debug).", "type": "knowledge"}
+{"id": "k43", "query": "How do I select text while moving the cursor?", "gold": "Hold Shift with the arrow keys (Shift+arrows extend the selection).", "type": "knowledge"}
+{"id": "k44", "query": "How do I search backward / cycle search matches?", "gold": "C-s starts search; C-s / C-r cycle to the next/previous match; C-g cancels.", "type": "knowledge"}
+{"id": "k45", "query": "How do I cancel or abort the current action?", "gold": "C-g cancels/aborts (the command bar, a prompt, an in-progress action).", "type": "knowledge"}
+{"id": "k46", "query": "How do I go to the top of the file?", "gold": "M-< (GoTop); M-> goes to the bottom.", "type": "knowledge"}
+{"id": "k47", "query": "How do I install Mars?", "gold": "cargo install mars-terminal (the binary is 'mars'); needs a Rust toolchain >= 1.85.", "type": "knowledge"}
+{"id": "k48", "query": "How do I close a file / kill the buffer?", "gold": "C-x k (KillBuffer).", "type": "knowledge"}
+{"id": "k49", "query": "How do I jump to the next blank-line block / paragraph?", "gold": "C-x ] jumps to the next block (JumpBlockNext); C-x [ to the previous.", "type": "knowledge"}
+{"id": "k50", "query": "How do I rename a tab?", "gold": "In space warp (C-t) press r; or the Rename tab action.", "type": "knowledge"}
+{"id": "k51", "query": "What terminals fully support the cmd-key shortcuts?", "gold": "Kitty-protocol terminals (kitty, WezTerm, Ghostty, recent iTerm2); elsewhere use the C-x / Alt equivalents.", "type": "knowledge"}
+{"id": "k52", "query": "How does mission control decide between running a command and asking the agent?", "gold": "It is sigil-driven: ! = shell, ? = ask the agent, @ = Navigator, plain text = fuzzy command search. There is no classifier.", "type": "knowledge"}
+{"id": "r13", "query": "How do I change the auto-name delay for tabs?", "gold": "Set auto_name_secs in ~/.config/mars/tuning.json (0 disables it).", "type": "reconfigure"}
+{"id": "r14", "query": "How do I change the default terminal size for new terminals?", "gold": "Set terminal_default_rows and terminal_default_cols in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r15", "query": "How do I change how many lines the mouse wheel scrolls?", "gold": "Set wheel_scroll_lines in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r16", "query": "How do I change the accent / theme color?", "gold": "Set theme_accent (an [r,g,b] array) in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r17", "query": "How do I limit the maximum number of panes?", "gold": "Set max_panes in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r18", "query": "How do I change how many rows the command dropdown shows?", "gold": "Set dropdown_max_rows in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r19", "query": "How do I rebind a key in Mars?", "gold": "Edit ~/.config/mars/keys.json (the edit map of chord sequence -> action).", "type": "reconfigure"}
+{"id": "r20", "query": "How do I make the which-key hint panel appear faster?", "gold": "Lower which_key_delay_ms in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r21", "query": "How do I give the agent more scrollback context from the terminal?", "gold": "Increase agent_scrollback_context in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r22", "query": "How do I use a specific provider like Groq?", "gold": "Export GROQ_API_KEY (detection is paid-first: Anthropic, OpenAI, Groq, Gemini; MARS_LLM_KEY overrides).", "type": "reconfigure"}
+{"id": "r23", "query": "How do I use OpenAI as the model provider?", "gold": "Export OPENAI_API_KEY (default model gpt-4o-mini); override the model with MARS_LLM_MODEL.", "type": "reconfigure"}
+{"id": "r24", "query": "How do I use Claude as the model?", "gold": "Export ANTHROPIC_API_KEY (default claude-haiku-4-5); it uses Anthropic's Messages API.", "type": "reconfigure"}
+{"id": "r25", "query": "How do I turn on memory retrieval for the agent?", "gold": "Set MARS_MEMORY (history for command memory, docs for system knowledge, full for both), or pass --memory.", "type": "reconfigure"}
+{"id": "r26", "query": "How do I widen the space-warp cheat panel?", "gold": "Set travel_panel_width in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r27", "query": "How do I stop files from being autosaved?", "gold": "Set autosave_secs to a large value (autosave is on a timer); or note scratch buffers are never autosaved.", "type": "reconfigure"}
+{"id": "r28", "query": "How do I change how many files the project index scans?", "gold": "Set project_index_max in ~/.config/mars/tuning.json.", "type": "reconfigure"}
+{"id": "r29", "query": "Where are Mars config files stored?", "gold": "~/.config/mars/ : keys.json (bindings) and tuning.json (behavior knobs).", "type": "reconfigure"}
+{"id": "r30", "query": "How do I keep more terminal scrollback history?", "gold": "Increase terminal_scrollback_lines in ~/.config/mars/tuning.json.", "type": "reconfigure"}

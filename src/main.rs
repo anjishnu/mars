@@ -14,6 +14,7 @@ mod project;
 mod session;
 mod tab;
 mod terminal;
+mod tiers;
 mod tuning;
 mod ui;
 

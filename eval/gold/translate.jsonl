@@ -35,3 +35,78 @@
 {"id": "p10", "request": "submit the job to the cluster", "gold": "sbatch job.slurm", "personalized": true}
 {"id": "p11", "request": "build the release binary", "gold": "cargo build --release", "personalized": true}
 {"id": "p12", "request": "evaluate the latest checkpoint", "gold": "python eval.py --ckpt checkpoints/latest.pt", "personalized": true}
+{"id": "a26", "request": "show the first 20 lines of the csv file", "gold": "head -n 20 data.csv", "personalized": false}
+{"id": "a27", "request": "replace all tabs with commas in the file and save to a new file", "gold": "tr '\\t' ',' < in.txt > out.csv", "personalized": false}
+{"id": "a28", "request": "print the second column of a space separated file", "gold": "awk '{print $2}' file.txt", "personalized": false}
+{"id": "a29", "request": "sort a file and remove duplicate lines", "gold": "sort file.txt | uniq", "personalized": false}
+{"id": "a30", "request": "count how many times each unique line appears", "gold": "sort file.txt | uniq -c", "personalized": false}
+{"id": "a31", "request": "show only lines matching error in the log file", "gold": "grep error app.log", "personalized": false}
+{"id": "a32", "request": "count how many lines contain the word warning", "gold": "grep -c warning app.log", "personalized": false}
+{"id": "a33", "request": "recursively change owner of the folder to me", "gold": "chown -R $USER data/", "personalized": false}
+{"id": "a34", "request": "make all shell scripts in this directory executable", "gold": "chmod +x *.sh", "personalized": false}
+{"id": "a35", "request": "show the size of each subdirectory in human readable form", "gold": "du -sh */", "personalized": false}
+{"id": "a36", "request": "find files modified in the last day", "gold": "find . -mtime -1", "personalized": false}
+{"id": "a37", "request": "find and delete files larger than 100 megabytes", "gold": "find . -type f -size +100M -delete", "personalized": false}
+{"id": "a38", "request": "show my current ip address", "gold": "curl ifconfig.me", "personalized": false}
+{"id": "a39", "request": "check if port 5432 is open on localhost", "gold": "nc -zv localhost 5432", "personalized": false}
+{"id": "a40", "request": "show the routing table", "gold": "netstat -rn", "personalized": false}
+{"id": "a41", "request": "extract a tar gz archive", "gold": "tar -xzf archive.tar.gz", "personalized": false}
+{"id": "a42", "request": "unzip a zip file into a folder", "gold": "unzip archive.zip -d out/", "personalized": false}
+{"id": "a43", "request": "show git status in short form", "gold": "git status -s", "personalized": false}
+{"id": "a44", "request": "stage all changes and commit with a message", "gold": "git commit -am 'update'", "personalized": false}
+{"id": "a45", "request": "undo the last commit but keep the changes", "gold": "git reset --soft HEAD~1", "personalized": false}
+{"id": "a46", "request": "pull the latest changes from origin main", "gold": "git pull origin main", "personalized": false}
+{"id": "a47", "request": "list all remote branches", "gold": "git branch -r", "personalized": false}
+{"id": "a48", "request": "stash my current changes", "gold": "git stash", "personalized": false}
+{"id": "a49", "request": "show what changed in the last commit", "gold": "git show HEAD", "personalized": false}
+{"id": "a50", "request": "create and switch to a python virtual environment", "gold": "python -m venv .venv && source .venv/bin/activate", "personalized": false}
+{"id": "a51", "request": "install the requirements file with pip", "gold": "pip install -r requirements.txt", "personalized": false}
+{"id": "a52", "request": "freeze the installed python packages to a file", "gold": "pip freeze > requirements.txt", "personalized": false}
+{"id": "a53", "request": "run a python module as a script", "gold": "python -m mymodule", "personalized": false}
+{"id": "a54", "request": "show which python is being used", "gold": "which python", "personalized": false}
+{"id": "a55", "request": "list docker containers that are running", "gold": "docker ps", "personalized": false}
+{"id": "a56", "request": "stop all running docker containers", "gold": "docker stop $(docker ps -q)", "personalized": false}
+{"id": "a57", "request": "show docker container logs and follow them", "gold": "docker logs -f mycontainer", "personalized": false}
+{"id": "a58", "request": "remove all dangling docker images", "gold": "docker image prune", "personalized": false}
+{"id": "a59", "request": "ssh into the server on a custom port", "gold": "ssh -p 2222 user@server", "personalized": false}
+{"id": "a60", "request": "copy a whole directory to the remote server", "gold": "scp -r localdir user@server:~/", "personalized": false}
+{"id": "a61", "request": "sync a folder to a remote host preserving permissions", "gold": "rsync -avz localdir/ user@server:~/dest/", "personalized": false}
+{"id": "a62", "request": "show the top cpu consuming processes live", "gold": "top", "personalized": false}
+{"id": "a63", "request": "kill all python processes", "gold": "pkill -f python", "personalized": false}
+{"id": "a64", "request": "show how long the system has been up", "gold": "uptime", "personalized": false}
+{"id": "a65", "request": "print the last 100 lines of the system log", "gold": "tail -n 100 /var/log/syslog", "personalized": false}
+{"id": "a66", "request": "count total lines across all python files recursively", "gold": "find . -name '*.py' | xargs wc -l", "personalized": false}
+{"id": "a67", "request": "show the current date and time in iso format", "gold": "date -u +%Y-%m-%dT%H:%M:%SZ", "personalized": false}
+{"id": "a68", "request": "create an empty file called notes", "gold": "touch notes", "personalized": false}
+{"id": "a69", "request": "print the contents of a file with line numbers", "gold": "cat -n file.txt", "personalized": false}
+{"id": "a70", "request": "show the difference between two files", "gold": "diff a.txt b.txt", "personalized": false}
+{"id": "a71", "request": "rename all txt files to md", "gold": "for f in *.txt; do mv \"$f\" \"${f%.txt}.md\"; done", "personalized": false}
+{"id": "a72", "request": "show environment variable PATH", "gold": "echo $PATH", "personalized": false}
+{"id": "a73", "request": "search command history for a git command", "gold": "history | grep git", "personalized": false}
+{"id": "a74", "request": "make a symbolic link to the binary", "gold": "ln -s /usr/local/bin/tool ~/bin/tool", "personalized": false}
+{"id": "a75", "request": "show which process is using a file", "gold": "lsof somefile", "personalized": false}
+{"id": "a76", "request": "count the number of files in the current directory", "gold": "ls -1 | wc -l", "personalized": false}
+{"id": "a77", "request": "compress a folder to zip", "gold": "zip -r archive.zip folder/", "personalized": false}
+{"id": "a78", "request": "show memory usage", "gold": "free -h", "personalized": false}
+{"id": "a79", "request": "monitor a log file for the word done", "gold": "tail -f run.log | grep done", "personalized": false}
+{"id": "a80", "request": "print columns 1 and 3 from a comma separated file", "gold": "cut -d, -f1,3 data.csv", "personalized": false}
+{"id": "a81", "request": "find all TODO comments in python files", "gold": "grep -rn TODO --include='*.py' .", "personalized": false}
+{"id": "a82", "request": "show git log as a graph", "gold": "git log --oneline --graph --all", "personalized": false}
+{"id": "a83", "request": "remove a file from git tracking but keep it locally", "gold": "git rm --cached file.txt", "personalized": false}
+{"id": "a84", "request": "count the number of commits by each author", "gold": "git shortlog -sn", "personalized": false}
+{"id": "a85", "request": "show disk usage of the root filesystem", "gold": "df -h /", "personalized": false}
+{"id": "a86", "request": "print only unique sorted words from a file", "gold": "tr ' ' '\\n' < file.txt | sort -u", "personalized": false}
+{"id": "a87", "request": "show the last modified time of a file", "gold": "stat -c %y file.txt", "personalized": false}
+{"id": "a88", "request": "recursively find empty directories", "gold": "find . -type d -empty", "personalized": false}
+{"id": "p13", "request": "train the model", "gold": "python train.py --config configs/base.yaml", "personalized": true}
+{"id": "p14", "request": "run inference on the test set", "gold": "python infer.py --split test", "personalized": true}
+{"id": "p15", "request": "check code formatting", "gold": "black --check .", "personalized": true}
+{"id": "p16", "request": "run type checking", "gold": "mypy src/", "personalized": true}
+{"id": "p17", "request": "spin up the database", "gold": "docker compose up -d db", "personalized": true}
+{"id": "p18", "request": "install project dependencies", "gold": "uv sync", "personalized": true}
+{"id": "p19", "request": "run the benchmark suite", "gold": "python -m benchmarks.run", "personalized": true}
+{"id": "p20", "request": "watch the training loss", "gold": "tail -f logs/train.log | grep loss", "personalized": true}
+{"id": "p21", "request": "clean the build artifacts", "gold": "cargo clean", "personalized": true}
+{"id": "p22", "request": "push the docker image to the registry", "gold": "docker push registry.company.com/model:latest", "personalized": true}
+{"id": "p23", "request": "start a jupyter notebook server", "gold": "jupyter lab --no-browser --port 8888", "personalized": true}
+{"id": "p24", "request": "pull the latest weights from the model registry", "gold": "aws s3 cp s3://models/latest.pt ./weights/", "personalized": true}

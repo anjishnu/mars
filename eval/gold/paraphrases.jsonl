@@ -1,0 +1,24 @@
+{"id": "p01", "request": "activate the project virtualenv", "paraphrase": "switch into the project's virtual environment", "gold": "source .venv/bin/activate"}
+{"id": "p02", "request": "run the training job", "paraphrase": "kick off the training run", "gold": "python train.py --config configs/base.yaml"}
+{"id": "p03", "request": "deploy the model", "paraphrase": "ship the model to production", "gold": "./scripts/deploy.sh --prod"}
+{"id": "p04", "request": "run the unit tests", "paraphrase": "execute the unit test suite", "gold": "cargo test"}
+{"id": "p05", "request": "start the dev server", "paraphrase": "boot up the development server", "gold": "make dev"}
+{"id": "p06", "request": "lint the code", "paraphrase": "run the linter over the codebase", "gold": "ruff check ."}
+{"id": "p07", "request": "sync the dataset from the bucket", "paraphrase": "pull down the dataset from the storage bucket", "gold": "aws s3 sync s3://our-bucket/data ./data"}
+{"id": "p08", "request": "launch tensorboard for this run", "paraphrase": "open tensorboard to view this run", "gold": "tensorboard --logdir runs/"}
+{"id": "p09", "request": "format the code", "paraphrase": "auto-format the source code", "gold": "cargo fmt"}
+{"id": "p10", "request": "submit the job to the cluster", "paraphrase": "queue the job on the cluster", "gold": "sbatch job.slurm"}
+{"id": "p11", "request": "build the release binary", "paraphrase": "compile the release build", "gold": "cargo build --release"}
+{"id": "p12", "request": "evaluate the latest checkpoint", "paraphrase": "assess the newest checkpoint's performance", "gold": "python eval.py --ckpt checkpoints/latest.pt"}
+{"id": "p13", "request": "train the model", "paraphrase": "kick off model training", "gold": "python train.py --config configs/base.yaml"}
+{"id": "p14", "request": "run inference on the test set", "paraphrase": "run the test set through the model", "gold": "python infer.py --split test"}
+{"id": "p15", "request": "check code formatting", "paraphrase": "verify the code style without changing anything", "gold": "black --check ."}
+{"id": "p16", "request": "run type checking", "paraphrase": "run the static type checker", "gold": "mypy src/"}
+{"id": "p17", "request": "spin up the database", "paraphrase": "bring up the database instance", "gold": "docker compose up -d db"}
+{"id": "p18", "request": "install project dependencies", "paraphrase": "install all the required packages", "gold": "uv sync"}
+{"id": "p19", "request": "run the benchmark suite", "paraphrase": "execute the performance benchmarks", "gold": "python -m benchmarks.run"}
+{"id": "p20", "request": "watch the training loss", "paraphrase": "monitor the training loss live", "gold": "tail -f logs/train.log | grep loss"}
+{"id": "p21", "request": "clean the build artifacts", "paraphrase": "wipe out the old build files", "gold": "cargo clean"}
+{"id": "p22", "request": "push the docker image to the registry", "paraphrase": "publish the docker image to the registry", "gold": "docker push registry.company.com/model:latest"}
+{"id": "p23", "request": "start a jupyter notebook server", "paraphrase": "fire up a jupyter notebook", "gold": "jupyter lab --no-browser --port 8888"}
+{"id": "p24", "request": "pull the latest weights from the model registry", "paraphrase": "grab the latest model weights from the registry", "gold": "aws s3 cp s3://models/latest.pt ./weights/"}

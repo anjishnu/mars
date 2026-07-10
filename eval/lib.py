@@ -20,6 +20,7 @@ RESULTS.mkdir(exist_ok=True)
 MODELS = [
     {"name": "qwen3-32b",         "provider": "groq",   "model": "qwen/qwen3-32b",         "key_env": "GROQ_API_KEY"},
     {"name": "gemini-flash-lite", "provider": "gemini", "model": "gemini-3.1-flash-lite",  "key_env": "GEMINI_API_KEY"},
+    {"name": "claude-haiku",      "provider": "anthropic", "model": "claude-haiku-4-5",     "key_env": "ANTHROPIC_API_KEY"},
 ]
 ALL_PROVIDER_KEYS = ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
                      "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MARS_LLM_KEY", "ARES_LLM_KEY"]
@@ -31,8 +32,13 @@ def mars_bin():
     return "mars"  # on PATH
 
 def available_models():
-    """Models whose provider key is set in the ambient env."""
-    return [m for m in MODELS if os.environ.get(m["key_env"])]
+    """Models whose provider key is set in the ambient env. EVAL_MODELS (comma-list of
+    names) pins the model(s) under test — e.g. EVAL_MODELS=qwen3-32b keeps Gemini's key
+    available for the *judge* without making gemini a model under test (avoids self-grading)."""
+    pin = os.environ.get("EVAL_MODELS")
+    names = {n.strip() for n in pin.split(",")} if pin else None
+    return [m for m in MODELS
+            if os.environ.get(m["key_env"]) and (names is None or m["name"] in names)]
 
 def limit(rows):
     """Cap the gold set for a quick smoke run: EVAL_LIMIT=N python eval/run_a.py"""
@@ -79,7 +85,7 @@ def _run_mars(args, env, timeout, parse):
     first place (set it high for large-prompt axes). Returns '' only if all retries
     are exhausted."""
     slp = float(os.environ.get("EVAL_SLEEP", "0"))
-    backoff = [8, 20, 40]  # 3 retries, ~68s max; a daily-quota wall will not recover in-run
+    backoff = [4, 10, 20]  # 3 retries, ~34s max; short — most empties are deterministic, not rate-limits
     for attempt in range(len(backoff) + 1):
         try:
             p = subprocess.run([mars_bin(), *args], env=env, capture_output=True, text=True, timeout=timeout)
@@ -129,13 +135,26 @@ def judge_name():
 def _http_json(url, headers, body, timeout=60):
     # Groq/others front with Cloudflare, which blocks urllib's default UA (err 1010).
     headers = {"User-Agent": "mars-eval/0.3 (+https://github.com/anjishnu/mars)", **headers}
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:400]
-        raise RuntimeError(f"judge HTTP {e.code} at {url}: {detail}") from None
+    data = json.dumps(body).encode()
+    # Transient judge errors (429 rate-limit, 529 Anthropic "overloaded", 5xx) are
+    # retried with backoff — a whole batch must not die on one overloaded response.
+    backoff = [3, 8, 20, 45]
+    for attempt in range(len(backoff) + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:400]
+            if e.code in (429, 500, 502, 503, 529) and attempt < len(backoff):
+                time.sleep(backoff[attempt])
+                continue
+            raise RuntimeError(f"judge HTTP {e.code} at {url}: {detail}") from None
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < len(backoff):
+                time.sleep(backoff[attempt])
+                continue
+            raise RuntimeError(f"judge network error at {url}: {e}") from None
 
 def _call_llm(system, user, max_tokens=200):
     prov, model, key, base = _judge_cfg()
@@ -143,7 +162,7 @@ def _call_llm(system, user, max_tokens=200):
         j = _http_json(f"{base}/v1/messages",
                        {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                        {"model": model, "max_tokens": max_tokens, "system": system,
-                        "messages": [{"role": "user", "content": user}], "temperature": 0})
+                        "messages": [{"role": "user", "content": user}]})  # temperature deprecated on claude-sonnet-5+
         return "".join(b.get("text", "") for b in j.get("content", []))
     j = _http_json(f"{base}/chat/completions",
                    {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},

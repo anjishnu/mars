@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib import (read_jsonl, write_jsonl, available_models, mars_ask,
                  score_answer, judge_name, GOLD, RESULTS, limit)
 
-MODES = ["none", "docs", "full"]
+MODES = ["none", "docs"]
 
 
 def main():

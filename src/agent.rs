@@ -136,6 +136,7 @@ pub fn parse_directive(text: &str) -> (String, Option<AgentDirective>) {
     }
 }
 
+#[derive(Clone)]
 pub struct AgentConfig {
     pub url: String,
     pub key: String,
@@ -308,6 +309,7 @@ fn docs_context(question: &str) -> Option<String> {
     let mut corpus = retrieval::doc_chunks();
     corpus.extend(crate::tuning::knob_descriptions());
     corpus.extend(retrieval::env_var_reference());
+    corpus.extend(crate::tiers::tier_descriptions());
     let hits = retrieval::rank(question, &corpus, 5);
     if hits.is_empty() {
         return None;
@@ -413,15 +415,33 @@ pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEven
 /// history, the user's own past `(request → command)` pairs + recent shell history
 /// are retrieved and shown as few-shot examples — the "sits at the terminal"
 /// advantage a standalone translator can't have. The variant is logged.
+/// True for models that emit an internal `<think>` block (Qwen3, QwQ, DeepSeek-R1,
+/// OpenAI o-series). Only these get the "cap your reasoning" prompt clause — see
+/// [`translate_once`] for why applying it to non-reasoning models breaks them.
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    ["qwen3", "qwq", "deepseek-r1", "-r1", "o1-", "o3", "o4-mini", "thinking", "reasoning"]
+        .iter()
+        .any(|p| m.contains(p))
+}
+
 pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
     let mode = crate::retrieval::MemoryMode::from_env();
     let examples = if mode.includes_history() { command_fewshot(request) } else { String::new() };
+    // Reasoning models (Qwen3, R1, o-series) burn the token budget on a <think> block,
+    // so we cap their reasoning. Non-reasoning models (Gemini Flash-Lite, gpt-4o-mini,
+    // Haiku) read that same instruction as a cue to reason *silently* and can return an
+    // EMPTY completion — so the cap is applied ONLY to reasoning models.
+    let reasoning_cap = if is_reasoning_model(&cfg.model) {
+        " Keep any internal reasoning to at most 50 tokens, then output only the command."
+    } else {
+        ""
+    };
     let system = format!(
         "You convert an English request into ONE shell command. Output the command \
          and nothing else — no explanation, no markdown, no backticks, no leading $. \
          Use the visible screen for context (cwd, filenames) when relevant. If the \
-         request is already a shell command, return it unchanged. Keep any internal \
-         reasoning to at most 50 tokens, then output only the command.{}",
+         request is already a shell command, return it unchanged.{reasoning_cap}{}",
         if examples.is_empty() {
             String::new()
         } else {
@@ -531,6 +551,10 @@ pub fn chat_with_id(
     }
 
     let call_id = crate::llm_log::next_call_id();
+    // Model-tier ring: route this task to its tier's model (an explicit
+    // MARS_LLM_MODEL still wins — that check lives inside model_for).
+    let resolved = crate::tiers::model_for(cfg.provider, task, &cfg.model);
+    let cfg = &AgentConfig { model: resolved, ..cfg.clone() };
     let start = std::time::Instant::now();
     let result = if cfg.provider == "anthropic" {
         chat_anthropic(cfg, &messages)
@@ -645,12 +669,13 @@ fn chat_anthropic(cfg: &AgentConfig, messages: &[serde_json::Value]) -> anyhow::
         }
     }
     let url = format!("{}/v1/messages", cfg.url);
+    // No `temperature`: the newest Claude models (Sonnet/Haiku 4.5+, Opus 4.x) reject it
+    // as deprecated, and all models fall back to a sane default when it is omitted.
     let body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
         "system": system,
-        "messages": msgs,
-        "temperature": cfg.temperature
+        "messages": msgs
     });
     let resp = match ureq::post(&url)
         .timeout(std::time::Duration::from_secs(30))
