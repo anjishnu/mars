@@ -159,7 +159,9 @@ Functional areas worth knowing (all methods on `App`):
   (a size-capped slice of what you see, plus the exact selection if any) +
   action registry + conversation history to a background thread; `tick` consumes
   the reply. Directives are confirm-gated (see §8). `apply_refactor` replaces the
-  captured selection with the model's code block as **one undo step**.
+  captured selection with the model's code block as **one undo step**; with no
+  selection the target is an empty range at the cursor, so the block inserts at
+  point ("write a limerick about potatoes").
 - **Watch & briefing (W6/W7)** — `WatchState` per terminal fed by the PTY drain;
   `maybe_fire_watches` summarizes on exit or quiet via a background thread;
   results land in a pull-model `notices` queue (the agent's *only* path to the
@@ -190,7 +192,8 @@ anchoring need next frame.
 - **Overlays**, drawn last and grown upward from the control bar: the command-bar
   dropdown, the ask panel (agent transcript with confirm lines for pending
   directives/refactors), the inline shell composer (anchored at the terminal
-  cursor — no eye-jump), the which-key continuation panel (appears after a
+  cursor — no eye-jump; it yields to the dropdown when the two would collide),
+  the which-key continuation panel (appears after a
   hesitation delay on a pending prefix), and the travel-mode cheat panel. The
   splash banner (`banner.rs` art, parsed from raw ANSI by `ansi_to_line`)
   overlays everything at startup until the first keypress.

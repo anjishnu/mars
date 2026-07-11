@@ -2119,7 +2119,8 @@ impl App {
         let mut p = Palette::root();
         p.bar_mode = bar_mode;
         // Editor bars are menu-first (a row is always selected); the terminal
-        // composer is SHELL-first — the menu engages only when arrowed into.
+        // composer opens unengaged — typing or arrowing selects the top match
+        // (registry-first Enter), and an unengaged Enter is a no-op.
         p.navigated = self.bar_return != Mode::Terminal;
         self.palette = Some(p);
         self.mode = Mode::Bar;
@@ -2602,40 +2603,46 @@ impl App {
                         (p.visible_items(frec).into_iter().nth(p.selected).map(|r| r.kind), p.navigated)
                     })
                     .unwrap_or((None, false));
-                // Terminal composer is SHELL-FIRST: typed text runs as a shell
-                // command (LLM-translate + confirm) unless the user explicitly
-                // arrowed into the menu. Fuzzy matches are suggestions, not a
-                // default — subsequence matching hits almost anything, and Enter
-                // must never fire a random action instead of the typed command.
+                // REGISTRY-FIRST (2026-07 ruling, reversing the earlier
+                // shell-first one): typing pre-selects the top match and Enter
+                // fires it — commands stay one keystroke away. Only when
+                // nothing in the registry matches does the query fall through
+                // to natural language: shell-translate in a terminal, an
+                // editor-grounded ask elsewhere. `!` still forces pure shell.
                 let has_query = self.palette.as_ref().map(|p| !p.query.trim().is_empty()).unwrap_or(false);
-                if self.bar_return == Mode::Terminal && !navigated && has_query {
-                    self.submit_terminal_shell();
-                } else {
+                if kind.is_some() && (navigated || has_query) {
                     self.activate_kind(kind);
+                } else if has_query {
+                    if self.bar_return == Mode::Terminal {
+                        self.submit_terminal_shell();
+                    } else {
+                        if let Some(p) = self.palette.as_mut() { p.bar_mode = BarMode::Ask; }
+                        self.submit_agent_query();
+                    }
                 }
+                // Empty query, nothing highlighted → Enter is a no-op: it must
+                // never fire a row the user can't see is selected.
             }
             KeyCode::Backspace => {
-                let term_ctx = self.bar_return == Mode::Terminal;
                 let close = if let Some(p) = self.palette.as_mut() {
                     if p.query.is_empty() {
                         !p.pop()
                     } else {
                         p.query.pop();
                         p.selected = 0;
-                        p.navigated = !term_ctx; // editing text disengages the menu
+                        p.navigated = !p.query.is_empty();
                         false
                     }
                 } else { false };
                 if close { self.close_bar(); }
             }
-            // Search-first (Claude-Code feel): typing always filters. Submenus are
-            // reached with Enter, and fuzzy search flattens across them.
+            // Search-first (Claude-Code feel): typing always filters, and the
+            // top match is selected so Enter fires it with no arrowing.
             KeyCode::Char(c) if none || shift => {
-                let term_ctx = self.bar_return == Mode::Terminal;
                 if let Some(p) = self.palette.as_mut() {
                     p.query.push(c);
                     p.selected = 0;
-                    p.navigated = !term_ctx; // editing text disengages the menu
+                    p.navigated = true;
                 }
             }
             _ => {}
@@ -3177,11 +3184,26 @@ impl App {
             p.query.clear();
         }
         // Selection-aware: a live selection becomes precise context, and marks the
-        // range a proposed refactor would replace.
+        // range a proposed refactor would replace ("translate this to French").
+        // With no selection but the cursor in an editor, the target is an empty
+        // range at point, so a reply's code block INSERTS there ("write a
+        // limerick about potatoes").
         let mut context = self.screen_context();
         self.refactor_target = self.selection_range();
         if let Some(sel) = self.selected_text() {
             context.push_str(&sel);
+        } else if let PaneContent::Editor(buf_id) = self.focused_pane().content {
+            let (row, col) = {
+                let p = self.focused_pane();
+                (p.cursor_row, p.cursor_col)
+            };
+            let at = self.buffers[&buf_id].char_at(row, col);
+            self.refactor_target = Some((buf_id, at, at));
+            context.push_str(
+                &crate::prompts::CURSOR_INSERT
+                    .replace("{line}", &(row + 1).to_string())
+                    .replace("{file}", &self.buffers[&buf_id].name),
+            );
         }
         agent::ask(
             cfg,
@@ -3507,7 +3529,18 @@ impl App {
             Action::OpenCommandMemory  => self.open_command_memory(),
             Action::ClearCommandMemory => self.clear_command_memory(),
             Action::OpenDenylist       => self.open_denylist(),
-            Action::Quit               => self.request_quit(),
+            // Quit = detach (2026-07 ruling): leaving mars never ends a
+            // session — kill is the deleting verb (KillSession here, `mars
+            // kill`/`mars killall` outside). Standalone has nothing to keep
+            // running, so Quit still exits there (dirty-guarded).
+            Action::Quit               => {
+                if self.session_name.is_some() {
+                    self.detach_requested = true;
+                } else {
+                    self.request_quit();
+                }
+            }
+            Action::KillSession        => self.request_quit(),
         }
     }
 
@@ -4397,6 +4430,22 @@ impl App {
     /// Click focuses a pane (and positions the cursor); wheel scrolls.
     /// Only active in Edit/Terminal — the bar and prompts own the keyboard.
     pub fn handle_mouse(&mut self, m: MouseEvent) {
+        // The ask transcript scrolls under the wheel too (same as the Up/Down
+        // keys), so reviewing past turns doesn't require leaving the mouse.
+        if matches!(self.mode, Mode::Bar)
+            && matches!(self.palette.as_ref().map(|p| &p.bar_mode), Some(BarMode::Ask))
+        {
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.ask_scroll = self.ask_scroll.saturating_add(self.tuning.wheel_scroll_lines);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.ask_scroll = self.ask_scroll.saturating_sub(self.tuning.wheel_scroll_lines);
+                }
+                _ => {}
+            }
+            return;
+        }
         if !matches!(self.mode, Mode::Edit | Mode::Terminal) {
             return;
         }

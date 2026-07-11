@@ -716,6 +716,10 @@ pub struct SessionEntry {
     pub name: String,
     pub remote: bool,
     pub status: String,
+    /// LLM-derived gloss of what the session is FOR (inferred mission, else the
+    /// last work-journal verdict) — kept apart from `status` so liveness stays
+    /// scannable and the prose gets its own column at the end of the table.
+    pub summary: String,
     /// When the status was observed: `None` = right now (live local probe);
     /// `Some(ts)` = the last time the remote self-reported.
     pub as_of: Option<u64>,
@@ -731,36 +735,67 @@ fn clip(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// What the session is FOR, not just whether it's up: the inferred mission
+/// when one exists, else the last work-journal verdict — so the summary is
+/// meaningful even before the first mission inference runs. The mission prompt
+/// asks for ≤80 chars; the clips here are only a backstop for a model that
+/// ignores that — the table wraps, it doesn't truncate.
+pub fn session_summary(name: &str) -> String {
+    if let Some((mission, _)) = crate::worklog::load_mission(name) {
+        return clip(&mission, 160);
+    }
+    if let Some(last) = crate::worklog::recent(name, 1).pop() {
+        return format!("last: {} ({})", clip(&last.verdict, 80), crate::broker::ago(last.ts));
+    }
+    String::new()
+}
+
+/// Greedy word-wrap to `width` columns; words longer than a line are
+/// hard-split rather than overflowing. Empty input → no lines.
+pub fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut len = 0;
+    for word in s.split_whitespace() {
+        let chars: Vec<char> = word.chars().collect();
+        for piece in chars.chunks(width) {
+            if len > 0 && len + 1 + piece.len() > width {
+                lines.push(std::mem::take(&mut cur));
+                len = 0;
+            }
+            if len > 0 {
+                cur.push(' ');
+                len += 1;
+            }
+            cur.extend(piece);
+            len += piece.len();
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Everything `mars ls` knows about, locals first. The single access path for
 /// both kinds — callers never touch `list_sessions`/`fleet_load` shapes.
 pub fn all_sessions() -> Result<Vec<SessionEntry>> {
     let mut out = Vec::new();
     for (name, alive, attached) in list_sessions()? {
-        let mut status = match (alive, attached) {
+        let status = match (alive, attached) {
             (true, true) => "attached",
             (true, false) => "detached",
             (false, _) => "dead (cleaned up)",
         }
         .to_string();
-        // What the session is FOR, not just whether it's up: the inferred
-        // mission when one exists, else the last work-journal verdict — so the
-        // summary is meaningful even before the first mission inference runs.
-        if alive {
-            if let Some((mission, _)) = crate::worklog::load_mission(&name) {
-                status = format!("{status} — {}", clip(&mission, 48));
-            } else if let Some(last) = crate::worklog::recent(&name, 1).pop() {
-                status = format!(
-                    "{status} — last: {} ({})",
-                    clip(&last.verdict, 40),
-                    crate::broker::ago(last.ts)
-                );
-            }
-        }
+        let summary = if alive { session_summary(&name) } else { String::new() };
         out.push(SessionEntry {
             connect: format!("mars attach {name}"),
             name,
             remote: false,
             status,
+            summary,
             as_of: None,
         });
     }
@@ -774,6 +809,7 @@ pub fn all_sessions() -> Result<Vec<SessionEntry>> {
             name: e.host,
             remote: true,
             status,
+            summary: String::new(),
             as_of: Some(e.as_of),
         });
     }
@@ -788,20 +824,38 @@ pub fn list_main(prompt: bool) -> Result<()> {
         println!("no sessions — start one with: mars new <name>, or reach a box with: mars ssh <host>");
         return Ok(());
     }
-    println!("  #  {:<20} {:<7} {:<30} {}", "SESSION", "WHERE", "STATUS", "AS OF");
+    println!(
+        "  #  {:<20} {:<7} {:<28} {:<9} {}",
+        "SESSION", "WHERE", "STATUS", "AS OF", "SUMMARY"
+    );
+    // A long summary wraps into a block justified under the SUMMARY column
+    // (continuation lines indented to this row's summary start) instead of
+    // spilling into an unreadable overlong line.
+    let cols = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
     for (i, e) in entries.iter().enumerate() {
         let seen = match e.as_of {
             None => "now".to_string(),
             Some(t) => crate::broker::ago(t),
         };
-        println!(
-            "  {:<2} {:<20} {:<7} {:<30} {}",
+        let prefix = format!(
+            "  {:<2} {:<20} {:<7} {:<28} {:<9} ",
             i + 1,
             e.name,
             if e.remote { "remote" } else { "local" },
             e.status,
             seen
         );
+        let indent = prefix.chars().count();
+        let mut lines = wrap_text(&e.summary, cols.saturating_sub(indent).max(20)).into_iter();
+        match lines.next() {
+            None => println!("{}", prefix.trim_end()),
+            Some(first) => {
+                println!("{prefix}{first}");
+                for l in lines {
+                    println!("{}{l}", " ".repeat(indent));
+                }
+            }
+        }
     }
 
     // Interactive follow-up: an ordinal or (prefix of a) name attaches a local
@@ -865,6 +919,23 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
         }
     }
     Err(anyhow!("rename did not complete — see: mars ls"))
+}
+
+/// `mars killall`: end EVERY live session daemon (each autosaves first).
+/// `list_sessions` sweeps stale sockets as a side effect, so this leaves a
+/// clean slate — the `--killall` startup path runs it before a fresh session.
+pub fn killall_main() -> Result<()> {
+    let mut ended = 0;
+    for (name, alive, _) in list_sessions()? {
+        if alive {
+            kill_main(&name)?;
+            ended += 1;
+        }
+    }
+    if ended == 0 {
+        println!("no live sessions to kill");
+    }
+    Ok(())
 }
 
 /// `mars kill <name>`: terminate a session daemon (autosaves, then exits).

@@ -20,6 +20,7 @@ pub struct Tuning {
     pub wheel_scroll_lines: usize,
     pub dropdown_max_rows: u16,
     pub panel_max_height_pct: u16,
+    pub ask_panel_max_pct: u16,
     pub spinner_speed_ticks: u64,
     pub which_key_panel_width: u16,
     pub travel_panel_width: u16,
@@ -66,6 +67,7 @@ impl Default for Tuning {
             wheel_scroll_lines: 3,
             dropdown_max_rows: 20,
             panel_max_height_pct: 60,
+            ask_panel_max_pct: 30,
             spinner_speed_ticks: 3,
             which_key_panel_width: 30,
             travel_panel_width: 46,
@@ -162,7 +164,9 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("dropdown_max_rows", knob(json!(d.dropdown_max_rows),
             "Maximum visible rows in the command-bar dropdown.")),
         ("panel_max_height_pct", knob(json!(d.panel_max_height_pct),
-            "Maximum height of pop-up panels (dropdown, ask) as % of the editor area.")),
+            "Maximum height of pop-up panels (dropdown) as % of the editor area.")),
+        ("ask_panel_max_pct", knob(json!(d.ask_panel_max_pct),
+            "Maximum height of the ask/chat panel as % of the workspace — it hugs the bottom; scroll up (Up key or wheel) for older turns.")),
         ("spinner_speed_ticks", knob(json!(d.spinner_speed_ticks),
             "Frame ticks per spinner animation step while the agent thinks. Lower = faster spin.")),
         ("which_key_panel_width", knob(json!(d.which_key_panel_width),
@@ -312,6 +316,7 @@ pub fn load() -> Tuning {
         t.wheel_scroll_lines    = get_u64(&map, "wheel_scroll_lines", t.wheel_scroll_lines as u64) as usize;
         t.dropdown_max_rows     = get_u64(&map, "dropdown_max_rows", t.dropdown_max_rows as u64) as u16;
         t.panel_max_height_pct  = get_u64(&map, "panel_max_height_pct", t.panel_max_height_pct as u64) as u16;
+        t.ask_panel_max_pct     = get_u64(&map, "ask_panel_max_pct", t.ask_panel_max_pct as u64) as u16;
         t.spinner_speed_ticks   = get_u64(&map, "spinner_speed_ticks", t.spinner_speed_ticks).max(1);
         t.which_key_panel_width = get_u64(&map, "which_key_panel_width", t.which_key_panel_width as u64) as u16;
         t.travel_panel_width    = get_u64(&map, "travel_panel_width", t.travel_panel_width as u64) as u16;

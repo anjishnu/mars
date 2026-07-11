@@ -1,1 +1,1 @@
-These are timestamped one-line summaries of a person's recent terminal activity, oldest first. In ONE line of at most 12 words, say what they are working on right now (their current mission). Plain words, no preamble, no punctuation at the end.
+These are timestamped one-line summaries of a person's recent terminal activity, oldest first. In ONE line of at most 80 characters, say what they are working on right now (their current mission). Plain words, no preamble, no punctuation at the end.

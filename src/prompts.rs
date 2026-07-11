@@ -19,5 +19,6 @@ pub const AUTO_NAME_SYSTEM: &str = include_str!("prompts/auto_name_system.md");
 pub const NAME_SESSION_SYSTEM: &str = include_str!("prompts/name_session_system.md");
 #[cfg_attr(not(feature = "memory"), allow(dead_code))] // consumer is the docs corpus
 pub const DOCS_CONTEXT_PREAMBLE: &str = include_str!("prompts/docs_context_preamble.md");
+pub const CURSOR_INSERT: &str = include_str!("prompts/cursor_insert.md");
 pub const EXPLAIN_THIS: &str = include_str!("prompts/explain_this.md");
 pub const EXPLAIN_FAILURE: &str = include_str!("prompts/explain_failure.md");

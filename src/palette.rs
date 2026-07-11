@@ -77,7 +77,10 @@ pub enum Action {
     ClearCommandMemory,
     /// Open the prompt-redaction denylist in the editor.
     OpenDenylist,
+    /// Detach when in a session (nothing is lost); actually exits standalone.
     Quit,
+    /// End the session for good — the deleting verb (confirm-gated).
+    KillSession,
 }
 
 impl Action {
@@ -146,7 +149,8 @@ impl Action {
             Action::OpenCommandMemory  => "open command memory",
             Action::ClearCommandMemory => "forget all commands",
             Action::OpenDenylist       => "open redaction denylist",
-            Action::Quit               => "quit",
+            Action::Quit               => "quit (detach)",
+            Action::KillSession        => "kill session",
         }
     }
 
@@ -155,6 +159,7 @@ impl Action {
         matches!(
             self,
             Action::Quit
+                | Action::KillSession
                 | Action::CloseTab
                 | Action::KillBuffer
                 | Action::ClosePane
@@ -162,6 +167,25 @@ impl Action {
                 | Action::ClearCommandMemory
         )
     }
+}
+
+/// Keys that act INSIDE the bar, on an empty query (right after Ctrl+Space):
+/// one keypress to a submode or action, so they outrank the global chords in
+/// the dropdown's teaching column — a global chord needs the bar closed first.
+/// Dispatch lives in `App::handle_bar`; the selfcheck pins each entry to its
+/// real behavior so this table can't drift from what the keys do.
+pub fn bar_quick_key(action: &Action) -> Option<char> {
+    match action {
+        Action::ToggleFileTree => Some('@'),
+        Action::AskAgent       => Some('?'),
+        _ => None,
+    }
+}
+
+/// The full in-bar key legend (includes keys with no Action equivalent, like
+/// `!` shell and Tab), shown on the bar line while the query is empty.
+pub fn bar_quick_legend() -> &'static [(&'static str, &'static str)] {
+    &[("!", "shell"), ("?", "ask"), ("@", "files"), ("⇥", "ask/cmd")]
 }
 
 // ── Menu structure ───────────────────────────────────────────────────────────
@@ -218,7 +242,8 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Rename session", Action::RenameSession, "Rename this session (also: mars rename <old> <new>)"),
         MenuItem::run_desc("Refresh file index", Action::RefreshIndex, "Re-scan the project for the file tree/picker"),
         MenuItem::run_desc("Restore default keys", Action::RestoreKeybindings, "Reset keybindings to defaults (backs up keys.json)"),
-        MenuItem::run_desc("Quit",          Action::Quit,         "Quit the editor (ends the session)"),
+        MenuItem::run_desc("Quit (detach)", Action::Quit,         "Leave — the session keeps running (reattach: mars attach)"),
+        MenuItem::run_desc("Kill session",  Action::KillSession,  "End this session for good — autosaves, then deletes it (asks first)"),
     ]
 }
 

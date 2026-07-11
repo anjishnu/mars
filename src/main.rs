@@ -63,10 +63,12 @@ SESSIONS  (work survives closed windows and disconnects)
   mars ls                        list sessions and their attach state
                                  (aliases: list, --list)
   mars rename <old> <new>        rename a running session
-  mars kill <name>               end a session (autosaves first)
+  mars kill <name>               end + delete a session (autosaves first)
+  mars killall                   end ALL sessions, then start fresh
+                                 (alias: --killall)
 
-  Inside a session:  C-t D or C-x C-d  detaches (keeps everything running)
-                     C-x C-c  quits and ends the session
+  Inside a session:  quitting (C-x C-c) just DETACHES — the session lives on;
+                     \"Kill session\" in the menu (or mars kill) ends it for good
   Closing the terminal window just detaches — nothing is lost.
   Reattach greets you with a \"while away\" line if anything happened;
   C-x g opens the full Away Digest (timeline + durations).
@@ -220,6 +222,18 @@ fn main() -> Result<()> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("usage: mars kill <name>   (see: mars ls)"))?;
             return session::kill_main(&name);
+        }
+        // Clean slate: end every existing session, then start a fresh one.
+        Some("killall") | Some("--killall") => {
+            if let Ok(session) = std::env::var("MARS_SESSION") {
+                anyhow::bail!(
+                    "you're inside Mars session '{session}' — killall would cut its own branch.\n  \
+                     Detach first (C-x C-c), then run: mars --killall"
+                );
+            }
+            session::killall_main()?;
+            let name = session::next_auto_name()?;
+            return session::session_main(&name, args.next());
         }
         Some("rename") | Some("--rename") => {
             let (old, new) = (args.next(), args.next());
@@ -1243,8 +1257,9 @@ fn selfcheck() -> Result<()> {
     assert!(app.tree_open && matches!(app.mode, mode::Mode::Tree), "C-x d did not reopen the tree");
     println!("[selfcheck] file tree (reset/../) ..... PASS");
 
-    // 26c. Conversation transcript: history renders, panel grows past the old
-    //      16-row cap, scrolls, and C-l clears.
+    // 26c. Conversation transcript: history renders bottom-pinned inside the
+    //      ask_panel_max_pct cap (~30% of the workspace), scrolls, and C-l
+    //      clears.
     let mut app = App::new(None)?;
     app.agent_history.push(("user".into(), "first question".into()));
     let long: String = (1..=30).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
@@ -1253,12 +1268,15 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Tab))?; // → ASK
     term.draw(|f| ui::render(f, &mut app))?;
     let t27 = screen_text(&term);
-    // Bottom-pinned: the tail of a long answer is visible, well past the old
-    // 16-row cap (L18 could not have rendered before).
-    assert!(t27.contains("L18") && t27.contains("L30"),
-        "panel capped too small for a long answer");
+    // Bottom-pinned tail, bounded panel: the newest lines show, the middle of
+    // the answer does not (it would under the old 60% cap), and the marker
+    // teaches the way up.
+    assert!(t27.contains("L30") && t27.contains("L23"),
+        "panel lost the tail of a long answer");
+    assert!(!t27.contains("L15"), "ask panel escaped the ask_panel_max_pct cap");
+    assert!(t27.contains("(Up to scroll)"), "scroll-up marker missing");
     // Scroll up to reach the start of the conversation.
-    for _ in 0..15 {
+    for _ in 0..25 {
         app.handle_key(k(KeyCode::Up))?;
     }
     term.draw(|f| ui::render(f, &mut app))?;
@@ -1436,20 +1454,34 @@ fn selfcheck() -> Result<()> {
         matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Command)),
         "Ctrl+Space in terminal did not open the unified (Command) composer"
     );
-    // SHELL-FIRST: typed text + Enter runs as a shell command even though the
-    // fuzzy list matches Mars actions (`ls` ⊆ "restore defauLt keyS" etc.) —
-    // Enter must never fire a menu row the user didn't arrow into.
-    typ(&mut app, "ls")?;
-    app.handle_key(k(KeyCode::Enter))?; // no key set → runs literally in the pane
-    assert!(app.mode == mode::Mode::Terminal, "shell-first Enter did not run the typed command");
-    // Arrowing IN engages the menu: ↓ selects, Enter activates the action.
-    app.handle_key(kc(KeyCode::Char(' ')))?;
+    // REGISTRY-FIRST (2026-07 ruling, reversing the earlier shell-first one):
+    // typing pre-selects the top match and Enter fires it — no arrowing.
     typ(&mut app, "split")?;
+    assert!(
+        app.palette.as_ref().map(|p| p.navigated).unwrap_or(false),
+        "typing did not pre-select the top match"
+    );
     let panes_before = app.tab().layout.pane_ids().len();
-    app.handle_key(k(KeyCode::Down))?; // engage the suggestion list
-    assert!(app.palette.as_ref().map(|p| p.navigated).unwrap_or(false), "↓ did not engage the menu");
-    app.handle_key(k(KeyCode::Enter))?; // activates the selected Split action
-    assert!(app.tab().layout.pane_ids().len() > panes_before, "navigated Enter did not run the action");
+    app.handle_key(k(KeyCode::Enter))?;
+    assert!(
+        app.tab().layout.pane_ids().len() > panes_before,
+        "Enter did not fire the pre-selected top match"
+    );
+    // Only a query NOTHING matches falls through to the shell (no key set →
+    // runs literally in the pane).
+    app.handle_key(kc(KeyCode::Char(' ')))?;
+    typ(&mut app, "qqq")?;
+    let no_match = app
+        .palette
+        .as_ref()
+        .map(|p| p.visible_items(&app.frecency).is_empty())
+        .unwrap_or(false);
+    assert!(no_match, "'qqq' unexpectedly matched a registry row");
+    app.handle_key(k(KeyCode::Enter))?;
+    assert!(
+        app.mode == mode::Mode::Terminal && app.palette.is_none(),
+        "no-match Enter did not fall through to the shell"
+    );
     // `!` still forces pure-shell mode.
     app.handle_key(kc(KeyCode::Char(' ')))?;
     app.handle_key(k(KeyCode::Char('!')))?;
@@ -1461,6 +1493,196 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Enter))?; // no key → runs the command directly
     assert!(app.mode == mode::Mode::Terminal, "shell composer Enter did not run the command");
     println!("[selfcheck] terminal composer (unified) . PASS");
+
+    // 26k2. In-bar quick keys: the bar_quick_key/legend tables must not drift
+    //       from what the keys actually do; the terminal composer's unengaged
+    //       empty-query Enter is a no-op (never fire a row the user can't see
+    //       is selected — editor bars are menu-first and DO highlight row one);
+    //       and an editor no-match query falls through to a natural-language ask.
+    {
+        let mut app = App::new(None)?;
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('!')))?;
+        typ(&mut app, "true")?;
+        app.handle_key(k(KeyCode::Enter))?; // attached to a terminal pane
+        app.handle_key(kc(KeyCode::Char(' ')))?; // unified composer, unengaged
+        app.handle_key(k(KeyCode::Enter))?; // empty query, nothing highlighted
+        assert!(
+            app.palette.is_some() && matches!(app.mode, mode::Mode::Bar),
+            "empty-query Enter should be a no-op, not fire a row"
+        );
+        app.handle_key(k(KeyCode::Char('?')))?;
+        assert!(
+            matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Ask)),
+            "`?` did not switch to ask mode"
+        );
+        app.handle_key(kc(KeyCode::Char('g')))?;
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('@')))?;
+        assert!(app.tree_open, "`@` did not open the navigator");
+        assert_eq!(palette::bar_quick_key(&palette::Action::ToggleFileTree), Some('@'));
+        assert_eq!(palette::bar_quick_key(&palette::Action::AskAgent), Some('?'));
+        assert!(
+            palette::bar_quick_legend().iter().any(|(key, _)| *key == "!"),
+            "quick-key legend lost `!` shell"
+        );
+
+        let mut app = App::new(None)?;
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        typ(&mut app, "qqq")?;
+        app.handle_key(k(KeyCode::Enter))?;
+        assert!(
+            matches!(app.palette.as_ref().map(|p| &p.bar_mode), Some(palette::BarMode::Ask)),
+            "editor no-match Enter did not fall through to an ask"
+        );
+        assert!(
+            app.agent_answer.as_deref().unwrap_or("").starts_with('⚠'),
+            "hermetic ask fallback should surface the no-key notice"
+        );
+    }
+    println!("[selfcheck] bar quick keys + fallbacks . PASS");
+
+    // 26k3. Cursor-point generation: with no selection an editor ask targets an
+    //       empty range at point, so a reply's code block INSERTS there — as one
+    //       reversible undo step ("write a limerick about potatoes").
+    {
+        let mut app = App::new(None)?;
+        typ(&mut app, "ab")?;
+        let buf_id = match app.focused_pane().content {
+            pane::PaneContent::Editor(id) => id,
+            _ => panic!("scratch pane is not an editor"),
+        };
+        // The capture: a configured ask from an editor with no selection marks
+        // the cursor as an empty target range (the request thread itself fails
+        // fast against a closed port and is irrelevant here).
+        std::env::set_var("MARS_LLM_KEY", "selfcheck");
+        std::env::set_var("MARS_LLM_URL", "http://127.0.0.1:9/v1/chat/completions");
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('?')))?;
+        typ(&mut app, "write a limerick about potatoes")?;
+        app.handle_key(k(KeyCode::Enter))?;
+        assert_eq!(
+            app.refactor_target,
+            Some((buf_id, 2, 2)),
+            "no-selection ask did not target an empty range at the cursor"
+        );
+        std::env::remove_var("MARS_LLM_KEY");
+        std::env::remove_var("MARS_LLM_URL");
+        // The apply: an empty target range inserts (removes nothing), one undo
+        // step reverts, and the confirm chip verb says "insert".
+        app.refactor_target = Some((buf_id, 1, 1));
+        app.refactor_replacement = Some("XY".into());
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(
+            screen_text(&term).contains("insert at the cursor"),
+            "confirm chip did not say insert for an empty target range"
+        );
+        app.apply_refactor();
+        let text = app.buffers.get(&buf_id).map(|b| b.rope.to_string()).unwrap_or_default();
+        assert_eq!(text, "aXYb", "empty-range refactor did not insert at point");
+        app.run_action(palette::Action::Undo);
+        let text = app.buffers.get(&buf_id).map(|b| b.rope.to_string()).unwrap_or_default();
+        assert_eq!(text, "ab", "cursor insertion was not one reversible undo step");
+    }
+    println!("[selfcheck] cursor-point generation .... PASS");
+
+    // 26k4. The cursor-anchored composer yields to the dropdown: cursor at the
+    //       top → both render; cursor pushed to the bottom rows the dropdown
+    //       covers → the overlay is hidden, the menu stays readable.
+    {
+        let mut app = App::new(None)?;
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('!')))?;
+        typ(&mut app, "true")?;
+        app.handle_key(k(KeyCode::Enter))?; // fresh shell → cursor near the top
+        term.draw(|f| ui::render(f, &mut app))?; // sizes the PTY to the pane
+        let tid = match app.focused_pane().content {
+            pane::PaneContent::Terminal(id) => id,
+            _ => panic!("focused pane is not a terminal"),
+        };
+        app.handle_key(kc(KeyCode::Char(' ')))?; // unified composer
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(
+            t.contains("run a command…"),
+            "overlay missing though it does not overlap the dropdown"
+        );
+        // The in-bar quick keys are taught on the bar line (empty query only).
+        assert!(
+            t.contains("! shell") && t.contains("? ask") && t.contains("@ files"),
+            "quick-key legend missing from the empty-query bar line"
+        );
+        app.handle_key(kc(KeyCode::Char('g')))?; // back to the terminal
+        typ(&mut app, "seq 1 200")?;
+        app.handle_key(k(KeyCode::Enter))?;
+        for _ in 0..30 {
+            app.tick();
+            if app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false),
+            "seq did not push the terminal cursor into the dropdown rows"
+        );
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(
+            !t.contains("run a command…"),
+            "overlay drew on top of the dropdown instead of yielding"
+        );
+        assert!(t.contains("Navigator"), "dropdown missing while the overlay yielded");
+        app.handle_key(kc(KeyCode::Char('g')))?;
+    }
+    println!("[selfcheck] overlay yields to dropdown . PASS");
+
+    // 26k5. The ask/chat panel is bounded to the bottom ask_panel_max_pct of
+    //       the workspace: a long transcript shows only its tail, older turns
+    //       are reachable by scrolling (Up key and mouse wheel), and the
+    //       "↑ more" marker teaches that.
+    {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut app = App::new(None)?;
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('?')))?; // ask mode
+        for i in 0..40 {
+            app.agent_history.push(("user".into(), format!("question number {i}")));
+            app.agent_history.push(("assistant".into(), format!("answer number {i}")));
+        }
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("answer number 39"), "panel not pinned to the newest turn");
+        assert!(!t.contains("question number 0"), "80-turn transcript rendered unbounded");
+        assert!(t.contains("more (Up to scroll)"), "scroll-up marker missing");
+        // ≤ 30% of a ~37-row workspace is ~11 rows — far below the ~22 the old
+        // 60% cap allowed. Count rendered turn prefixes to pin the bound.
+        let turns = t.matches("you  ›").count() + t.matches("mars ›").count();
+        assert!(
+            (2..=13).contains(&turns),
+            "ask panel height escaped the 30% cap ({turns} turns visible)"
+        );
+        // Wheel = the Up/Down keys; scrolling up reveals older turns.
+        let wheel = |up: bool| MouseEvent {
+            kind: if up { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown },
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(wheel(true));
+        assert_eq!(app.ask_scroll, app.tuning.wheel_scroll_lines, "wheel did not scroll the ask panel");
+        for _ in 0..20 { app.handle_mouse(wheel(true)); }
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(
+            t.contains("more (Down to scroll)"),
+            "scrolled-up panel lost its way back down"
+        );
+        app.handle_mouse(wheel(false));
+        assert!(app.ask_scroll < 21 * app.tuning.wheel_scroll_lines, "wheel down did not scroll back");
+    }
+    println!("[selfcheck] ask panel bounded+scrolls .. PASS");
 
     // 26l. W6 watch: watching a pane + a verdict event → a failure notice that
     //      renders and is dismissed with Esc.
@@ -1711,18 +1933,20 @@ fn selfcheck() -> Result<()> {
         let (still_alive, _) = c3.read_until("post-rename", 5)?;
         assert!(still_alive, "attached client broke across the rename");
 
-        // Quit ends the session: detach the shell, C-x C-c, confirm 'q'.
+        // Quit = detach: C-x C-c leaves the client but the session lives on
+        // (no dirty guard — nothing is lost). Only `kill` ends it.
         c3.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?; // detach PTY
         c3.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))?;
         c3.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
-        c3.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))?; // quit anyway
         let (_, quit_exit) = c3.read_until("\u{0}never\u{0}", 5)?;
         assert!(
-            quit_exit.map(|m| m.contains("session ended")).unwrap_or(false),
-            "quit did not end the session"
+            quit_exit.map(|m| m.contains("detached")).unwrap_or(false),
+            "quit did not detach"
         );
+        assert!(rpath.exists(), "quit killed the session instead of detaching");
+        session::kill_main(&renamed)?;
         server.join().expect("server thread panicked")?;
-        assert!(!rpath.exists(), "socket not removed after quit");
+        assert!(!rpath.exists(), "socket not removed after kill");
         println!("[selfcheck] session daemon ............ PASS");
 
         // 27b. Session management: Status reports detached; `kill` ends a
@@ -1747,6 +1971,56 @@ fn selfcheck() -> Result<()> {
         kserver.join().expect("kill-test server panicked")?;
         assert!(!kpath.exists(), "socket not removed after kill");
         println!("[selfcheck] session status + kill ..... PASS");
+
+        // 27b2. Quit = detach; kill is the deleting verb. In a session, Quit
+        //       requests a detach and never ends the daemon; KillSession is the
+        //       confirm-gated ender; `mars killall` sweeps every live daemon
+        //       (under an isolated TMPDIR so real sessions are untouchable).
+        {
+            let mut app = App::new(None)?;
+            app.session_name = Some("some-session".into());
+            app.run_action(palette::Action::Quit);
+            assert!(app.detach_requested, "in-session Quit did not request a detach");
+            assert!(!app.should_quit, "in-session Quit ended the session");
+            app.detach_requested = false;
+            app.run_action(palette::Action::KillSession);
+            assert!(app.should_quit, "KillSession did not end a clean session");
+            assert!(
+                palette::Action::KillSession.is_destructive(),
+                "KillSession must be confirm-gated for agent directives"
+            );
+
+            let saved_tmp = std::env::var("TMPDIR").ok();
+            let iso = std::env::temp_dir().join(format!("mars-killall-{}", std::process::id()));
+            std::fs::create_dir_all(&iso)?;
+            std::env::set_var("TMPDIR", &iso);
+            let names: Vec<String> =
+                (0..2).map(|i| format!("selfcheck-ka{i}-{}", std::process::id())).collect();
+            let mut servers = Vec::new();
+            for n in &names {
+                let n2 = n.clone();
+                servers.push(std::thread::spawn(move || session::server_main(&n2, None)));
+            }
+            for n in &names {
+                let p = session::socket_path(n)?;
+                let mut up = false;
+                for _ in 0..100 {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    if UnixStream::connect(&p).is_ok() { up = true; break; }
+                }
+                assert!(up, "killall-test server '{n}' did not come up");
+            }
+            session::killall_main()?;
+            for s in servers { s.join().expect("killall-test server panicked")?; }
+            for n in &names {
+                assert!(!session::socket_path(n)?.exists(), "killall left the socket for '{n}'");
+            }
+            match saved_tmp {
+                Some(v) => std::env::set_var("TMPDIR", v),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+        println!("[selfcheck] quit=detach + killall ..... PASS");
     }
 
     // 27c. Auto session name is a lowest-free number; session AI-name applies
@@ -2006,6 +2280,7 @@ fn selfcheck() -> Result<()> {
             ("name_session_system", prompts::NAME_SESSION_SYSTEM, vec![]),
             #[cfg(feature = "memory")]
             ("docs_context_preamble", prompts::DOCS_CONTEXT_PREAMBLE, vec!["{body}"]),
+            ("cursor_insert", prompts::CURSOR_INSERT, vec!["{file}", "{line}"]),
             ("explain_this", prompts::EXPLAIN_THIS, vec![]),
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
         ] {
@@ -2058,6 +2333,37 @@ fn selfcheck() -> Result<()> {
             "mission round-trip failed"
         );
         assert_eq!(worklog::load_mission("other"), None, "mission leaked across sessions");
+        // The ls SUMMARY column: mission when present, else the last verdict,
+        // never mixed into the liveness status.
+        assert_eq!(
+            session::session_summary("train"),
+            "fixing the red tests",
+            "summary should be the mission"
+        );
+        let s = session::session_summary("other");
+        assert!(
+            s.starts_with("last: done: unrelated (") && s.ends_with(')'),
+            "summary should fall back to the last verdict: {s}"
+        );
+        assert_eq!(session::session_summary("nowhere"), "", "no journal → empty summary");
+        // Overflowing summaries wrap into a block under the column: greedy
+        // word-wrap, overlong words hard-split, empty input → no lines.
+        assert_eq!(
+            session::wrap_text("fixing the red tests in the training run", 16),
+            vec!["fixing the red", "tests in the", "training run"],
+            "word wrap broke"
+        );
+        assert!(
+            session::wrap_text("supercalifragilisticexpialidocious", 10)
+                .iter()
+                .all(|l| l.chars().count() <= 10),
+            "overlong word not hard-split to width"
+        );
+        assert!(session::wrap_text("", 20).is_empty(), "empty summary should wrap to no lines");
+        assert!(
+            session::wrap_text("short", 20) == vec!["short"],
+            "short summary should stay one line"
+        );
         std::env::remove_var("MARS_WORKLOG");
         let _ = std::fs::remove_file(&wl);
         let _ = std::fs::remove_file(std::env::temp_dir().join(format!("mars-worklog-{}", std::process::id())).with_file_name("mission.json"));
@@ -2232,6 +2538,7 @@ fn selfcheck() -> Result<()> {
             "pushed status not plumbed into ls: {}",
             g.status
         );
+        assert!(g.summary.is_empty(), "remotes have no LLM summary column");
         assert_eq!(g.connect, "mars ssh gpubox");
         assert!(
             entries.iter().all(|e| e.remote || e.as_of.is_none()),

@@ -83,15 +83,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         match app.palette.as_ref().map(|p| p.bar_mode.clone()) {
             Some(BarMode::Ask)     => render_ask_panel(frame, app, pane_area, bar_area),
             Some(BarMode::Command) => {
-                render_bar_dropdown(frame, app, pane_area, bar_area);
+                let dropdown = render_bar_dropdown(frame, app, pane_area, bar_area);
                 // In a terminal, the unified composer also shows the red inline
-                // overlay at the cursor (type-in-place) — best of both worlds.
+                // overlay at the cursor (type-in-place) — but the menu outranks
+                // it: when the two would collide, the overlay stays hidden.
                 if app.bar_return == Mode::Terminal {
-                    render_shell_overlay(frame, app, pane_area);
+                    render_shell_overlay(frame, app, pane_area, dropdown);
                 }
             }
             // Shell: an inline composer anchored at the cursor (no eye-jump).
-            Some(BarMode::Shell)   => render_shell_overlay(frame, app, pane_area),
+            Some(BarMode::Shell)   => render_shell_overlay(frame, app, pane_area, None),
             None => {}
         }
     }
@@ -940,8 +941,22 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
             let style = Style::default()
                 .fg(rgb(app.tuning.theme_accent))
                 .add_modifier(Modifier::BOLD);
+            // In-bar quick keys, taught right where they work — only while the
+            // query is empty, because that's the only time they fire.
+            let legend = if palette.bar_mode == BarMode::Command && palette.query.is_empty() {
+                let keys: Vec<String> = crate::palette::bar_quick_legend()
+                    .iter()
+                    .map(|(k, what)| format!("{k} {what}"))
+                    .collect();
+                format!("   {}", keys.join(" · "))
+            } else {
+                String::new()
+            };
             frame.render_widget(
-                Paragraph::new(Span::styled(prompt.clone(), style)),
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prompt.clone(), style),
+                    Span::styled(legend, Style::default().fg(Color::DarkGray)),
+                ])),
                 area,
             );
             // Set cursor at end of prompt
@@ -998,15 +1013,19 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Bar dropdown (grows upward from control bar) ──────────────────────────────
 
-fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rect) {
-    let palette = match app.palette.as_ref() {
-        Some(p) => p,
-        None => return,
-    };
+/// Returns the rect it drew (None when nothing rendered) so the cursor-anchored
+/// shell overlay can yield to it instead of drawing on top.
+fn render_bar_dropdown(
+    frame: &mut Frame,
+    app: &App,
+    pane_area: Rect,
+    bar_area: Rect,
+) -> Option<Rect> {
+    let palette = app.palette.as_ref()?;
 
     let items = palette.visible_items(&app.frecency);
     if items.is_empty() {
-        return;
+        return None;
     }
 
     let max_height = ((pane_area.height * app.tuning.panel_max_height_pct / 100) as usize)
@@ -1043,14 +1062,20 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
 
     let mut lines: Vec<Line> = Vec::new();
     for (idx, row) in items.iter().enumerate().skip(scroll).take(max_show) {
-        // Shell-first terminal composer: rows are SUGGESTIONS until the user
-        // arrows in — no highlighted row implies Enter won't fire one.
+        // Typing pre-selects the top match (registry-first Enter); with an
+        // empty query no row is highlighted until the user arrows in, and an
+        // unhighlighted Enter never fires a row.
         let selected = palette.navigated && idx == palette.selected;
         let item_bg  = if selected { Color::DarkGray } else { Color::Reset };
         let has_sub  = matches!(row.kind, ItemKind::Submenu(_));
 
-        // The row's REAL keybinding, looked up live — the passive teacher
-        // (§5.3: show the key on every menu row).
+        // Two teaching columns: the IN-BAR quick key first and chip-styled —
+        // it works right here, one keypress away — then the global chord,
+        // looked up live (§5.3: show the key on every menu row).
+        let quick = match &row.kind {
+            ItemKind::Run(a) => crate::palette::bar_quick_key(a),
+            ItemKind::Submenu(_) => None,
+        };
         let binding = match &row.kind {
             ItemKind::Run(a) => app.keys.binding_for(a).unwrap_or_default(),
             ItemKind::Submenu(_) => String::new(),
@@ -1063,7 +1088,18 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
         };
         let type_mark = if has_sub { " ▸" } else { "" };
 
+        let quick_span = match quick {
+            Some(q) => Span::styled(
+                format!(" {q} "),
+                Style::default()
+                    .fg(rgb(app.tuning.theme_chip_fg))
+                    .bg(rgb(app.tuning.theme_accent))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            None => Span::styled("   ", Style::default().bg(item_bg)),
+        };
         let line = Line::from(vec![
+            quick_span,
             Span::styled(
                 format!(" {:<w$}", binding, w = app.tuning.binding_badge_width),
                 Style::default()
@@ -1092,6 +1128,7 @@ fn render_bar_dropdown(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: 
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    Some(drop_rect)
 }
 
 // ── Proactive notice line (W6 watch verdicts) ────────────────────────────────
@@ -1211,7 +1248,7 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Shell-translate overlay (W3, anchored at the cursor — no eye-jump) ─────────
 
-fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
+fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect, avoid: Option<Rect>) {
     let query = app.palette.as_ref().map(|p| p.query.as_str()).unwrap_or("");
     let chipfg = rgb(app.tuning.theme_chip_fg);
     let accent = rgb(app.tuning.theme_accent);
@@ -1246,9 +1283,9 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
     } else if shell_mode {
         " type English, Enter translates → command · Esc".to_string()
     } else if navigated {
-        " Enter runs the highlighted command · type to go back to shell · Esc".to_string()
+        " Enter runs the highlighted command · no match → shell · Esc".to_string()
     } else {
-        " Enter = shell (English ok) · ↑↓ pick a Mars command · Esc".to_string()
+        " type a command (English ok) · ! pure shell · Esc".to_string()
     };
 
     let width = ((input.chars().count().max(hint.chars().count())) as u16)
@@ -1264,6 +1301,13 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect) {
 
     let input_rect = Rect { x, y: input_y, width, height: 1 };
     let hint_rect = Rect { x, y: hint_y, width, height: 1 };
+    // The dropdown outranks the anchored composer: when they'd collide (cursor
+    // near the bottom), skip the overlay entirely so the menu stays readable.
+    if let Some(d) = avoid {
+        if input_rect.intersects(d) || hint_rect.intersects(d) {
+            return;
+        }
+    }
     frame.render_widget(Clear, input_rect);
     frame.render_widget(Clear, hint_rect);
     frame.render_widget(
@@ -1340,12 +1384,16 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         }
     }
     // A pending selection-refactor takes the confirm slot (Enter replaces the
-    // selection reversibly).
+    // selection — or inserts at the cursor when nothing was selected — reversibly).
     if app.refactor_replacement.is_some() {
         let n = app.refactor_replacement.as_deref().map(|c| c.lines().count()).unwrap_or(0);
+        let verb = match app.refactor_target {
+            Some((_, s, e)) if s == e => "insert at the cursor",
+            _ => "replace the selection",
+        };
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(
-            format!(" ▶ Enter to replace the selection ({n} lines) · C-l cancel "),
+            format!(" ▶ Enter to {verb} ({n} lines) · C-l cancel "),
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
         )));
     } else if let Some(d) = &app.agent_directive {
@@ -1373,8 +1421,10 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         )));
     }
 
-    // Adaptive height: grow to the content, cap at panel_max_height_pct.
-    let max_h = ((pane_area.height as u32 * app.tuning.panel_max_height_pct as u32 / 100)
+    // Adaptive height: grow to the content, cap at ask_panel_max_pct — the
+    // chat hugs the bottom of the screen and never buries the workspace;
+    // older turns are one scroll (Up / wheel) away, not more panel.
+    let max_h = ((pane_area.height as u32 * app.tuning.ask_panel_max_pct as u32 / 100)
         as u16)
         .max(3);
     let content_h = lines.len() as u16 + 1; // +1 for top border

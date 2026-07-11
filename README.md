@@ -97,8 +97,10 @@ The daily rhythm:
    first, duration up front. Press **`C-x g`** for the full **Away Digest**: a
    sectioned timeline (✗ needs you / ✓ done / context) with each run's duration,
    re-summonable anytime. Nothing changed → no briefing.
-4. **Finish for real**: `C-x C-c` inside the session quits it (with an
-   are-you-sure prompt if anything is unsaved), or `mars kill work` from outside.
+4. **Finish for real**: quitting (`C-x C-c`) just detaches — a session only ends
+   when you *kill* it: **Kill session** in the command bar (confirm-gated),
+   `mars kill work` from outside, or `mars killall` to sweep every session and
+   start fresh.
 
 `mars ls` tells you the state at a glance:
 
