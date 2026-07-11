@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.3.0
+
+The agent grows a memory and a spine: provider cascade with tiered routing,
+always-on prompt redaction, streaming replies, a work journal that infers what
+you're working on — and quality-of-life across the board: quit now detaches,
+the command bar fires the top match as you type, and Claude Code scrolls
+correctly inside a pane.
+
+> **Beta:** the AI/agent features and the SSH/remote path remain beta. The core
+> editor, multiplexer, and sessions are stable.
+
+### Added
+- **Provider cascade**: on a 429 the call rotates across every configured
+  provider (paid-first) and escalates one model tier when a self-check fails —
+  pinned models (`MARS_LLM_MODEL`/`MARS_LLM_URL`) opt out. A **model-tier ring**
+  routes each task (naming, missions, translate, ask) to the right size model.
+- **Streaming replies**: `?` answers render token-by-token in a live `mars ›`
+  turn (all direct providers; reasoning `<think>` blocks are held back, never
+  retracted).
+- **Memory hygiene**: an always-on redaction pass strips credentials
+  (`sk-…`, `ghp_…`, `AKIA…`, JWTs, `Bearer` values, URL passwords) from every
+  prompt; `~/.mars/denylist` adds your own strings; retrieval ranking now
+  weights recency and working directory. New command-bar rows: *Open command
+  memory*, *Forget all commands* (confirm-gated), *Open redaction denylist* —
+  the stores are plain files you can read and edit.
+- **Memory-free build**: `cargo build --no-default-features` produces a
+  terminal with the whole retrieval subsystem compiled out (same selfcheck).
+- **Work journal + missions**: watch verdicts persist to `~/.mars/worklog.jsonl`;
+  a background inference distills them into a one-line mission shown by
+  `mars ls` in a dedicated, wrapped SUMMARY column. Reattaching greets you with
+  a deterministic "Where you left off" briefing; *Show all notices* expands the
+  pending notice queue into one digest.
+- **Unified `mars ls`**: local sessions and remote fleet hosts in one numbered
+  table — shared resolver (ordinal/name/prefix), live status pushed home by
+  remote agents.
+- **Command bar**: in-bar quick keys (`!` `?` `@`) taught as chips and a legend;
+  typing pre-selects the top match so Enter fires it immediately; no match
+  falls through to natural language (shell-translate in terminals, a grounded
+  ask elsewhere). With a selection, "translate this to french" proposes a
+  replacement; with just a cursor, "write a limerick about potatoes" inserts at
+  point — both confirm-gated, both one undo step.
+- **Ask panel**: capped to the bottom ~30% of the workspace
+  (`ask_panel_max_pct`), scrollable through past turns with Up/Down or the
+  mouse wheel.
+- **Quit = detach**: `C-x C-c` leaves the session running; *Kill session*
+  (confirm-gated) and `mars kill` end it. **`mars killall`** ends every session
+  and starts fresh (refuses to run from inside a session).
+- **Prompts as Markdown**: every model instruction ships as an editable
+  `src/prompts/*.md`, embedded at compile time.
+
+### Changed / fixed
+- **Terminal wheel dispatch** (tmux parity): scrolling works inside Claude
+  Code, `less`, and vim — alternate-screen apps get arrow keys, mouse-protocol
+  apps get encoded wheel events, everything else scrolls Mars scrollback.
+- The cursor-anchored composer overlay yields to the command-bar dropdown when
+  the two would overlap.
+- `mars llm-stats` profiles the LLM debug log per task×model to right-size
+  models per call.
+- Latent task-tag mismatch fixed: auto-name/session-name calls now actually
+  route through their intended (cheaper) model tier.
+
 ## 0.2.0
 
 The first substantial release since 0.1.0 — remote agents, a unified terminal
