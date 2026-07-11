@@ -1,21 +1,19 @@
 \begin{abstract}
-This paper presents MARS, a Memory-Augmented Rust Shell: a terminal editor,
-multiplexer, and LLM agent that ship as a single binary. The assistant failures that
-matter most at a terminal are information gaps, not capability gaps: ``run the unit
-tests'' is \code{cargo test} in this project and \code{npm test} in the next, and no
-amount of model scale can recover which one the user means. MARS closes the gap by
-living where the information lives. It captures the commands the user actually accepts,
-retrieves them with plain BM25 over local files (no embeddings, no data leaving the
-machine), and injects them into the prompt. Under a leakage-controlled protocol in
-which the store holds only \emph{paraphrases} of earlier requests, this lifts a small
-model (\code{claude-haiku-4-5}) from 38\% (9/24) to 96\% (23/24) on project-specific
-commands, one short of the verbatim-lookup ceiling: generalization across a paraphrase
-gap, not lookup of a planted answer. Pointed at the tool's
-own documentation, the same mechanism raises accuracy on questions about the tool from
-43\% to 76\% overall, with the decisive gain on plain-English reconfiguration (17\% to
-93\%); the residual failures are informative, arising exactly where a strong parametric
-prior overrides retrieved specifics. We describe the registry-grounded directive protocol, the corrective-memory loop,
-the architecture that keeps the agent present across machines while the API key stays
-home, and a self-instrumenting evaluation built from the agent's own debug log. MARS
-is open source (MIT); a screencast accompanies this paper.
+This paper presents MARS, a terminal editor, multiplexer, and LLM agent
+that ship as a single binary. Because the agent is embedded where the user works, it has
+access to two sources of context that a cloud assistant cannot reach: the user's own
+history of commands, and the tool's own documentation and configuration registry. MARS
+retrieves from both with plain lexical search (BM25 over local files, with no embeddings
+and no data leaving the machine) and injects the results into the model's prompt. In the
+constrained domain of the terminal this simple mechanism is unusually effective. Under a
+leakage-controlled protocol in which the memory store holds only \emph{paraphrases} of
+the user's earlier requests, retrieval raises the accuracy of a small, inexpensive model
+(claude-haiku-4-5) on project-specific commands from 38\% to 96\%, so a win requires the
+retriever to bridge a paraphrase gap rather than look up a planted answer. Pointed at the
+tool's own documentation, the same mechanism raises self-knowledge accuracy from 43\% to
+76\%, and accuracy at mapping a plain-English request to the correct configuration
+setting from 17\% to 93\%. We describe the directive protocol that grounds the agent in
+the editor's action registry, the corrective-memory loop, the architecture that keeps the
+agent and the user's API key available across machines, and a self-instrumenting
+evaluation built from the agent's own debug log.
 \end{abstract}

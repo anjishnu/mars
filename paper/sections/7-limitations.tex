@@ -1,22 +1,18 @@
 \section*{Limitations}
 
-Five limitations bound these results. First, the gold sets, though frozen before any
+Four limitations bound these results. Firstly, the gold sets, though frozen before any
 run, are modest (112 and 82 items), so the personalized results should be read as
-evidence that memory closes this gap on this set, not as a claim at scale. Second,
+evidence that memory closes this gap on this set, not as a claim at scale. Secondly,
 only one model is under test, so the numbers characterize the small, inexpensive regime
 MARS targets rather than models broadly; whether paraphrase generalization holds for a
-larger or reasoning model is an open question. Third, the judge (\code{claude-sonnet-5}) is
+larger or reasoning model is an open question. Thirdly, the judge (claude-sonnet-5) is
 stronger than the model under test but comes from the same model family, so a
 family-level preference cannot be ruled out, and an LLM judge carries noise in any case;
-the appendix quantifies the observed slack at a few points in either direction. Fourth, the
-corrective-memory store contained only the 24 seeded pairs during the experiment. A
+the appendix quantifies the observed slack at a few points in either direction. Finally,
+the corrective-memory store contained only the 24 seeded pairs during the experiment. A
 long-lived store holds hundreds of entries, and although the terminal domain's lexical
 stability favors BM25 (\S\ref{sec:whysimple}), we have not measured retrieval precision
-against a realistic population of distractors. Fifth, the evaluation is offline against
-frozen gold sets; no longitudinal or in-the-wild usage study is reported. The scoring
-could also be tightened without touching the system: placeholder-normalized scoring and
-distinct marking of honest abstentions would remove a band of judge slack the appendix
-quantifies.
+against a realistic population of distractors.
 
 \section*{Ethics Statement}
 
@@ -24,7 +20,7 @@ MARS reads the user's shell history (\code{\$HISTFILE}) and stores accepted comm
 a plaintext local file (\code{\char`\~/.mars/cmd\_memory}). Shell history can contain
 secrets: tokens pasted into commands, passwords embedded in URLs, internal hostnames.
 Retrieval could therefore inject such strings into a prompt bound for a cloud provider.
-Every memory and history line runs through a redaction filter before prompt
+Every memory and history line is passed through a redaction pass before prompt
 injection (known credential prefixes, \code{password=}/\code{token:}-style values, URL
 credentials, plus a user-editable denylist at \code{\char`\~/.mars/denylist}); the store
 itself stays intact and user-editable, in-editor actions expose, edit, and erase it, and
