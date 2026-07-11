@@ -2,38 +2,32 @@
 \label{sec:system}
 
 Local memory is only useful if the agent is reliably present where the memory lives,
-across disconnects and on machines the user does not own. The architecture exists to
-guarantee that presence.
+across disconnects and on machines the user does not own; the architecture guarantees
+that presence.
 
 \paragraph{One binary, one core.}
-MARS is a single Rust binary whose application core owns all state (buffers, panes,
-terminals, the agent conversation, the memory stores) and never touches a TTY:
-input arrives as source-neutral events, and rendering is a stateless projection onto a
-\code{ratatui} backend. The same core runs unmodified as a standalone terminal, a
-headless daemon, and a test backend, which lets the evaluation drive the real system
-with no mocks (\S\ref{sec:eval}).
+MARS is a single Rust binary whose application core owns all state and never touches a
+TTY: input arrives as source-neutral events, and rendering is a stateless projection
+onto \code{ratatui} (a Rust terminal-UI library). The same core runs unmodified as a
+standalone terminal, a headless daemon, and a test backend, so the evaluation drives
+the real system with no mocks (\S\ref{sec:eval}).
 
 \paragraph{A persistent daemon.}
-We implemented persistence as a process split rather than as a save-and-restore feature.
-A server process runs the entire application headless and emits the editor's own ANSI
-byte stream over a Unix socket; a thin client owns the real terminal and pumps bytes. We
-chose to have the server render ANSI rather than define a structured wire protocol
-because it reuses the entire rendering pipeline; the cost is a wire that carries
-rendered frames rather than semantic events.
-The benefit for memory is direct: because the core keeps running with no client attached,
-the command store and the user's session survive a closed laptop, and an overnight run
-can be watched and summarized for the user's return.
+We implemented persistence as a process split rather than as a save-and-restore
+feature: a server runs the entire application headless and emits the editor's own ANSI
+byte stream over a Unix socket; a thin client owns the real terminal and pumps bytes.
+The benefit for memory is direct: because the core keeps running with no client
+attached, the command store and the user's session survive a closed laptop, and an
+overnight run can be watched and, on request, summarized for the user's return.
 
 \paragraph{Classifier-free routing.}
 The command bar routes on a \emph{sigil} rather than a learned classifier: the first
 character of the input names the target namespace. \code{!} runs a shell command,
 \code{?} asks the agent, \code{@} opens the file navigator, and plain text
 fuzzy-searches the action registry. Plain text that matches nothing in the registry
-falls back to the agent: the bar treats it as a natural-language command request and
-hands it to the translator of \S\ref{sec:translate}, whose proposal the user confirms
-before it runs. Routing remains deterministic under the fallback, triggered by a
-registry miss rather than a classifier score, so there is no routing model to train or
-explain.
+falls back to the translator of \S\ref{sec:translate}, whose proposal the user
+confirms before it runs. The fallback stays deterministic, triggered by a registry
+miss rather than a classifier score, so there is no routing model to train or explain.
 
 \paragraph{The key never leaves home.}
 \emph{A secret is a fact about the user, not the machine, and should live in one place.}
@@ -41,14 +35,48 @@ The implementation is a broker. A home-side daemon (\code{mars keyd})
 holds the key; when the user runs \code{mars ssh}, MARS reverse-forwards the broker's
 socket over the SSH connection, and the agent on the remote box makes its model calls by
 proxying each request home, where the broker injects the credential and streams the
-completion back. The key never lands on the remote machine, on disk, in the environment,
-or in memory, so a compromised box has nothing to exfiltrate. The remaining exposure is
-the open tunnel: a compromised box can use the credential while the tunnel is up, though
-it cannot steal it; access ends when the tunnel closes.
+completion back. The key never lands on the remote machine at all, so a compromised
+box has nothing to exfiltrate; the remaining exposure is the open tunnel, which a
+compromised box can use but not steal from, and which closes with the connection.
 
 \paragraph{The log is the benchmark.}
-Running with \code{--llm-debug} appends one JSON line per model call (task, model, real
-token counts, latency, and the full prompt and reply) to a local stream, and records
+Running with \code{-{}-llm-debug} appends one JSON line per model call (task, model,
+token counts, latency, full prompt and reply) to a local stream, and records
 whether each suggestion was accepted, edited, or rejected. The log is both a cost
 profile the user can inspect and, as \S\ref{sec:eval} shows, the source of every prompt,
 context, and token count the evaluation reports: the system instruments itself.
+
+\paragraph{Demonstration.}
+The demo walks attendees through the loop the paper measures, live: install MARS with
+one \code{cargo} command; reject a wrong translation, correct it, then issue a
+paraphrase of the same request and watch the corrected command return from memory; ask
+``how do I split the screen?'' and retune the accent color in plain English, both
+answered from retrieved documentation; detach and reattach a running session; and
+open \code{mars ssh} with the key staying on the presenter's laptop, the debug log
+streaming every call in a side pane. The screencast follows the same script.
+
+% --- Screenshots (add \includegraphics when the images are ready) -------------
+% \begin{figure}[t]
+% \centering
+% \includegraphics[width=\columnwidth]{fig2-command-bar.png}
+% \caption{The command bar mid-translation. The user typed a plain-English request;
+% MARS retrieved their past accepted commands as exemplars (debug pane, right) and
+% rendered the proposed command at the cursor, where it waits behind the same
+% confirmation gate as any keystroke: run, edit, or discard.}
+% \label{fig:commandbar}
+% \end{figure}
+%
+% \begin{figure}[t]
+% \centering
+% \includegraphics[width=\columnwidth]{fig3-reconfigure.png}
+% \caption{Self-reconfiguration from retrieved documentation. ``Make the accent
+% orange'' resolves to the \code{theme\_accent} knob in \code{tuning.json} and is
+% presented as a confirmable edit rather than fired directly.}
+% \label{fig:reconfigure}
+% \end{figure}
+%
+% Alternative Figure 3 caption if the remote workflow is used instead:
+% \caption{\code{mars ssh} to a remote machine. Model calls made remotely are proxied
+% through the reverse-forwarded socket to the home broker, which injects the API key;
+% the key never lands on the remote box.}
+% ------------------------------------------------------------------------------

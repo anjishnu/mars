@@ -1,22 +1,12 @@
 \section{Future Work}
 \label{sec:future}
 
-\emph{Skill learning.} MARS logs each accepted command with its session and directory,
-so repeated sequences (build, test, push, notify) are visible in the store.
-We plan to mine them into editable procedures the user can invoke and the agent can
-propose, treating skill synthesis as the plan-then-execute decomposition of
-long-horizon agents \citep{erdogan2025planandact}.
-
-\emph{Workflow understanding.} After the text of commands comes the shape of work:
-recognizing a training run or debug session, predicting the next step, and flagging
-deviation, the terminal's analogue of GUI agents' state tracking \citep{wu2025osatlas}.
-
-\emph{Richer memory.} Semantic retrieval becomes worth its cost once skills widen the
-paraphrase gap BM25 bridges; the broker of \S\ref{sec:system} can carry the memory
-store too, so context follows the user across machines; and a redaction pass adds
-hygiene.
-
-\emph{A learning system.} The log records which model handled each task and whether the
-result was accepted: learned routing can replace the static tier map, and the
-watch capability can turn proactive, summarizing an overnight run into memory
-unprompted.
+Four directions follow from the substrate: mining repeated command sequences into
+editable procedures, treating skill synthesis as the plan-then-execute decomposition
+of long-horizon agents \citep{erdogan2025planandact}; recognizing the shape of work
+above the text of commands, a training run or a debug session, and flagging deviation
+\citep{wu2025osatlas}; semantic retrieval and a broker-carried store
+(\S\ref{sec:system}) once mined skills widen the paraphrase gap BM25 bridges, with
+the redaction pass (Ethics Statement) growing toward learned secret detection; and
+learned routing from the log's per-task accept/reject record, letting the watch
+capability summarize an overnight run into memory unprompted.

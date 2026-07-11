@@ -1,7 +1,7 @@
 \begin{figure*}[t]
 \centering
 \begin{tikzpicture}[
-  scale=0.70, transform shape,
+  scale=0.46, transform shape,
   font=\footnotesize,
   >={Latex[length=2mm]},
   term/.style={draw, rounded corners, align=center, minimum width=23mm, minimum height=11mm, fill=black!4},
@@ -33,7 +33,7 @@
       node[midway, above, el] {NL request / question};
 \draw[<-] ([yshift=-2.4mm]term.east) -- ([yshift=-2.4mm]core.west)
       node[midway, below, el] {directive:\\ \code{RUN}/\code{TYPE}/\code{OPEN}\\ (registry-validated)};
-\draw[->, dashed] (term.north) to[bend left=22] node[midway, above, note] {sees the panes (sight)} (core.north west);
+\draw[->, dashed] (term.north) to[bend left=22] node[midway, above, note] {screen context} (core.north west);
 
 % --- core <-> memory (BM25) ---
 \draw[<->] (core.south) -- (m1.north);
@@ -53,8 +53,7 @@
 
 \end{tikzpicture}
 \caption{MARS retrieves with lexical BM25 from two local stores (M1, the user's past
-commands; M2, the tool's own docs and registry) and injects the results as few-shot
-exemplars. Only the model call leaves the machine; on a remote box even the key stays
-home, and every call is logged.}
+commands; M2, the tool's own docs and registry) and injects the results into the
+prompt. Only the model call leaves the machine; even the key stays home.}
 \label{fig:arch}
 \end{figure*}
