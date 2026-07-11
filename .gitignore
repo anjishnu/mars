@@ -35,9 +35,12 @@ coverage/
 .env.local
 # Private: forward-looking product strategy + vision docs — kept local, not published
 design_ideas/
-eval/results/
+# Research artifacts (EMNLP paper + experiment harness/results) — they live on
+# the naacl-research branch and local disk, not in the product mainline
+paper/
+eval/
+final_results.md
 
 # Python
 __pycache__/
 *.pyc
-paper/main.blg
