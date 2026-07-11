@@ -208,7 +208,7 @@ The primary test suite is `mars --selfcheck` (`main.rs`) — a headless run agai
 `handle_mouse`/`paste_text` exactly as a live terminal would, with **no mocks**: it
 spawns real PTYs, runs a real session daemon over a real Unix socket, and (when
 `GEMINI_API_KEY` etc. is set) can hit a real LLM endpoint via `--ask`. As of this
-writing it covers 28 areas end-to-end, including a fully headless test of session
+writing it covers ~90 areas end-to-end, including a fully headless test of session
 detach/reattach, PTY survival across disconnect, client takeover, and version
 handshake refusal.
 
