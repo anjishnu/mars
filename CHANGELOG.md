@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+### Added
+- **`mars ssh` lands in a mars session**: instead of a bare login shell, you
+  arrive inside a remote mars session — the most recent live one, or a fresh
+  `main` — with the auth tunnel exported to the session daemon and every shell
+  it spawns. Detaching (`C-x C-c`) ends the ssh and returns you to your home
+  terminal, tmux-style. Plain `ssh` remains the way to get a bare shell.
+
 ## 0.3.1
 
 Hardening release: `mars ssh` now recovers from the leftovers of a dead session
