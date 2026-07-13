@@ -86,8 +86,13 @@ broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
              a -R unix-socket forward over a leftover file and the client-side
              StreamLocalBindUnlink option only applies to local forwards
              (server-side sshd_config is the only other cure, which we can't
-             assume). The install nudge probes ~/.cargo/bin and ~/.local/bin
-             explicitly: `command -v` only sees sshd's bare non-login PATH.
+             assume). The socket name carries the HOME uid, which rarely
+             matches the remote's, so detection globs any live
+             /tmp/mars-auth-*.sock (own uid preferred). The install nudge
+             probes ~/.cargo/bin and ~/.local/bin explicitly (`command -v`
+             only sees sshd's bare non-login PATH), and the session opens with
+             an honest tunnel-state line — success must not be
+             indistinguishable from plain ssh.
 prompts.rs   Every model-facing instruction as editable Markdown in src/prompts/
              (include_str!-embedded, so the single binary still ships whole);
              {name} placeholders substituted at call sites.
