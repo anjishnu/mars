@@ -295,6 +295,14 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                 if let Err(e) = t.draw(|f| ui::render(f, &mut app)) {
                     debug_log(&format!("srv: draw error: {e}"));
                 }
+                // A copy queues an OSC 52 escape: append it raw after the
+                // frame so it reaches the client's real terminal (and through
+                // ssh, the clipboard of the machine the user is sitting at).
+                if let Some(osc) = app.take_osc() {
+                    let w = t.backend_mut(); // CrosstermBackend forwards Write to the FrameWriter
+                    let _ = w.write_all(osc.as_bytes());
+                    let _ = w.flush();
+                }
             }
         }
 
@@ -921,20 +929,67 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
     Err(anyhow!("rename did not complete — see: mars ls"))
 }
 
-/// `mars killall`: end EVERY live session daemon (each autosaves first).
-/// `list_sessions` sweeps stale sockets as a side effect, so this leaves a
-/// clean slate — the `--killall` startup path runs it before a fresh session.
-pub fn killall_main() -> Result<()> {
+/// `mars killall`: the reset button. End EVERY live session daemon (each
+/// autosaves first), and with `force` (the CLI path) also put down anything
+/// that didn't answer its socket, shut down lingering ssh ControlMasters and
+/// the key broker, and sweep the stale sockets they leave behind. Agentic
+/// memory (cmd_memory, worklog, mission, denylist, fleet) is untouched, and
+/// no new session is started. `force: false` is for the selfcheck, whose
+/// TMPDIR isolation a process-wide pkill would not respect.
+pub fn killall_main(force: bool) -> Result<()> {
     let mut ended = 0;
     for (name, alive, _) in list_sessions()? {
         if alive {
-            kill_main(&name)?;
+            let _ = kill_main(&name); // graceful: autosave, then exit
             ended += 1;
         }
     }
-    if ended == 0 {
-        println!("no live sessions to kill");
+    if !force {
+        if ended == 0 {
+            println!("no live sessions to kill");
+        }
+        return Ok(());
     }
+    // Anything still standing didn't answer its socket — put it down hard.
+    for pat in ["mars --server", "mars keyd"] {
+        let _ = std::process::Command::new("pkill")
+            .arg("-f").arg(pat)
+            .status();
+    }
+    // Shut down ssh ControlMasters cleanly, then sweep their socket files —
+    // a leftover master ambushes the next `mars ssh` with a broken pipe.
+    if let Some(dir) = crate::broker::broker_socket_path().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                if !e.file_name().to_string_lossy().starts_with("cm-") {
+                    continue;
+                }
+                let _ = std::process::Command::new("ssh")
+                    .arg("-O").arg("exit")
+                    .arg("-o").arg(format!("ControlPath={}", e.path().display()))
+                    .arg("killall-sweep")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        let _ = std::fs::remove_file(dir.join("auth.sock")); // keyd is down
+    }
+    // Dead forwarded sockets in /tmp (this box may itself be someone's remote).
+    let _ = crate::broker::find_live_auth_sock(std::path::Path::new("/tmp")); // probe = sweep dead ones
+    // Leftover session sockets of force-killed daemons.
+    if let Ok(entries) = std::fs::read_dir(socket_dir()?) {
+        for e in entries.flatten() {
+            if e.path().extension().and_then(|x| x.to_str()) == Some("sock") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    println!(
+        "killall: {ended} session(s) ended gracefully; force-swept daemons, \
+         ssh masters, and stale sockets. Memory files untouched."
+    );
     Ok(())
 }
 

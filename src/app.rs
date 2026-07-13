@@ -226,6 +226,11 @@ pub struct App {
     pub cursor_screen: Option<(u16, u16)>,
     // ── System clipboard (None if unavailable, e.g. headless) ──
     clipboard: Option<arboard::Clipboard>,
+    /// OSC 52 escape queued by a copy, drained by the driver loop into the
+    /// real terminal — the only clipboard that works when the App runs in a
+    /// remote daemon (arboard writes to the daemon's machine, which over ssh
+    /// is the wrong one, or none at all).
+    pending_osc: Option<String>,
     // ── Behavioral tuning knobs (~/.config/mars/tuning.json) ──
     pub tuning: Tuning,
     /// Show the MARS banner in the empty scratch until the first keypress.
@@ -375,6 +380,7 @@ impl App {
             } else {
                 arboard::Clipboard::new().ok()
             },
+            pending_osc: None,
             tuning: tuning::load(),
             show_splash: file.is_none(),
             startup_cwd: file
@@ -1007,10 +1013,27 @@ impl App {
     /// Every kill/copy lands in the kill-ring AND the system clipboard —
     /// copy in Ares, paste in the browser.
     fn push_kill(&mut self, text: String) {
-        if let Some(cb) = self.clipboard.as_mut() {
-            let _ = cb.set_text(text.clone());
-        }
+        self.clipboard_export(&text);
         self.kill_ring.push(text);
+    }
+
+    /// Set the system clipboard by every channel available: arboard for the
+    /// local case, and an OSC 52 escape for the terminal itself — which rides
+    /// the rendered output through the session socket and ssh, so a copy in a
+    /// remote daemon lands on the clipboard of the machine the user is
+    /// actually sitting at.
+    fn clipboard_export(&mut self, text: &str) {
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(text.to_string());
+        }
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        self.pending_osc = Some(format!("\x1b]52;c;{}\x07", B64.encode(text.as_bytes())));
+    }
+
+    /// Drain the queued OSC 52 escape — called by the driver loops after each
+    /// draw, written raw to whatever the frames themselves go to.
+    pub fn take_osc(&mut self) -> Option<String> {
+        self.pending_osc.take()
     }
 
     /// Insert a block of text at the cursor (one undo chunk, replaces selection).
@@ -4391,6 +4414,12 @@ impl App {
             if self.needs_redraw {
                 terminal.draw(|f| ui::render(f, self))?;
                 self.needs_redraw = false;
+                if let Some(osc) = self.take_osc() {
+                    use std::io::Write as _;
+                    let w = terminal.backend_mut(); // CrosstermBackend forwards Write
+                    let _ = w.write_all(osc.as_bytes());
+                    let _ = w.flush();
+                }
             }
 
             match events.recv_timeout(Duration::from_millis(self.tuning.poll_interval_ms)) {
@@ -4578,11 +4607,10 @@ impl App {
                         self.term_selection_text(&sel)
                     };
                     if !text.is_empty() {
-                        if let Some(cb) = self.clipboard.as_mut() {
-                            let _ = cb.set_text(text.clone());
-                        }
+                        self.clipboard_export(&text);
                         self.kill_ring.push(text.clone());
                         self.status_msg = Some(format!("Copied {} chars", text.chars().count()));
+                        self.needs_redraw = true;
                     }
                 }
             }

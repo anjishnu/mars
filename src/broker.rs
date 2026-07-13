@@ -452,11 +452,19 @@ fn ensure_keyd(home_sock: &std::path::Path) -> bool {
 /// dead session — it would make the interactive ssh's `-R` bind fail — then
 /// stage the embedded installer. The sweep is `;`-separated so it runs even if
 /// the installer write fails and the exit status stays that of the `&&` chain
-/// (which is what `pushed` reads).
-pub fn remote_prelude_cmd(remote_sock: &str) -> String {
+/// (which is what `pushed` reads). `sweep` must be false when a live
+/// ControlMaster is being reused: its previous `-R` forward survives on the
+/// master, still bound to the existing socket inode, so removing the file
+/// would orphan a working tunnel — and the re-requested forward is a mux
+/// no-op that never re-binds the path.
+pub fn remote_prelude_cmd(remote_sock: &str, sweep: bool) -> String {
+    let rm = if sweep {
+        format!("rm -f {remote_sock}; ")
+    } else {
+        String::new()
+    };
     format!(
-        "rm -f {remote_sock}; \
-         mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh"
+        "{rm}mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh"
     )
 }
 
@@ -526,6 +534,22 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
         }
     }
 
+    // Is a live master already serving this host? Then its previous -R forward
+    // is still up (mux forwards live as long as the master), so the sweep and
+    // the forward request must both be skipped: rm would delete the socket out
+    // from under the live listener, and the re-request is a mux no-op that
+    // would never re-bind the path it just lost.
+    let master_alive = std::process::Command::new("ssh")
+        .arg("-O").arg("check")
+        .arg("-o").arg(format!("ControlPath={}", control.display()))
+        .args(&extra)
+        .arg(&host)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
     // Drop the embedded installer at ~/.mars/install.sh over the SAME connection,
     // BEFORE the interactive session: this first ssh performs the (single)
     // authentication and persists the ControlMaster, which the interactive ssh
@@ -544,7 +568,7 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
             .arg("-o").arg(format!("ControlPath={}", control.display()))
             .args(&extra)
             .arg(&host)
-            .arg(remote_prelude_cmd(&remote_sock))
+            .arg(remote_prelude_cmd(&remote_sock, !master_alive))
             .stdin(std::process::Stdio::piped())
             .spawn()
             .ok();
@@ -566,14 +590,17 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     }
 
     let remote_cmd = remote_session_cmd(&remote_sock, pushed);
-    let status = std::process::Command::new("ssh")
-        .arg("-o").arg("StreamLocalBindUnlink=yes")
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-o").arg("StreamLocalBindUnlink=yes")
         .arg("-o").arg("ControlMaster=auto")
         .arg("-o").arg("ControlPersist=60s")
         .arg("-o").arg("ServerAliveInterval=30")
         .arg("-o").arg("ServerAliveCountMax=3")
-        .arg("-o").arg(format!("ControlPath={}", control.display()))
-        .arg("-R").arg(format!("{remote_sock}:{}", home_sock.display()))
+        .arg("-o").arg(format!("ControlPath={}", control.display()));
+    if !master_alive {
+        cmd.arg("-R").arg(format!("{remote_sock}:{}", home_sock.display()));
+    }
+    let status = cmd
         .args(&extra)
         .arg("-t")
         .arg(&host)
