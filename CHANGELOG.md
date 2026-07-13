@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.3
+
+### Added
+- **Copy that works over ssh (OSC 52)**: every copy — editor kills, `C-c`,
+  terminal mouse selection — now also emits an OSC 52 escape to the real
+  terminal, so text copied inside a remote mars session lands on the clipboard
+  of the machine you're sitting at. (Previously the daemon wrote to the remote
+  box's clipboard, which over ssh is the wrong machine — usually a headless one
+  with no clipboard at all.) Requires a terminal that supports OSC 52: iTerm2
+  (enable "Applications in terminal may access clipboard"), kitty, WezTerm,
+  Alacritty, Ghostty. macOS Terminal.app does not support it.
+- **`mars killall` is now the reset button**: gracefully ends every session
+  (autosaving), force-kills unresponsive daemons and the key broker, shuts down
+  lingering ssh ControlMasters, and sweeps every stale socket. Memory files
+  (command memory, worklog, denylist) are untouched, and it no longer starts a
+  new session afterwards.
+
+### Fixed
+- **Reconnecting no longer breaks the agent tunnel**: reattaching while the ssh
+  ControlMaster was still warm deleted the live forwarded socket (the sweep ran
+  unconditionally) and the re-requested forward was a mux no-op — leaving the
+  remote agent with "no API key". The sweep and the forward request now only
+  run on a fresh connection; a reused master keeps its working tunnel.
+
 ## 0.3.2
 
 ### Added

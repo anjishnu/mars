@@ -64,7 +64,10 @@ SESSIONS  (work survives closed windows and disconnects)
                                  (aliases: list, --list)
   mars rename <old> <new>        rename a running session
   mars kill <name>               end + delete a session (autosaves first)
-  mars killall                   end ALL sessions, then start fresh
+  mars killall                   the reset button: end every session (autosaved)
+                                 and mars process, shut down ssh masters + the
+                                 key broker, sweep stale sockets. Memory files
+                                 are kept; no new session is started.
                                  (alias: --killall)
 
   Inside a session:  quitting (C-x C-c) just DETACHES — the session lives on;
@@ -226,7 +229,7 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("usage: mars kill <name>   (see: mars ls)"))?;
             return session::kill_main(&name);
         }
-        // Clean slate: end every existing session, then start a fresh one.
+        // The reset button: end everything, sweep stale sockets, start nothing.
         Some("killall") | Some("--killall") => {
             if let Ok(session) = std::env::var("MARS_SESSION") {
                 anyhow::bail!(
@@ -234,9 +237,7 @@ fn main() -> Result<()> {
                      Detach first (C-x C-c), then run: mars --killall"
                 );
             }
-            session::killall_main()?;
-            let name = session::next_auto_name()?;
-            return session::session_main(&name, args.next());
+            return session::killall_main(true);
         }
         Some("rename") | Some("--rename") => {
             let (old, new) = (args.next(), args.next());
@@ -1058,6 +1059,18 @@ fn selfcheck() -> Result<()> {
     }
     app.handle_key(kc(KeyCode::Char('c')))?; // C-c → copy selection
     assert_eq!(app.kill_ring.last().map(String::as_str), Some("hello"), "C-c did not copy");
+    // Every copy queues an OSC 52 escape for the real terminal — the only
+    // clipboard channel that survives the daemon/ssh hop.
+    {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let osc = app.take_osc().expect("copy did not queue an OSC 52 escape");
+        let b64 = osc
+            .strip_prefix("\x1b]52;c;")
+            .and_then(|s| s.strip_suffix('\x07'))
+            .expect("OSC 52 escape malformed");
+        assert_eq!(B64.decode(b64).unwrap(), b"hello", "OSC 52 payload mismatch");
+        assert!(app.take_osc().is_none(), "take_osc did not drain");
+    }
     app.handle_key(kc(KeyCode::Char('e')))?; // line end
     app.handle_key(kc(KeyCode::Char('v')))?; // C-v → paste
     term.draw(|f| ui::render(f, &mut app))?;
@@ -2013,7 +2026,7 @@ fn selfcheck() -> Result<()> {
                 }
                 assert!(up, "killall-test server '{n}' did not come up");
             }
-            session::killall_main()?;
+            session::killall_main(false)?;
             for s in servers { s.join().expect("killall-test server panicked")?; }
             for n in &names {
                 assert!(!session::socket_path(n)?.exists(), "killall left the socket for '{n}'");
@@ -2573,11 +2586,16 @@ fn selfcheck() -> Result<()> {
     //      bind over a leftover; client-side StreamLocalBindUnlink only covers
     //      local forwards), and the install check must probe the real install
     //      destinations, not just sshd's bare non-login PATH.
-    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock");
+    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true);
     let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
         .expect("prelude lost the stale-socket sweep (or its ; separator)");
     assert!(sweep < prelude.find("install.sh").expect("prelude lost the installer drop"),
         "sweep must precede the installer drop");
+    // Reused ControlMaster ⇒ its old -R forward is still live on the existing
+    // socket inode; sweeping would orphan a working tunnel.
+    let reuse = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", false);
+    assert!(!reuse.contains("rm -f"), "master-reuse prelude must NOT sweep the live socket");
+    assert!(reuse.contains("install.sh"), "master-reuse prelude lost the installer drop");
     let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
     for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
                    "export MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
