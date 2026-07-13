@@ -91,9 +91,12 @@ LLM DEBUG  (calibrate prompts / right-size models per call)
                                  for translate; docs = Mars's own docs for ask
 
 REMOTE  (BETA — the agent works on every box; the key never leaves home)
-  mars ssh <host> [ssh args]     ssh in with the auth socket forwarded; the
-                                 remote agent asks home, no key on the box.
-                                 Auto-starts the key broker if it isn't running.
+  mars ssh <host> [ssh args]     land in a mars session on the remote (attach
+                                 the most recent, else create \"main\") with the
+                                 auth socket forwarded — the remote agent asks
+                                 home, no key on the box. Detach returns here.
+                                 Auto-starts the key broker; plain `ssh` still
+                                 gives a bare shell.
   mars keyd                      (optional) start the broker explicitly, in a
                                  shell where your API key is set
 
@@ -2577,9 +2580,10 @@ fn selfcheck() -> Result<()> {
         "sweep must precede the installer drop");
     let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
     for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
-                   "MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
+                   "export MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
                    "install.sh",
-                   "[ -S /tmp/mars-auth-42.sock ]", "agent tunnel ready", "no agent tunnel"] {
+                   "[ -S /tmp/mars-auth-42.sock ]", "agent tunnel ready", "no agent tunnel",
+                   "\"$M\" attach", "exec \"$M\" new main"] {
         assert!(sess.contains(needle), "session cmd missing: {needle}");
     }
     assert!(broker::remote_session_cmd("/x.sock", false).contains("sh.rustup.rs"),

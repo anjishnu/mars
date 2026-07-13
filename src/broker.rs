@@ -460,11 +460,14 @@ pub fn remote_prelude_cmd(remote_sock: &str) -> String {
     )
 }
 
-/// The interactive session's remote command: nudge an install if mars is
-/// missing — `command -v` sees only sshd's bare non-login PATH, so the real
-/// install destinations are probed too — report the tunnel's actual state
-/// (a working `mars ssh` is otherwise indistinguishable from plain ssh),
-/// then export the auth socket and hand over to a login shell.
+/// The interactive session's remote command: report the tunnel's actual state
+/// (a working `mars ssh` must not be indistinguishable from plain ssh), then
+/// land the user IN a remote mars session — attach to the most recent live one,
+/// else create "main" — with the auth socket exported so the daemon and its
+/// shells inherit it. Detaching ends the ssh, tmux-style. `command -v` sees
+/// only sshd's bare non-login PATH, so the real install destinations are
+/// probed too; if mars is missing, nudge and fall back to a plain login shell
+/// (plain `ssh` is the deliberate escape hatch for a bare shell).
 pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
     let nudge = if pushed {
         "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
@@ -474,12 +477,15 @@ pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
          . \"$HOME/.cargo/env\" && cargo install mars-terminal --locked\\n'"
     };
     format!(
-        "command -v mars >/dev/null 2>&1 || [ -x \"$HOME/.cargo/bin/mars\" ] || \
-         [ -x \"$HOME/.local/bin/mars\" ] || {nudge}; \
-         if [ -S {remote_sock} ]; then \
+        "if [ -S {remote_sock} ]; then \
          printf '[mars] agent tunnel ready — your home key answers here\\n'; else \
          printf '[mars] no agent tunnel (forward failed?) — the agent needs a key on this box\\n'; fi; \
-         MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
+         M=\"$(command -v mars 2>/dev/null)\"; \
+         if [ -z \"$M\" ] && [ -x \"$HOME/.cargo/bin/mars\" ]; then M=\"$HOME/.cargo/bin/mars\"; fi; \
+         if [ -z \"$M\" ] && [ -x \"$HOME/.local/bin/mars\" ]; then M=\"$HOME/.local/bin/mars\"; fi; \
+         export MARS_AUTH_SOCK={remote_sock}; \
+         if [ -n \"$M\" ]; then \"$M\" attach 2>/dev/null || exec \"$M\" new main; else \
+         {nudge}; exec ${{SHELL:-/bin/sh}} -l; fi"
     )
 }
 

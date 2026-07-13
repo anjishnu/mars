@@ -92,7 +92,10 @@ broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
              probes ~/.cargo/bin and ~/.local/bin explicitly (`command -v`
              only sees sshd's bare non-login PATH), and the session opens with
              an honest tunnel-state line — success must not be
-             indistinguishable from plain ssh.
+             indistinguishable from plain ssh. `mars ssh` lands the user IN a
+             remote mars session (attach most-recent, else create "main");
+             detaching ends the ssh and returns home, tmux-style — a bare
+             remote shell is what plain `ssh` is for.
 prompts.rs   Every model-facing instruction as editable Markdown in src/prompts/
              (include_str!-embedded, so the single binary still ships whole);
              {name} placeholders substituted at call sites.
