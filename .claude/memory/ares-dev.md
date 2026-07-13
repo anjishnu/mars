@@ -482,3 +482,13 @@
 - Two build SKUs since the memory feature gate: `cargo build` and
   `cargo build --no-default-features` (retrieval_stub.rs) — BOTH must pass
   --selfcheck when touching retrieval.rs or its facade callers.
+- `ssh -o StreamLocalBindUnlink=yes` on the CLIENT is a no-op for `-R` (remote)
+  unix-socket forwards — only the server's sshd_config honors it there. A stale
+  /tmp/mars-auth-<uid>.sock on the remote makes the -R bind fail (and the mux
+  forward failure cascades into a second password prompt). mars sweeps it in the
+  ssh prelude (`remote_prelude_cmd`) and remote-side via `probe_and_sweep`.
+- `command -v mars` in an ssh remote-command runs under sshd's bare non-login
+  PATH (no ~/.cargo/bin) — probe install dirs explicitly, don't trust PATH.
+- Local Cargo.toml version can lag crates.io: 0.3.0 was published out-of-band
+  (2026-07-11) while the repo said 0.2.0 — check `crates.io/api/v1/crates/
+  mars-terminal` max_version before bumping for publish.

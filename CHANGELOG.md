@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1
+
+Hardening release: `mars ssh` now recovers from the leftovers of a dead session
+instead of failing on them.
+
+### Fixed
+- **Stale auth-socket sweep**: a previous session's leftover
+  `/tmp/mars-auth-<uid>.sock` on the remote made the reverse tunnel fail to bind
+  (with a confusing double password prompt). The ssh prelude now removes it before
+  the forward is requested, and the remote side unlinks a dead socket when it finds
+  one — no `sshd_config` changes needed.
+- **Honest install detection**: the "[mars] not installed here" nudge checked
+  `command -v` under sshd's bare non-login PATH, so a cargo-installed mars was
+  reported missing on every connect. The check now probes `~/.cargo/bin` and
+  `~/.local/bin` directly.
+- **No dead-tunnel pinning**: a remote mars that finds a dead auth socket now falls
+  back to its normal provider chain instead of sending every agent call into an
+  unreachable broker.
+
 ## 0.3.0
 
 The agent grows a memory and a spine: provider cascade with tiered routing,
