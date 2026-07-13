@@ -2578,7 +2578,8 @@ fn selfcheck() -> Result<()> {
     let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
     for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
                    "MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
-                   "install.sh"] {
+                   "install.sh",
+                   "[ -S /tmp/mars-auth-42.sock ]", "agent tunnel ready", "no agent tunnel"] {
         assert!(sess.contains(needle), "session cmd missing: {needle}");
     }
     assert!(broker::remote_session_cmd("/x.sock", false).contains("sh.rustup.rs"),
@@ -2599,6 +2600,22 @@ fn selfcheck() -> Result<()> {
     let _listener = std::os::unix::net::UnixListener::bind(&live)?;
     assert!(broker::probe_and_sweep(&live), "bound socket read as dead");
     assert!(live.exists(), "live socket must not be swept");
+    // The glob fallback: the socket name carries the HOME uid, so the remote
+    // must find any live mars-auth-*.sock, not just its own uid's — while
+    // still preferring an own-uid socket when one is live.
+    assert!(broker::find_live_auth_sock(&tmp).is_none(), "no candidates but one found");
+    std::fs::write(tmp.join("mars-auth-777.sock"), b"")?; // dead stand-in
+    let _other = std::os::unix::net::UnixListener::bind(tmp.join("mars-auth-888.sock"))?;
+    assert_eq!(
+        broker::find_live_auth_sock(&tmp).as_deref(),
+        Some(tmp.join("mars-auth-888.sock").to_str().unwrap()),
+        "glob fallback did not find the live foreign-uid socket"
+    );
+    assert!(!tmp.join("mars-auth-777.sock").exists(), "dead candidate not swept by scan");
+    let own = tmp.join(format!("mars-auth-{}.sock", unsafe { libc::getuid() }));
+    let _own = std::os::unix::net::UnixListener::bind(&own)?;
+    assert_eq!(broker::find_live_auth_sock(&tmp).as_deref(), own.to_str(),
+        "own-uid socket must win over a foreign live one");
     let _ = std::fs::remove_dir_all(&tmp);
     println!("[selfcheck] auth-socket liveness ...... PASS");
 

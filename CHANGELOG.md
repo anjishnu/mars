@@ -18,6 +18,18 @@ instead of failing on them.
 - **No dead-tunnel pinning**: a remote mars that finds a dead auth socket now falls
   back to its normal provider chain instead of sending every agent call into an
   unreachable broker.
+- **Cross-uid socket discovery**: the forwarded socket is named with the home
+  machine's uid (a Mac's 501), which rarely matches the remote's (Linux's 1000) —
+  the remote now scans for any live `/tmp/mars-auth-*.sock` instead of guessing by
+  its own uid, so the agent works in shells without `MARS_AUTH_SOCK` exported
+  (cron, plain ssh, nested sessions).
+- **Honest tunnel status**: `mars ssh` opens the remote shell with
+  `[mars] agent tunnel ready` (or a warning if the forward failed) — a working
+  connection is no longer indistinguishable from plain ssh.
+- **ControlMaster keepalives** (`ServerAliveInterval=30`): a master whose TCP died
+  (laptop sleep, network change) exits on its own instead of answering `-O check`
+  and then breaking the next connection with "Broken pipe" + a surprise password
+  prompt.
 
 ## 0.3.0
 

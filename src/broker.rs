@@ -86,20 +86,43 @@ pub fn probe_and_sweep(path: &std::path::Path) -> bool {
 }
 
 /// The socket the remote agent should proxy through, if any: an explicit
-/// `MARS_AUTH_SOCK`, else the well-known forwarded path if something is
-/// actually listening there — a dead socket (the tunnel is gone) must fall
-/// through to the provider chain, not pin every call to an unreachable broker.
+/// `MARS_AUTH_SOCK`, else any live forwarded socket — a dead socket (the
+/// tunnel is gone) must fall through to the provider chain, not pin every
+/// call to an unreachable broker.
 pub fn detect_broker_sock() -> Option<String> {
     if let Ok(s) = std::env::var("MARS_AUTH_SOCK") {
         if !s.is_empty() {
             return Some(s);
         }
     }
-    let wk = remote_socket_path();
-    if probe_and_sweep(std::path::Path::new(&wk)) {
-        return Some(wk);
+    find_live_auth_sock(std::path::Path::new("/tmp"))
+}
+
+/// The forwarded socket's name carries the HOME machine's uid, which rarely
+/// matches this box's (a Mac's 501 vs Linux's 1000) — so scan for any live
+/// `mars-auth-*.sock` instead of guessing by uid. Own-uid first (the
+/// same-uid case stays deterministic), then lexicographic. Dead leftovers
+/// are swept along the way, where permissions allow.
+pub fn find_live_auth_sock(dir: &std::path::Path) -> Option<String> {
+    let own = dir.join(format!("mars-auth-{}.sock", unsafe { libc::getuid() }));
+    if probe_and_sweep(&own) {
+        return Some(own.to_string_lossy().into_owned());
     }
-    None
+    let mut candidates: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("mars-auth-") && n.ends_with(".sock"))
+        })
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .find(|p| probe_and_sweep(p))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// The home broker daemon. Loads the key once (from env today), binds the
@@ -439,8 +462,9 @@ pub fn remote_prelude_cmd(remote_sock: &str) -> String {
 
 /// The interactive session's remote command: nudge an install if mars is
 /// missing — `command -v` sees only sshd's bare non-login PATH, so the real
-/// install destinations are probed too — then export the auth socket and hand
-/// over to a login shell.
+/// install destinations are probed too — report the tunnel's actual state
+/// (a working `mars ssh` is otherwise indistinguishable from plain ssh),
+/// then export the auth socket and hand over to a login shell.
 pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
     let nudge = if pushed {
         "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
@@ -452,6 +476,9 @@ pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
     format!(
         "command -v mars >/dev/null 2>&1 || [ -x \"$HOME/.cargo/bin/mars\" ] || \
          [ -x \"$HOME/.local/bin/mars\" ] || {nudge}; \
+         if [ -S {remote_sock} ]; then \
+         printf '[mars] agent tunnel ready — your home key answers here\\n'; else \
+         printf '[mars] no agent tunnel (forward failed?) — the agent needs a key on this box\\n'; fi; \
          MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
     )
 }
@@ -503,6 +530,11 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
         let mut child = std::process::Command::new("ssh")
             .arg("-o").arg("ControlMaster=auto")
             .arg("-o").arg("ControlPersist=60s")
+            // A master whose TCP died (sleep, network change) still answers
+            // `-O check` over its local socket, then ambushes the next session
+            // with "Broken pipe". Keepalives make it notice and exit instead.
+            .arg("-o").arg("ServerAliveInterval=30")
+            .arg("-o").arg("ServerAliveCountMax=3")
             .arg("-o").arg(format!("ControlPath={}", control.display()))
             .args(&extra)
             .arg(&host)
@@ -532,6 +564,8 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
         .arg("-o").arg("StreamLocalBindUnlink=yes")
         .arg("-o").arg("ControlMaster=auto")
         .arg("-o").arg("ControlPersist=60s")
+        .arg("-o").arg("ServerAliveInterval=30")
+        .arg("-o").arg("ServerAliveCountMax=3")
         .arg("-o").arg(format!("ControlPath={}", control.display()))
         .arg("-R").arg(format!("{remote_sock}:{}", home_sock.display()))
         .args(&extra)
