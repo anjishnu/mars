@@ -63,14 +63,32 @@ pub fn broker_socket_path() -> Result<PathBuf> {
 
 /// Well-known forwarded-socket path on the remote (per-uid), so a plain `ssh`
 /// with a `RemoteForward` line (from `mars ssh-setup`) works even when
-/// `MARS_AUTH_SOCK` isn't exported.
+/// `MARS_AUTH_SOCK` isn't exported. The uid is the *local* one — two users who
+/// share a local uid (e.g. two single-user Macs, both 501) would collide on a
+/// shared remote; fixing that needs remote-home discovery (a protocol change).
 pub fn remote_socket_path() -> String {
     let uid = unsafe { libc::getuid() };
     format!("/tmp/mars-auth-{uid}.sock")
 }
 
+/// True if something is listening at `path`. A dead leftover socket file is
+/// unlinked: sshd refuses to bind a `-R` forward over it (server-side
+/// `StreamLocalBindUnlink` is off by default and the client-side flag only
+/// covers local forwards), so sweeping here lets the next connection bind.
+pub fn probe_and_sweep(path: &std::path::Path) -> bool {
+    if UnixStream::connect(path).is_ok() {
+        return true;
+    }
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    false
+}
+
 /// The socket the remote agent should proxy through, if any: an explicit
-/// `MARS_AUTH_SOCK`, else the well-known forwarded path if it exists.
+/// `MARS_AUTH_SOCK`, else the well-known forwarded path if something is
+/// actually listening there — a dead socket (the tunnel is gone) must fall
+/// through to the provider chain, not pin every call to an unreachable broker.
 pub fn detect_broker_sock() -> Option<String> {
     if let Ok(s) = std::env::var("MARS_AUTH_SOCK") {
         if !s.is_empty() {
@@ -78,7 +96,7 @@ pub fn detect_broker_sock() -> Option<String> {
         }
     }
     let wk = remote_socket_path();
-    if std::path::Path::new(&wk).exists() {
+    if probe_and_sweep(std::path::Path::new(&wk)) {
         return Some(wk);
     }
     None
@@ -406,6 +424,38 @@ fn ensure_keyd(home_sock: &std::path::Path) -> bool {
     false
 }
 
+/// The remote command for the prelude ssh (the connection that authenticates
+/// once and persists the ControlMaster): sweep a stale auth socket left by a
+/// dead session — it would make the interactive ssh's `-R` bind fail — then
+/// stage the embedded installer. The sweep is `;`-separated so it runs even if
+/// the installer write fails and the exit status stays that of the `&&` chain
+/// (which is what `pushed` reads).
+pub fn remote_prelude_cmd(remote_sock: &str) -> String {
+    format!(
+        "rm -f {remote_sock}; \
+         mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh"
+    )
+}
+
+/// The interactive session's remote command: nudge an install if mars is
+/// missing — `command -v` sees only sshd's bare non-login PATH, so the real
+/// install destinations are probed too — then export the auth socket and hand
+/// over to a login shell.
+pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
+    let nudge = if pushed {
+        "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
+    } else {
+        "printf '[mars] not installed here. Install:\\n  \
+         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
+         . \"$HOME/.cargo/env\" && cargo install mars-terminal --locked\\n'"
+    };
+    format!(
+        "command -v mars >/dev/null 2>&1 || [ -x \"$HOME/.cargo/bin/mars\" ] || \
+         [ -x \"$HOME/.local/bin/mars\" ] || {nudge}; \
+         MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
+    )
+}
+
 /// `mars ssh <host> [ssh args…]` — wraps system ssh so the auth socket is
 /// forwarded and `MARS_AUTH_SOCK` is set in the remote shell, with no reliance
 /// on server-side `AcceptEnv`.
@@ -456,7 +506,7 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
             .arg("-o").arg(format!("ControlPath={}", control.display()))
             .args(&extra)
             .arg(&host)
-            .arg("mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh")
+            .arg(remote_prelude_cmd(&remote_sock))
             .stdin(std::process::Stdio::piped())
             .spawn()
             .ok();
@@ -477,20 +527,7 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
         eprintln!("mars ssh: note — couldn't drop the installer on the remote (continuing).");
     }
 
-    // Set the env via the remote command (not SetEnv); nudge an install if mars
-    // is missing — pointing at the installer we just dropped (or the manual
-    // rustup+cargo steps as fallback); then hand over to a login shell.
-    let nudge = if pushed {
-        "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
-    } else {
-        "printf '[mars] not installed here. Install:\\n  \
-         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
-         . \"$HOME/.cargo/env\" && cargo install mars-terminal --locked\\n'"
-    };
-    let remote_cmd = format!(
-        "command -v mars >/dev/null 2>&1 || {nudge}; \
-         MARS_AUTH_SOCK={remote_sock} exec ${{SHELL:-/bin/sh}} -l"
-    );
+    let remote_cmd = remote_session_cmd(&remote_sock, pushed);
     let status = std::process::Command::new("ssh")
         .arg("-o").arg("StreamLocalBindUnlink=yes")
         .arg("-o").arg("ControlMaster=auto")

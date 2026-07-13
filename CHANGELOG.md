@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.3.1
+
+Hardening release: `mars ssh` now recovers from the leftovers of a dead session
+instead of failing on them.
+
+### Fixed
+- **Stale auth-socket sweep**: a previous session's leftover
+  `/tmp/mars-auth-<uid>.sock` on the remote made the reverse tunnel fail to bind
+  (with a confusing double password prompt). The ssh prelude now removes it before
+  the forward is requested, and the remote side unlinks a dead socket when it finds
+  one — no `sshd_config` changes needed.
+- **Honest install detection**: the "[mars] not installed here" nudge checked
+  `command -v` under sshd's bare non-login PATH, so a cargo-installed mars was
+  reported missing on every connect. The check now probes `~/.cargo/bin` and
+  `~/.local/bin` directly.
+- **No dead-tunnel pinning**: a remote mars that finds a dead auth socket now falls
+  back to its normal provider chain instead of sending every agent call into an
+  unreachable broker.
+
+## 0.3.0
+
+Agent quality-of-life batch: streaming, a work journal, and a memory subsystem you
+can rip out.
+
+### Added
+- **Streaming replies**: agent answers render token-by-token in the ask panel
+  (SSE for OpenAI-compatible and Anthropic providers), with reasoning-model
+  `<think>` blocks stripped incrementally so they never flash on screen.
+- **Work journal + mission**: watch-mode frame summaries are logged as work
+  snapshots (`~/.mars/worklog.jsonl`); a low-tier model periodically infers the
+  session's mission, which `mars ls` shows as the summary column and reattach
+  opens with a "Where you left off" briefing.
+- **Unified `mars ls`**: local sessions and fleet hosts in one numbered table with
+  a shared open prompt; remote agent calls self-report host + session so status
+  stays fresh.
+- **Model cascade, completed**: rotation across keyed providers on rate limits and
+  one-step escalation to a stronger tier on low-confidence answers.
+- **Memory hygiene**: secret redaction (credential prefixes, `password=`-style
+  values, URL credentials, a user-editable `~/.mars/denylist`) on every line
+  bound for a prompt; recency/cwd-weighted retrieval; in-editor actions to open,
+  inspect, and clear the command memory.
+- **Deletion-proof memory seam**: the whole retrieval subsystem sits behind a
+  default-on `memory` cargo feature; `cargo build --no-default-features` yields a
+  fully working memory-free terminal.
+- **Prompts as Markdown**: every model-facing instruction lives in
+  `src/prompts/*.md`, embedded at compile time — editable without touching code.
+- **Command bar overhaul**; `quit` now detaches (with `killall` for a hard stop).
+
+### Fixed
+- Mouse-wheel scrollback now reaches full-screen terminal apps (Claude Code, less,
+  vim): wheel events are forwarded in the app's own mouse protocol, or translated
+  to DECCKM-aware arrow keys on the alternate screen.
+
 ## 0.2.0
 
 The first substantial release since 0.1.0 — remote agents, a unified terminal

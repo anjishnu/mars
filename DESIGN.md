@@ -77,6 +77,17 @@ terminal.rs  Term: a PTY (portable-pty) + vt100::Parser, pumped by a reader thre
              is watching (the property that makes session-detach free).
 agent.rs     AgentConfig (provider detection: custom/Groq/Gemini via env), the
              OpenAI-compatible chat call, RUN: directive parsing.
+broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
+             `mars ssh` (wraps system ssh, forwards ~/.mars/auth.sock to
+             /tmp/mars-auth-<uid>.sock via -R) + chat_via_broker (remote side).
+             Stale sockets are swept from both ends — the ssh prelude `rm -f`s
+             the remote path before the forward is requested, and the remote's
+             detect probe unlinks a dead socket — because sshd refuses to bind
+             a -R unix-socket forward over a leftover file and the client-side
+             StreamLocalBindUnlink option only applies to local forwards
+             (server-side sshd_config is the only other cure, which we can't
+             assume). The install nudge probes ~/.cargo/bin and ~/.local/bin
+             explicitly: `command -v` only sees sshd's bare non-login PATH.
 prompts.rs   Every model-facing instruction as editable Markdown in src/prompts/
              (include_str!-embedded, so the single binary still ships whole);
              {name} placeholders substituted at call sites.

@@ -2565,6 +2565,43 @@ fn selfcheck() -> Result<()> {
     assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
     println!("[selfcheck] embedded installer ........ PASS");
 
+    // 32b. The ssh remote-command builders. The prelude must sweep a stale auth
+    //      socket BEFORE the interactive ssh requests the -R forward (sshd won't
+    //      bind over a leftover; client-side StreamLocalBindUnlink only covers
+    //      local forwards), and the install check must probe the real install
+    //      destinations, not just sshd's bare non-login PATH.
+    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock");
+    let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
+        .expect("prelude lost the stale-socket sweep (or its ; separator)");
+    assert!(sweep < prelude.find("install.sh").expect("prelude lost the installer drop"),
+        "sweep must precede the installer drop");
+    let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
+    for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
+                   "MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
+                   "install.sh"] {
+        assert!(sess.contains(needle), "session cmd missing: {needle}");
+    }
+    assert!(broker::remote_session_cmd("/x.sock", false).contains("sh.rustup.rs"),
+        "no-installer nudge lost the manual install steps");
+    println!("[selfcheck] ssh remote commands ....... PASS");
+
+    // 32c. Dead-socket self-heal: a leftover auth socket with no listener must
+    //      read as absent AND be unlinked so the next `ssh -R` can bind; a live
+    //      one must be kept. (Temp paths only — never the real /tmp socket.)
+    let tmp = std::env::temp_dir().join(format!("mars-sock-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+    assert!(!broker::probe_and_sweep(&tmp.join("none.sock")), "nonexistent socket read as live");
+    let dead = tmp.join("dead.sock");
+    std::fs::write(&dead, b"")?;
+    assert!(!broker::probe_and_sweep(&dead), "dead socket file read as live");
+    assert!(!dead.exists(), "dead socket was not swept");
+    let live = tmp.join("live.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live)?;
+    assert!(broker::probe_and_sweep(&live), "bound socket read as dead");
+    assert!(live.exists(), "live socket must not be swept");
+    let _ = std::fs::remove_dir_all(&tmp);
+    println!("[selfcheck] auth-socket liveness ...... PASS");
+
     // 33. Closing a tab with a live terminal confirms, then reaps the PTY —
     //     never orphans the shell (P0.1). Decline keeps everything; confirm
     //     removes the tab AND drops the Term + its watch state.
