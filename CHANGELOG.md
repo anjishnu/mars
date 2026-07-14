@@ -35,7 +35,19 @@ outcomes, not just verdicts.
   (`worklog_max_lines`).
 - **Open tuning knobs** joins the command bar.
 
+- **AWS Bedrock + Azure OpenAI/Foundry**: MARS now speaks to enterprise model
+  gateways. Set `AWS_BEARER_TOKEN_BEDROCK` (+ `AWS_REGION`) to use any Bedrock
+  model through the Converse API, or `AZURE_OPENAI_API_KEY` +
+  `AZURE_OPENAI_ENDPOINT` (+ `MARS_AZURE_DEPLOYMENT`) for Azure. Bearer/api-key
+  auth only — no AWS SigV4, so the single static binary stays dependency-light.
+  Both slot into the provider cascade (rotation + tiering) and work over the ssh
+  broker with the key never leaving home. (Bedrock is non-streaming for now.)
+
 ### Fixed
+- **The reattach shift report never appeared after a normal detach**: the
+  intended `C-x C-c` quit-detaches path didn't snapshot session state, so the
+  save-state restore (and the classic briefing) had nothing to diff against.
+  Only an accidental disconnect armed it. Now both do.
 - Two panes concluding while detached no longer lose one verdict (the pending
   trigger queue was a single slot).
 - Translate calls now actually route through their intended model tier (the

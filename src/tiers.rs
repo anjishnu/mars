@@ -75,6 +75,15 @@ impl Default for Tiers {
                     ("mid", "gemini-3.1-flash-lite"),
                     ("high", "gemini-3.1-flash"),
                 ])),
+                // Bedrock cross-region inference profiles (modelIds are stable,
+                // so a real ladder works). Azure has no default block: its
+                // "models" are user-named deployments, so it falls through to the
+                // single configured deployment unless the user adds tiers.json.
+                ("bedrock", m(&[
+                    ("low", "us.anthropic.claude-3-5-haiku-20241022-v1:0"),
+                    ("mid", "us.anthropic.claude-sonnet-4-20250514-v1:0"),
+                    ("high", "us.anthropic.claude-opus-4-20250514-v1:0"),
+                ])),
             ]
             .into_iter()
             .map(|(p, t)| (p.to_string(), t))

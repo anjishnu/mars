@@ -185,27 +185,68 @@ impl std::error::Error for RateLimited {}
 /// free Groq/Gemini tiers. Position 0 is what `from_env` picks; the rest are
 /// rotation targets when it rate-limits. Cheap defaults per provider
 /// (right-size, don't reach for the biggest); override any with MARS_LLM_MODEL.
-fn provider_chain() -> Vec<(String, &'static str, &'static str, &'static str)> {
-    let mut chain = Vec::new();
+/// One resolved provider: (key, provider tag, base url, default model). URL and
+/// model are owned Strings because enterprise providers compute them from region
+/// / endpoint / deployment env vars rather than a fixed literal.
+type Provider = (String, &'static str, String, String);
+
+fn provider_chain() -> Vec<Provider> {
+    let mut chain: Vec<Provider> = Vec::new();
+    let p = |k: String, tag: &'static str, url: &str, model: &str| {
+        (k, tag, url.to_string(), model.to_string())
+    };
     if let Ok(k) = env_var("LLM_KEY") {
-        chain.push((k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"));
+        chain.push(p(k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"));
+    }
+    // Enterprise gateways win over consumer keys — a box deliberately configured
+    // for Bedrock/Azure means to use it. Bearer/api-key auth only (no SigV4).
+    if let Ok(k) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+        // Bedrock Converse API. cfg.url holds the region base; chat_bedrock fills
+        // the /model/{id}/converse path. Default: a cross-region Haiku profile.
+        let region = env_var("BEDROCK_REGION")
+            .or_else(|_| std::env::var("AWS_REGION"))
+            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+            .unwrap_or_else(|_| "us-east-1".to_string());
+        chain.push(p(
+            k,
+            "bedrock",
+            &format!("https://bedrock-runtime.{region}.amazonaws.com"),
+            "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        ));
+    }
+    if let (Ok(k), Ok(endpoint)) =
+        (std::env::var("AZURE_OPENAI_API_KEY"), std::env::var("AZURE_OPENAI_ENDPOINT"))
+    {
+        // Azure OpenAI / Foundry: OpenAI-compatible body, but api-key header and a
+        // deployment+api-version URL. The "model" is the deployment name.
+        let deployment = env_var("AZURE_DEPLOYMENT")
+            .or_else(|_| env_var("LLM_MODEL"))
+            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        let version = env_var("AZURE_API_VERSION").unwrap_or_else(|_| "2024-10-21".to_string());
+        let base = endpoint.trim_end_matches('/');
+        chain.push((
+            k,
+            "azure",
+            format!("{base}/openai/deployments/{deployment}/chat/completions?api-version={version}"),
+            deployment,
+        ));
     }
     if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
         // Claude — Anthropic's own Messages API (not OpenAI-compatible; handled
         // in chat()). Haiku is the cheap/fast default.
-        chain.push((k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5"));
+        chain.push(p(k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5"));
     }
     if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        chain.push((k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
+        chain.push(p(k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
     }
     if let Ok(k) = std::env::var("GROQ_API_KEY") {
         // Qwen3-32B: strong open model on Groq's fast free tier.
-        chain.push((k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
+        chain.push(p(k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
     }
     if let Ok(k) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY")) {
         // Flash-Lite: cheapest + highest free-tier limits. (Pinned dated
         // versions age out of the free tier, so track the lite line.)
-        chain.push((
+        chain.push(p(
             k,
             "gemini",
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -265,8 +306,8 @@ impl AgentConfig {
             provider_chain().into_iter().next().unwrap_or((
                 String::new(),
                 "none",
-                "https://api.groq.com/openai/v1",
-                "llama-3.1-8b-instant",
+                "https://api.groq.com/openai/v1".to_string(),
+                "llama-3.1-8b-instant".to_string(),
             ));
 
         // Explicit URL/model overrides apply to any provider.
@@ -801,10 +842,10 @@ fn attempt(
             }
             None => None,
         };
-        if cfg.provider == "anthropic" {
-            chat_anthropic(cfg, messages, provider_sink)
-        } else {
-            chat_openai(cfg, messages, provider_sink)
+        match cfg.provider {
+            "anthropic" => chat_anthropic(cfg, messages, provider_sink),
+            "bedrock" => chat_bedrock(cfg, messages, provider_sink),
+            _ => chat_openai(cfg, messages, provider_sink),
         }
     };
     let latency_ms = start.elapsed().as_millis() as u64;
@@ -844,7 +885,14 @@ fn chat_openai(
     messages: &[serde_json::Value],
     sink: DeltaSink,
 ) -> anyhow::Result<(String, u64, u64)> {
-    let url = format!("{}/chat/completions", cfg.url);
+    // Azure bakes deployment + api-version into cfg.url (already a complete
+    // endpoint) and authenticates with an `api-key` header, not a bearer token.
+    let azure = cfg.provider == "azure";
+    let url = if azure {
+        cfg.url.clone()
+    } else {
+        format!("{}/chat/completions", cfg.url)
+    };
     let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages,
@@ -855,19 +903,22 @@ fn chat_openai(
         body["stream"] = serde_json::json!(true);
         // Usage-in-final-chunk is an opt-in extension; only request it where
         // it's known-supported (other shims reject unknown fields).
-        if matches!(cfg.provider, "openai" | "groq") {
+        if matches!(cfg.provider, "openai" | "groq" | "azure") {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
     }
 
     // Bound the call so a stalled connection surfaces as an error instead of
     // hanging the agent (and the spinner) forever.
-    let resp = match ureq::post(&url)
+    let mut req = ureq::post(&url)
         .timeout(std::time::Duration::from_secs(30))
-        .set("Authorization", &format!("Bearer {}", cfg.key))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-    {
+        .set("Content-Type", "application/json");
+    req = if azure {
+        req.set("api-key", &cfg.key)
+    } else {
+        req.set("Authorization", &format!("Bearer {}", cfg.key))
+    };
+    let resp = match req.send_json(body) {
         Ok(r) => r,
         // Pull the real message out of the error body (bad key, quota, etc.).
         // Gemini wraps it in a JSON array: [{"error":{"message": …}}].
@@ -1050,5 +1101,94 @@ fn chat_anthropic(
         .unwrap_or_default();
     let pt = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let ct = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    Ok((text, pt, ct))
+}
+
+/// The Bedrock Converse request body from OpenAI-style messages: system split
+/// into a top-level `system` array, each turn's content wrapped as `[{text}]`,
+/// generation params under `inferenceConfig`. Pure, so the selfcheck can pin
+/// the shape without a network call.
+pub fn build_bedrock_body(
+    messages: &[serde_json::Value],
+    max_tokens: u32,
+    temperature: f64,
+) -> serde_json::Value {
+    let mut system: Vec<serde_json::Value> = Vec::new();
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        let content = m["content"].as_str().unwrap_or("");
+        if m["role"].as_str() == Some("system") {
+            system.push(serde_json::json!({ "text": content }));
+        } else {
+            msgs.push(serde_json::json!({
+                "role": m["role"].as_str().unwrap_or("user"),
+                "content": [{ "text": content }],
+            }));
+        }
+    }
+    serde_json::json!({
+        "system": system,
+        "messages": msgs,
+        "inferenceConfig": { "maxTokens": max_tokens, "temperature": temperature },
+    })
+}
+
+/// AWS Bedrock via the Converse API. Bearer auth (a Bedrock API key — no SigV4),
+/// modelId in the URL path, a provider-neutral body shape that covers every
+/// Bedrock model (Claude, Llama, Mistral, Nova). Non-streaming for now: the
+/// `converse-stream` endpoint uses AWS binary event-stream framing, not SSE — so
+/// the sink is accepted and ignored (the answer renders at once), exactly like
+/// the broker path.
+fn chat_bedrock(
+    cfg: &AgentConfig,
+    messages: &[serde_json::Value],
+    _sink: DeltaSink,
+) -> anyhow::Result<(String, u64, u64)> {
+    // cfg.url is the region base; the modelId (cfg.model) goes in the path.
+    let url = format!("{}/model/{}/converse", cfg.url, cfg.model);
+    let body = build_bedrock_body(messages, cfg.max_tokens, cfg.temperature);
+    let resp = match ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("Authorization", &format!("Bearer {}", cfg.key))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            let api_msg = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|j| j["message"].as_str().map(str::to_string));
+            let msg = match code {
+                429 => "rate limit / throttled (Bedrock) — wait and retry, or switch model \
+                        with MARS_LLM_MODEL."
+                    .to_string(),
+                401 | 403 => format!(
+                    "auth failed — check AWS_BEARER_TOKEN_BEDROCK and the region/model access. ({})",
+                    api_msg.as_deref().unwrap_or("invalid credentials")
+                ),
+                _ => api_msg.unwrap_or_else(|| format!("HTTP {code}")),
+            };
+            if code == 429 {
+                return Err(anyhow::Error::new(RateLimited(msg)));
+            }
+            anyhow::bail!("{msg}");
+        }
+        Err(e) => anyhow::bail!("{e}"),
+    };
+
+    let json: serde_json::Value = resp.into_json()?;
+    if let Some(msg) = json["message"].as_str() {
+        // Converse error bodies are `{ "message": … }`.
+        if json["output"].is_null() {
+            anyhow::bail!("{msg}");
+        }
+    }
+    let text = json["output"]["message"]["content"]
+        .as_array()
+        .map(|blocks| blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""))
+        .unwrap_or_default();
+    let pt = json["usage"]["inputTokens"].as_u64().unwrap_or(0);
+    let ct = json["usage"]["outputTokens"].as_u64().unwrap_or(0);
     Ok((text, pt, ct))
 }

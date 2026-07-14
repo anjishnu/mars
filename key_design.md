@@ -335,8 +335,19 @@ relitigate silently):
   the first agent-editable config surface (a Context-Bus precursor): an agent can read
   what a knob does and adjust it on request.
 - **Agent providers by env precedence**: `MARS_LLM_*` (any OpenAI-compatible endpoint,
-  e.g. local Ollama; legacy `ARES_*` honored) → `GROQ_API_KEY` →
+  e.g. local Ollama; legacy `ARES_*` honored) → enterprise (Bedrock/Azure) →
+  `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GROQ_API_KEY` →
   `GEMINI_API_KEY`/`GOOGLE_API_KEY` (Gemini's OpenAI-compatible endpoint).
+- **AWS Bedrock + Azure OpenAI (2026-07): bearer/api-key only, no SigV4.** Ruled:
+  MARS supports Bedrock via **Bedrock API keys** (`AWS_BEARER_TOKEN_BEDROCK`, a plain
+  bearer) over the **Converse API** — provider-neutral so any Bedrock model works —
+  and Azure via its OpenAI-compatible surface (`api-key` header + deployment URL).
+  IAM/SigV4 is deferred because a HMAC signer would add crypto deps to a
+  deliberately dependency-light single binary; Bedrock API keys fit the existing
+  "one key string" model exactly. Bedrock is non-streaming for now (converse-stream
+  is AWS binary event-stream framing, not SSE). No broker protocol change: the home
+  daemon re-derives the provider from env, so an enterprise key at home works on
+  every ssh'd box unchanged.
 - **Mars rebrand + palette (2026-07):** the project is Mars — "mission control for
   your terminal." Palette anchored on Claude Code's terracotta **#D97757**
   (`theme_accent`) for all chrome, light sand **#E9A178** on teaching surfaces, rust

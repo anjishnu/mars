@@ -84,6 +84,9 @@ AGENT  (BETA — an assistant, not an authority; review what it proposes)
                      GEMINI_API_KEY, or MARS_LLM_KEY + MARS_LLM_URL (any
                      OpenAI-compatible endpoint, e.g. local Ollama).
                      MARS_LLM_MODEL overrides the model for any provider.
+  Enterprise:        AWS_BEARER_TOKEN_BEDROCK (+ AWS_REGION) for Bedrock;
+                     AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT
+                     (+ MARS_AZURE_DEPLOYMENT) for Azure OpenAI / Foundry.
 
 LLM DEBUG  (calibrate prompts / right-size models per call)
   mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
@@ -2109,7 +2112,10 @@ fn selfcheck() -> Result<()> {
     //     paid providers, and paid-first precedence.
     for v in ["MARS_LLM_KEY", "MARS_LLM_URL", "MARS_LLM_MODEL",
               "ARES_LLM_KEY", "ARES_LLM_URL", "ARES_LLM_MODEL", "MARS_AUTH_SOCK",
-              "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+              "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+              "AWS_BEARER_TOKEN_BEDROCK", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+              "MARS_BEDROCK_REGION", "AWS_REGION", "AWS_DEFAULT_REGION",
+              "MARS_AZURE_DEPLOYMENT", "MARS_AZURE_API_VERSION"] {
         std::env::remove_var(v);
     }
     std::env::set_var("GEMINI_API_KEY", "test-key");
@@ -2130,10 +2136,39 @@ fn selfcheck() -> Result<()> {
     assert_eq!(cfg.provider, "anthropic", "ANTHROPIC should beat OPENAI (paid-first order)");
     assert!(cfg.url.contains("api.anthropic.com"), "wrong Anthropic endpoint: {}", cfg.url);
     assert!(cfg.model.contains("claude"), "wrong Claude default model: {}", cfg.model);
-    // Explicit MARS_LLM_KEY still overrides every named provider.
+    // Azure OpenAI / Foundry: api-key + endpoint → a complete deployment URL.
+    std::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+    std::env::set_var("AZURE_OPENAI_ENDPOINT", "https://acme.openai.azure.com");
+    std::env::set_var("MARS_AZURE_DEPLOYMENT", "gpt-4o");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "azure", "Azure creds should beat Anthropic (enterprise-first)");
+    assert!(cfg.url.contains("/openai/deployments/gpt-4o/chat/completions"), "wrong Azure URL: {}", cfg.url);
+    assert!(cfg.url.contains("api-version="), "Azure URL missing api-version: {}", cfg.url);
+    assert_eq!(cfg.model, "gpt-4o", "Azure model should be the deployment name");
+    // AWS Bedrock: bearer token + region → the Converse region base.
+    std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "test-key");
+    std::env::set_var("MARS_BEDROCK_REGION", "eu-west-1");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "bedrock", "Bedrock should beat Azure (chain order)");
+    assert!(cfg.url.contains("bedrock-runtime.eu-west-1.amazonaws.com"), "wrong Bedrock URL: {}", cfg.url);
+    assert!(cfg.model.contains("anthropic.claude"), "wrong Bedrock default model: {}", cfg.model);
+    // The Converse body: system split out, content wrapped, inferenceConfig set.
+    let body = agent::build_bedrock_body(
+        &[serde_json::json!({"role":"system","content":"be terse"}),
+          serde_json::json!({"role":"user","content":"hi"})],
+        256, 0.3,
+    );
+    assert_eq!(body["system"][0]["text"], "be terse", "Bedrock system not split out");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "hi", "Bedrock content not wrapped");
+    assert_eq!(body["inferenceConfig"]["maxTokens"], 256, "Bedrock inferenceConfig missing");
+    assert!(body["messages"].as_array().unwrap().iter().all(|m| m["role"] != "system"),
+        "Bedrock messages must not contain a system role");
+    // Explicit MARS_LLM_KEY still overrides every provider, enterprise included.
     std::env::set_var("MARS_LLM_KEY", "test-key");
     assert_eq!(agent::AgentConfig::from_env().provider, "custom", "MARS_LLM_KEY must win");
-    for v in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MARS_LLM_KEY"] {
+    for v in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MARS_LLM_KEY",
+              "AWS_BEARER_TOKEN_BEDROCK", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+              "MARS_BEDROCK_REGION", "MARS_AZURE_DEPLOYMENT"] {
         std::env::remove_var(v);
     }
     println!("[selfcheck] provider detection ........ PASS");
@@ -2170,6 +2205,19 @@ fn selfcheck() -> Result<()> {
         assert_eq!(alts.len(), 1, "expected exactly one alternate");
         assert_eq!(alts[0].provider, "gemini");
         assert_eq!(agent::rotation_candidates("gemini")[0].provider, "groq");
+        // Enterprise providers rotate too: a throttled Bedrock falls to the
+        // consumer keys, and its own tier table routes by task.
+        std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "test-key");
+        assert!(agent::rotation_candidates("bedrock").iter().any(|c| c.provider == "gemini"),
+            "Bedrock should rotate to a consumer key when throttled");
+        assert_eq!(tiers::model_for("bedrock", "ask", "x"),
+            "us.anthropic.claude-opus-4-20250514-v1:0", "Bedrock ask must route to the high tier");
+        assert_eq!(tiers::model_for("bedrock", "auto_name", "x"),
+            "us.anthropic.claude-3-5-haiku-20241022-v1:0", "Bedrock naming must route to low");
+        // Azure has no tier table: model_for falls through to the deployment.
+        assert_eq!(tiers::model_for("azure", "ask", "my-deployment"), "my-deployment",
+            "Azure should fall through to the configured deployment");
+        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
         std::env::set_var("MARS_LLM_MODEL", "pinned");
         assert!(agent::rotation_candidates("groq").is_empty(), "pin disables rotation");
         std::env::remove_var("MARS_LLM_MODEL");
@@ -2199,6 +2247,11 @@ fn selfcheck() -> Result<()> {
         assert!(r.contains("--password=[REDACTED]") && !r.contains("hunter2"), "{r}");
         let r = redact("curl -H 'Authorization: Bearer abc123def456' api");
         assert!(r.contains("Bearer [REDACTED]") && !r.contains("abc123"), "{r}");
+        // The new enterprise creds never ride into a prompt.
+        let r = redact("export AWS_BEARER_TOKEN_BEDROCK=ABSKQmVkcm9ja0FQSUtleTEyMzQ1Njc4OTA");
+        assert!(r.contains("[REDACTED]") && !r.contains("ABSKQmVkcm9ja0FQSUtleT"), "bedrock key survived: {r}");
+        let r = redact("curl -H 'api-key: 0123456789abcdef0123456789abcdef' azure");
+        assert!(r.contains("[REDACTED]") && !r.contains("0123456789abcdef0123"), "azure key survived: {r}");
         // URL credentials: password goes, user and host stay.
         let r = redact("git clone https://bob:s3cret@github.com/x.git");
         assert!(r.contains("bob:[REDACTED]@github.com") && !r.contains("s3cret"), "{r}");

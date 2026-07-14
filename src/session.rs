@@ -381,6 +381,10 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
 
         if app.detach_requested {
             app.detach_requested = false;
+            // Snapshot for the reattach shift report BEFORE dropping the client —
+            // the intended "quit = detach" path (C-x C-c) must arm the save-state
+            // restore exactly like an accidental disconnect (ClientGone) does.
+            app.on_detach();
             if let Some((s, _)) = client.take() {
                 let _ = send_exit(&s, &format!("detached — reattach with: mars --resume {name}"));
             }
