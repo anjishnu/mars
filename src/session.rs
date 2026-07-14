@@ -880,35 +880,37 @@ pub fn list_main(prompt: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "  #  {:<20} {:<7} {:<28} {:<9} {}",
+        "  #  {:<18} {:<6} {:<18} {:<8} {}",
         "SESSION", "WHERE", "STATUS", "AS OF", "SUMMARY"
     );
-    // A long summary wraps into a block justified under the SUMMARY column
-    // (continuation lines indented to this row's summary start) instead of
-    // spilling into an unreadable overlong line.
-    let cols = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
+    // Keep the columns tight so the summary gets real width. A summary that fits
+    // sits inline; a longer one goes on its own full-width indented lines rather
+    // than wrapping into a thin ragged column jammed against the screen edge.
+    let cols = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100).max(48);
     for (i, e) in entries.iter().enumerate() {
         let seen = match e.as_of {
             None => "now".to_string(),
             Some(t) => crate::broker::ago(t),
         };
         let prefix = format!(
-            "  {:<2} {:<20} {:<7} {:<28} {:<9} ",
+            "  {:<2} {:<18} {:<6} {:<18} {:<8} ",
             i + 1,
-            e.name,
+            clip(&e.name, 18),
             if e.remote { "remote" } else { "local" },
-            e.status,
+            clip(&e.status, 18),
             seen
         );
         let indent = prefix.chars().count();
-        let mut lines = wrap_text(&e.summary, cols.saturating_sub(indent).max(20)).into_iter();
-        match lines.next() {
-            None => println!("{}", prefix.trim_end()),
-            Some(first) => {
-                println!("{prefix}{first}");
-                for l in lines {
-                    println!("{}{l}", " ".repeat(indent));
-                }
+        let first_width = cols.saturating_sub(indent);
+        if e.summary.is_empty() {
+            println!("{}", prefix.trim_end());
+        } else if e.summary.chars().count() <= first_width {
+            println!("{prefix}{}", e.summary);
+        } else {
+            // Too long for the row — give it the full width on its own lines.
+            println!("{}", prefix.trim_end());
+            for l in wrap_text(&e.summary, cols.saturating_sub(6)) {
+                println!("      {l}");
             }
         }
     }
