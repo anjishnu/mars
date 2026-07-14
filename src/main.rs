@@ -420,6 +420,7 @@ fn ask_cli(question: String) -> Result<()> {
             | agent::AgentEvent::BgDone
             | agent::AgentEvent::ShiftDelta { .. }
             | agent::AgentEvent::ShiftDone
+            | agent::AgentEvent::Goals { .. }
             | agent::AgentEvent::ShellTranslation { .. } => return Ok(()),
             agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
         }
@@ -2379,6 +2380,7 @@ fn selfcheck() -> Result<()> {
             ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
             ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
             ("shift_brief", prompts::SHIFT_BRIEF, vec!["{away}", "{mission}", "{evidence}"]),
+            ("capture_goals", prompts::CAPTURE_GOALS, vec!["{evidence}"]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
             for h in holders {
@@ -3263,6 +3265,36 @@ fn selfcheck() -> Result<()> {
         app.on_attach();
         assert!(app.shift_report.is_none() && app.notices.is_empty(), "knob=0 must be silent");
         println!("[selfcheck] shift report (save-state) . PASS");
+    }
+
+    // 43b. Goals captured at detach: parse, round-trip, tier route, and feed the
+    //      return briefing. The capture LLM call itself is gated on a key (never
+    //      fires in the hermetic suite), so we test the deterministic seams.
+    {
+        // Parse tolerates list markers and caps at three.
+        let g = agent::parse_goals("1. get the auth test green\n- finish numpy upgrade\n* land OOM fix\nextra");
+        assert_eq!(g, vec!["get the auth test green", "finish numpy upgrade", "land OOM fix"],
+            "goal parse/markers/cap wrong: {g:?}");
+        assert!(agent::parse_goals("\n\n").is_empty(), "blank capture → no goals");
+        // Round-trip, session-scoped.
+        let gwl = std::env::temp_dir().join(format!("mars-goals-{}", std::process::id()));
+        std::env::set_var("MARS_WORKLOG", &gwl);
+        worklog::save_goals("demo", &["ship the overlay".into(), "fix the OOM".into()], 42);
+        assert_eq!(worklog::load_goals("demo"), vec!["ship the overlay", "fix the OOM"], "goals round-trip");
+        assert!(worklog::load_goals("other").is_empty(), "goals leaked across sessions");
+        // Routes at the cheap tier; the tag is pinned in TASKS (checked in 29h).
+        assert_eq!(tiers::model_for("groq", "capture_goals", "x"), "llama-3.1-8b-instant",
+            "capture_goals must route to low");
+        // The Goals event persists what the model returned.
+        let mut app = App::new(None)?;
+        app.agent_tx.send(agent::AgentEvent::Goals { goals: vec!["debug the daemon".into()] })?;
+        app.tick();
+        assert_eq!(worklog::load_goals(&app.session_label()), vec!["debug the daemon"],
+            "Goals event did not persist");
+        std::env::set_var("MARS_WORKLOG", &worklog_default);
+        let _ = std::fs::remove_file(&gwl);
+        let _ = std::fs::remove_file(gwl.with_file_name("goals.json"));
+        println!("[selfcheck] goals capture + recall ... PASS");
     }
 
     let _ = std::fs::remove_file(&worklog_default);

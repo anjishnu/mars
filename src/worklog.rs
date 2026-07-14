@@ -148,3 +148,38 @@ pub fn load_mission(session: &str) -> Option<(String, u64)> {
     let m = &j[session];
     Some((m["mission"].as_str()?.to_string(), m["as_of"].as_u64().unwrap_or(0)))
 }
+
+fn goals_path() -> Option<PathBuf> {
+    worklog_path().map(|p| p.with_file_name("goals.json"))
+}
+
+/// The goals captured at the last detach for `session` — what the user was
+/// working toward when they stepped away. The return briefing reads these to
+/// assess progress against what actually happened on the panes.
+pub fn save_goals(session: &str, goals: &[String], as_of: u64) {
+    let Some(path) = goals_path() else { return };
+    let mut map: serde_json::Map<String, serde_json::Value> = path
+        .exists()
+        .then(|| std::fs::read_to_string(&path).ok())
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    map.insert(session.to_string(), serde_json::json!({ "goals": goals, "as_of": as_of }));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(&path, s);
+    }
+}
+
+/// The goals last captured for `session` (empty if none).
+pub fn load_goals(session: &str) -> Vec<String> {
+    let Some(path) = goals_path() else { return Vec::new() };
+    let Ok(s) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) else { return Vec::new() };
+    j[session]["goals"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|g| g.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}

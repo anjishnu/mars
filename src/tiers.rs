@@ -50,6 +50,8 @@ impl Default for Tiers {
                 // The reattach situation briefing: a short plain-English summary
                 // — cheap tier is plenty, it's reading deterministic evidence.
                 ("shift_brief", "low"),
+                // Goal capture at detach: a tiny "name what's in flight" call.
+                ("capture_goals", "low"),
                 ("translate", "mid"),
                 ("ask", "high"),
             ]),

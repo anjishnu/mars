@@ -4151,6 +4151,14 @@ impl App {
                         }
                     }
                 }
+                AgentEvent::Goals { goals } => {
+                    self.bg_busy = false;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::save_goals(&self.session_label(), &goals, ts);
+                }
             }
         }
 
@@ -4226,6 +4234,41 @@ impl App {
         self.detach_snapshot = Some(Snapshot {
             dirty: self.buffers.values().filter(|b| b.modified).map(|b| b.name.clone()).collect(),
         });
+        // Capture what the user was working toward, so the reattach briefing can
+        // report progress against it. One low-tier call over the live panes +
+        // recent journal; best-effort (a remote detach may find the tunnel gone).
+        if self.tuning.goal_tracking == 1 && !self.bg_busy {
+            let cfg = agent::AgentConfig::from_env();
+            if cfg.is_configured() {
+                let evidence = self.goal_evidence();
+                if !evidence.trim().is_empty() {
+                    self.bg_busy = true;
+                    agent::capture_goals(cfg, evidence, self.agent_tx.clone());
+                }
+            }
+        }
+    }
+
+    /// Evidence for goal capture: the tail of each live terminal pane plus the
+    /// last few work-journal verdicts — what's in flight right now.
+    fn goal_evidence(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for tab in &self.tabs {
+            for pid in tab.layout.pane_ids() {
+                if let Some(&PaneContent::Terminal(tid)) = self.panes.get(&pid).map(|p| &p.content) {
+                    let tail = self.terminal_tail(tid, 24);
+                    if !tail.trim().is_empty() {
+                        parts.push(format!("[{}]\n{}", tab.name, crate::retrieval::redact(&tail)));
+                    }
+                }
+            }
+        }
+        let recent = crate::worklog::recent(&self.session_label(), 5);
+        if !recent.is_empty() {
+            let lines: Vec<String> = recent.iter().map(|e| format!("- {}", e.verdict)).collect();
+            parts.push(format!("recent:\n{}", lines.join("\n")));
+        }
+        parts.join("\n\n")
     }
 
     /// Build the shift report (the save-state restore). Returns true when there
@@ -4368,7 +4411,14 @@ impl App {
         // (instant, keyless-safe), then let the persona-voiced version stream in
         // and replace it. Evidence is the sorted rows' facts.
         report.narrative = report.deterministic_narrative();
-        let evidence = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
+        let mut evidence = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
+        // The goals captured at detach: the briefing reports progress against
+        // them by comparing to what actually happened on the panes above.
+        let goals = crate::worklog::load_goals(&self.session_label());
+        if !goals.is_empty() {
+            let g = goals.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n");
+            evidence = format!("What they were working toward:\n{g}\n\nWhat happened:\n{evidence}");
+        }
         crate::llm_log::event(
             "shift_report_shown",
             serde_json::json!({
@@ -4534,7 +4584,7 @@ impl App {
         self.open_bar(BarMode::Ask);
     }
 
-    fn session_label(&self) -> String {
+    pub fn session_label(&self) -> String {
         self.session_name.clone().unwrap_or_else(|| "standalone".to_string())
     }
 

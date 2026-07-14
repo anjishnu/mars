@@ -8,12 +8,18 @@ outcomes, not just verdicts.
 
 ### Added
 - **The shift report**: reattach to a session where things happened and get a
-  full-screen mission report — time away, per-workstream verdicts (failures
-  first, then blocked ⏸, done, running), and at most one suggested next move
-  (Enter types it into the composer, still confirm-gated; any other key resumes
-  exactly where you left off). Shows only when something actually happened.
-  Knob `shift_report`: 2 = full screen (default), 1 = the classic one-line
-  notice, 0 = off.
+  full-screen briefing — the MARS wordmark, a plain-English situation report in
+  the mission-control voice ("Trainer went down at epoch 3, CUDA OOM — needs a
+  smaller batch before relaunch. Build's green. Quiet otherwise, captain."),
+  then a terse per-workstream manifest (failures first, then blocked ⏸, done,
+  running) with a "why" line (cwd · exit · error) under anything that failed.
+  The prose streams in; any key resumes exactly where you left off. Shows only
+  when something actually happened. Knob `shift_report`: 2 = full screen
+  (default), 1 = the classic one-line notice, 0 = off.
+- **Goal tracking**: when you detach, the agent captures what you were working
+  toward (from the live panes + recent journal), so the reattach briefing
+  reports progress against it — "you were trying to get the auth test green;
+  it's still failing." Knob `goal_tracking` (default on).
 - **Verdict triage ladder**: watch verdicts now escalate one way — free
   deterministic heuristics (exit codes, error/blocked/progress tail shapes),
   then ONE batched low-tier model call for ambiguous rows only. A mars with no

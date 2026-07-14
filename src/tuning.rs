@@ -57,6 +57,7 @@ pub struct Tuning {
     pub shift_report: u64,
     pub auto_watch: u64,
     pub watch_min_active_secs: u64,
+    pub goal_tracking: u64,
 }
 
 impl Default for Tuning {
@@ -107,6 +108,7 @@ impl Default for Tuning {
             shift_report: 2,
             auto_watch: 1,
             watch_min_active_secs: 10,
+            goal_tracking: 1,
         }
     }
 }
@@ -262,6 +264,10 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("watch_min_active_secs", knob(json!(d.watch_min_active_secs),
             "Seconds of continuous output before auto-watch arms a pane — \
              filters one-shot commands so only real runs earn verdicts.")),
+        ("goal_tracking", knob(json!(d.goal_tracking),
+            "1 = when you detach, the agent captures what you were working \
+             toward, so the reattach briefing can report progress on it; \
+             0 = off.")),
     ]
 }
 
@@ -376,6 +382,7 @@ pub fn load() -> Tuning {
         t.shift_report = get_u64(&map, "shift_report", t.shift_report);
         t.auto_watch = get_u64(&map, "auto_watch", t.auto_watch);
         t.watch_min_active_secs = get_u64(&map, "watch_min_active_secs", t.watch_min_active_secs);
+        t.goal_tracking = get_u64(&map, "goal_tracking", t.goal_tracking);
         if let Some(list) = map.get("project_ignore").and_then(|e| e.value.as_array()) {
             let dirs: Vec<String> =
                 list.iter().filter_map(|v| v.as_str().map(String::from)).collect();

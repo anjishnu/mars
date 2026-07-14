@@ -25,3 +25,4 @@ pub const EXPLAIN_FAILURE: &str = include_str!("prompts/explain_failure.md");
 pub const PERSONA_PREAMBLE: &str = include_str!("prompts/persona_preamble.md");
 pub const PERSONA_DEFAULT: &str = include_str!("prompts/persona_default.md");
 pub const SHIFT_BRIEF: &str = include_str!("prompts/shift_brief.md");
+pub const CAPTURE_GOALS: &str = include_str!("prompts/capture_goals.md");

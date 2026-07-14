@@ -58,6 +58,8 @@ pub enum AgentEvent {
     ShiftDelta { text: String },
     /// Shift report: the briefing finished streaming.
     ShiftDone,
+    /// Goals captured at detach — what the user was working toward.
+    Goals { goals: Vec<String> },
     Error(String),
 }
 
@@ -542,8 +544,42 @@ fn is_reasoning_model(model: &str) -> bool {
 /// Every task tag a call site sends. The selfcheck pins each to a tiers.json
 /// default key so a tag rename can't silently fall through to the provider
 /// default model again (deliberate non-members: `ask_escalated`, `remote`).
-pub const TASKS: &[&str] =
-    &["ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_brief"];
+pub const TASKS: &[&str] = &[
+    "ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_brief",
+    "capture_goals",
+];
+
+/// Parse a goal-capture reply into 1-3 clean goal lines (strips list markers,
+/// caps the count). Pure.
+pub fn parse_goals(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' '))
+                .trim()
+                .to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect()
+}
+
+/// Capture the user's active goals at detach: one low-tier FORMAT call over the
+/// current pane evidence. Quiet failure — goals are a nicety, and a remote
+/// detach may find the tunnel already gone.
+pub fn capture_goals(cfg: AgentConfig, evidence: String, tx: mpsc::Sender<AgentEvent>) {
+    std::thread::spawn(move || {
+        let system = crate::prompts::CAPTURE_GOALS.trim_end().replace("{evidence}", &evidence);
+        let messages = format_task_messages(&system, "What am I working on?");
+        if let Ok(text) = chat(&cfg, messages, "capture_goals") {
+            let goals = parse_goals(&text);
+            if !goals.is_empty() {
+                let _ = tx.send(AgentEvent::Goals { goals });
+            }
+        }
+        let _ = tx.send(AgentEvent::BgDone);
+    });
+}
 
 /// The shift report's plain-English situation briefing — the star of the reattach
 /// overlay. A single VOICE call over the deterministic row evidence, so the
