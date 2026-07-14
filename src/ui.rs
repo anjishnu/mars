@@ -70,9 +70,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_splash {
         render_splash(frame, app, pane_area);
     }
+    // The shift report: the save-state restore overlays the workspace on
+    // reattach; any key resumes. Suppresses notice noise while up.
+    if app.shift_report.is_some() {
+        render_shift_report(frame, app, pane_area);
+    }
     // Proactive notice (W6): one dim line at the bottom of the workspace, the
     // agent's only path to the screen. Failures first; Esc dismisses.
-    if !app.notices.is_empty() && !app.show_splash {
+    if !app.notices.is_empty() && !app.show_splash && app.shift_report.is_none() {
         render_notice(frame, app, pane_area);
     }
     render_status(frame, app, status_area);
@@ -638,6 +643,78 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
+/// The shift report — the save-state restore. Splash pattern: Clear + one
+/// centered Paragraph over the workspace. Rows are live state (a settling row
+/// updates in place as the batched call's telemetry streams in); any key
+/// resumes, Enter types the suggestion into the composer.
+fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
+    let Some(rep) = app.shift_report.as_ref() else { return };
+    frame.render_widget(Clear, inner);
+    let accent = rgb(app.tuning.theme_accent);
+    let bright = rgb(app.tuning.theme_accent_bright);
+    let dim = Style::default().fg(Color::DarkGray);
+    let w = inner.width.saturating_sub(4).min(96) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  MISSION REPORT", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("   T+{} away", crate::briefing::fmt_secs(rep.away_secs)),
+            dim,
+        ),
+    ]));
+    if let Some(m) = &rep.mission {
+        lines.push(Line::from(Span::styled(format!("  mission: {m}"), Style::default().fg(Color::White))));
+    }
+    lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+    for r in &rep.rows {
+        let fg = match r.verdict {
+            crate::briefing::Verdict::Failed => bright,
+            crate::briefing::Verdict::Blocked => accent,
+            crate::briefing::Verdict::Done => rgb(app.tuning.theme_terminal),
+            _ => Color::Gray,
+        };
+        let tab = if r.tab.is_empty() { String::new() } else { format!("[{}] ", r.tab) };
+        let mut meta = Vec::new();
+        if let Some(d) = r.dur_secs.filter(|d| *d > 0) {
+            meta.push(format!("ran {}", crate::briefing::fmt_secs(d)));
+        }
+        if let Some(a) = r.ago_secs.filter(|a| *a > 0) {
+            meta.push(format!("{} ago", crate::briefing::fmt_secs(a)));
+        }
+        let meta = if meta.is_empty() { String::new() } else { format!("  ({})", meta.join(", ")) };
+        let settling = if r.settling { " …" } else { "" };
+        let body: String = format!("{tab}{}{meta}{settling}", r.text).chars().take(w.saturating_sub(4)).collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", r.verdict.glyph()), Style::default().fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled(body, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+    if let Some(s) = &rep.suggestion {
+        lines.push(Line::from(vec![
+            Span::styled("  » next: ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+            Span::styled(s.clone(), Style::default().fg(Color::White)),
+        ]));
+    }
+    let resume = match (&rep.suggestion, app.rows_settling()) {
+        (Some(_), _) => "  Enter types the suggestion · any other key resumes",
+        (None, true) => "  telemetry coming in — any key resumes now",
+        (None, false) => "  any key resumes exactly where you left off",
+    };
+    lines.push(Line::from(Span::styled(resume, dim)));
+
+    let block_h = lines.len() as u16;
+    let top_pad = inner.height.saturating_sub(block_h) / 2;
+    let area = Rect {
+        x: inner.x,
+        y: inner.y + top_pad,
+        width: inner.width,
+        height: block_h.min(inner.height),
+    };
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
 fn render_terminal_pane(
     frame: &mut Frame,
     app: &App,
@@ -1141,6 +1218,7 @@ fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
     let row = Rect { x: pane_area.x, y: pane_area.bottom() - 1, width: pane_area.width, height: 1 };
     let (glyph, fg) = match n.kind {
         crate::app::NoticeKind::Failure => ("✗", rgb(app.tuning.theme_accent_bright)),
+        crate::app::NoticeKind::Blocked => ("⏸", rgb(app.tuning.theme_accent)),
         crate::app::NoticeKind::Info => ("✓", rgb(app.tuning.theme_terminal)),
     };
     let more = if app.notices.len() > 1 { format!("  (+{} more)", app.notices.len() - 1) } else { String::new() };

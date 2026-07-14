@@ -54,6 +54,10 @@ pub enum AgentEvent {
     BgDone,
     /// W3 shell translate: English → one shell command (fills the SH bar).
     ShellTranslation { command: String, call_id: u64 },
+    /// Shift report: the batch call volunteered one next-move command.
+    ShiftSuggestion { command: String },
+    /// Shift report: the batch call finished — settle any rows it left as-is.
+    ShiftDone,
     Error(String),
 }
 
@@ -497,7 +501,74 @@ fn is_reasoning_model(model: &str) -> bool {
 /// Every task tag a call site sends. The selfcheck pins each to a tiers.json
 /// default key so a tag rename can't silently fall through to the provider
 /// default model again (deliberate non-members: `ask_escalated`, `remote`).
-pub const TASKS: &[&str] = &["ask", "translate", "watch", "mission", "auto_name", "name_session"];
+pub const TASKS: &[&str] =
+    &["ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_batch"];
+
+/// Parse one `#<id>: <verdict>` line of a shift-batch reply.
+pub fn parse_shift_line(line: &str) -> Option<(usize, String)> {
+    let rest = line.trim().strip_prefix('#')?;
+    let (id, verdict) = rest.split_once(':')?;
+    let verdict = verdict.trim();
+    if verdict.is_empty() {
+        return None;
+    }
+    Some((id.trim().parse().ok()?, verdict.to_string()))
+}
+
+/// The shift report's single batched polish: N pane tails → one low-tier call →
+/// one `WatchSummary` per parsed line (so every downstream bookkeeper — journal,
+/// notices, away log — runs unchanged), plus at most one `ShiftSuggestion`.
+/// Lines stream: each completed line fires as it arrives (the overlay's
+/// telemetry-coming-in effect). FORMAT task — no persona. Unparseable lines are
+/// dropped; the overlay keeps its deterministic tier-0 text for those rows.
+pub fn shift_batch(cfg: AgentConfig, panes: Vec<(usize, String, String)>, tx: mpsc::Sender<AgentEvent>) {
+    std::thread::spawn(move || {
+        let blocks: Vec<String> = panes
+            .iter()
+            .map(|(id, tab, tail)| format!("#{id} ({tab}):\n{tail}"))
+            .collect();
+        let system = crate::prompts::SHIFT_BATCH
+            .trim_end()
+            .replace("{panes}", &blocks.join("\n\n"));
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+            serde_json::json!({ "role": "user", "content": "Report." }),
+        ];
+        let mut sent = std::collections::HashSet::new();
+        let emit_line = |line: &str, sent: &mut std::collections::HashSet<usize>| {
+            if let Some((id, verdict)) = parse_shift_line(line) {
+                if panes.iter().any(|(pid, _, _)| *pid == id) && sent.insert(id) {
+                    let _ = tx.send(AgentEvent::WatchSummary { term_id: id, verdict });
+                }
+            } else if let Some(cmd) = line.trim().strip_prefix("next:") {
+                let cmd = cmd.trim();
+                if !cmd.is_empty() {
+                    let _ = tx.send(AgentEvent::ShiftSuggestion { command: cmd.to_string() });
+                }
+            }
+        };
+        let mut buf = String::new();
+        let mut on_delta = |d: &str| {
+            buf.push_str(d);
+            while let Some(nl) = buf.find('\n') {
+                let line: String = buf.drain(..=nl).collect();
+                emit_line(&line, &mut sent);
+            }
+        };
+        match chat_with_id_streaming(&cfg, messages, "shift_batch", "n/a", &mut on_delta) {
+            Ok((text, _)) => {
+                // Re-walk the full text: catches the final unterminated line and
+                // anything a non-streaming provider (broker) returned in one piece.
+                for line in text.lines() {
+                    emit_line(line, &mut sent);
+                }
+            }
+            Err(_) => {} // rows keep their deterministic tier-0 text
+        }
+        let _ = tx.send(AgentEvent::ShiftDone);
+        let _ = tx.send(AgentEvent::BgDone);
+    });
+}
 
 /// FORMAT-task builder for translate: machine-parsed output, so the persona
 /// NEVER appears here (selfcheck-pinned). Pure.

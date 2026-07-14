@@ -1,0 +1,171 @@
+//! The shift report — a save-state restore for the workspace. Everything here
+//! is pure and deterministic (tier 0 of the verdict triage ladder): exit
+//! codes, durations, and tail-shape heuristics produce honest rows with zero
+//! LLM involvement. The model only ever REPLACES a defensible placeholder —
+//! ambiguous rows go, batched, to a low-tier model after the overlay is
+//! already on screen (the frame is never blocked on a network call).
+
+/// Row classes in fixed display order: what needs you first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Verdict {
+    Failed,
+    Blocked,
+    Done,
+    Running,
+    Context,
+}
+
+impl Verdict {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Verdict::Failed => "✗",
+            Verdict::Blocked => "⏸",
+            Verdict::Done => "✓",
+            Verdict::Running => "●",
+            Verdict::Context => "·",
+        }
+    }
+}
+
+pub struct ReportRow {
+    pub verdict: Verdict,
+    pub tab: String,
+    pub text: String,
+    /// Seconds since the event (None for still-running rows).
+    pub ago_secs: Option<u64>,
+    /// How long the run took / has been going.
+    pub dur_secs: Option<u64>,
+    /// The pane this row describes, when it still exists.
+    pub term_id: Option<crate::terminal::TermId>,
+    /// Tier-0 couldn't settle this row — it renders with a settling marker and
+    /// is a candidate for the batched LLM polish.
+    pub settling: bool,
+}
+
+pub struct ShiftReport {
+    pub away_secs: u64,
+    pub mission: Option<String>,
+    pub rows: Vec<ReportRow>,
+    /// One suggested next move, shown only when a row failed or blocked.
+    pub suggestion: Option<String>,
+    /// Millis timestamp when the overlay first rendered (for instrumentation).
+    pub shown_at: std::time::Instant,
+}
+
+/// Tier-0 verdict for one pane, from evidence alone.
+pub struct Triage {
+    pub verdict: Verdict,
+    pub text: String,
+    /// True when the heuristics couldn't settle it — send to the model.
+    pub ambiguous: bool,
+}
+
+const FAIL_MARKS: &[&str] = &[
+    "error:", "error[", "failed", "failure", "panic", "traceback", "out of memory",
+    "oom", "killed", "segmentation fault", "command not found", "fatal:",
+];
+const BLOCKED_MARKS: &[&str] = &[
+    "[y/n]", "(y/n)", "[y/n]:", "continue?", "password:", "passphrase",
+    "are you sure", "waiting for", "press enter", "(yes/no)", "proceed?",
+];
+const PROGRESS_MARKS: &[&str] = &["it/s", "eta ", "step ", "epoch ", "%|", "██"];
+
+/// The tier-0 ladder. Order matters: exit codes are ground truth and beat
+/// every tail heuristic; blocked shapes beat failure words (a confirm prompt
+/// quoting an error is still a question); progress beats quiet-ambiguity.
+pub fn triage(tail: &str, exit: Option<i32>, running: bool) -> Triage {
+    let low = tail.to_lowercase();
+    let last_lines: String = low.lines().rev().take(6).collect::<Vec<_>>().join("\n");
+    match exit {
+        Some(0) => {
+            return Triage {
+                verdict: Verdict::Done,
+                text: "exited clean".into(),
+                // A clean exit whose tail still shouts failure words is worth
+                // one cheap model look (tests that "pass" by exiting 0 after
+                // printing FAILED exist) — but the row is Done either way.
+                ambiguous: FAIL_MARKS.iter().any(|m| last_lines.contains(m)),
+            };
+        }
+        Some(code) => {
+            let named = match code {
+                130 => " (interrupted)".to_string(),
+                137 => " (killed — OOM?)".to_string(),
+                139 => " (segfault)".to_string(),
+                _ => String::new(),
+            };
+            return Triage {
+                verdict: Verdict::Failed,
+                text: format!("exited {code}{named}"),
+                ambiguous: true, // a one-line CAUSE is worth a cheap model look
+            };
+        }
+        None => {}
+    }
+    // No exit code: the pane is alive (quiet) or evidence predates capture.
+    if BLOCKED_MARKS.iter().any(|m| last_lines.contains(m))
+        || last_lines.trim_end().ends_with('?')
+    {
+        return Triage {
+            verdict: Verdict::Blocked,
+            text: "waiting on your input".into(),
+            ambiguous: false,
+        };
+    }
+    if FAIL_MARKS.iter().any(|m| last_lines.contains(m)) {
+        return Triage {
+            verdict: Verdict::Failed,
+            text: "failure in output".into(),
+            ambiguous: true,
+        };
+    }
+    if running && PROGRESS_MARKS.iter().any(|m| low.contains(m)) {
+        return Triage {
+            verdict: Verdict::Running,
+            text: "still running".into(),
+            ambiguous: false,
+        };
+    }
+    if running {
+        return Triage {
+            verdict: Verdict::Running,
+            text: "quiet".into(),
+            ambiguous: true,
+        };
+    }
+    Triage { verdict: Verdict::Done, text: "finished".into(), ambiguous: true }
+}
+
+/// Class of a verdict STRING (model- or tier-0-authored): the `blocked:` /
+/// `failed:` / `done:` prefixes the prompts mandate, with keyword fallbacks.
+pub fn classify(text: &str, default: Verdict) -> Verdict {
+    let low = text.trim().to_lowercase();
+    if low.starts_with("blocked") || low.contains("waiting on your input") {
+        Verdict::Blocked
+    } else if low.starts_with("failed") || low.starts_with("✗") {
+        Verdict::Failed
+    } else if low.starts_with("done") {
+        Verdict::Done
+    } else if low.contains("fail") || low.contains("error") {
+        Verdict::Failed
+    } else {
+        default
+    }
+}
+
+/// Humanize seconds: 42s, 4m12s, 1h02m, 2d3h.
+pub fn fmt_secs(s: u64) -> String {
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m{:02}s", s / 60, s % 60),
+        3600..=86_399 => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+        _ => format!("{}d{}h", s / 86_400, (s % 86_400) / 3600),
+    }
+}
+
+impl ShiftReport {
+    /// Sort rows into display order (what needs you first), stable within class.
+    pub fn sort_rows(&mut self) {
+        self.rows.sort_by_key(|r| r.verdict);
+    }
+}

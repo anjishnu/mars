@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+The mission-aware release: reattaching becomes a save-state restore, the
+assistant gains a configurable voice, and the work journal starts carrying
+outcomes, not just verdicts.
+
+### Added
+- **The shift report**: reattach to a session where things happened and get a
+  full-screen mission report — time away, per-workstream verdicts (failures
+  first, then blocked ⏸, done, running), and at most one suggested next move
+  (Enter types it into the composer, still confirm-gated; any other key resumes
+  exactly where you left off). Shows only when something actually happened.
+  Knob `shift_report`: 2 = full screen (default), 1 = the classic one-line
+  notice, 0 = off.
+- **Verdict triage ladder**: watch verdicts now escalate one way — free
+  deterministic heuristics (exit codes, error/blocked/progress tail shapes),
+  then ONE batched low-tier model call for ambiguous rows only. A mars with no
+  API key at all now produces deterministic verdicts instead of silence, and
+  the report renders instantly with model text streaming in afterwards
+  ("telemetry coming in").
+- **Auto-watch**: panes that stay busy past `watch_min_active_secs` (10s) are
+  watched automatically — the fleet reaches verdicts without arming anything.
+  The pane you're looking at is never summarized. Knob `auto_watch` to disable.
+- **Blocked verdicts**: a pane waiting on your input is its own class (⏸),
+  sorted right after failures in notices and the report.
+- **Persona**: the assistant speaks in a configurable voice
+  (`~/.mars/persona.md`, "Open persona" in the command bar) — default: mission
+  control addressing the ship's captain. Style only: it structurally cannot
+  change what the agent does. Empty file turns it off.
+- **Outcome-carrying work journal**: watch records now include cwd, the
+  command mars ran, the exit code, and a redacted error excerpt on failure —
+  the substrate for failure→fix recall. Journal self-compacts
+  (`worklog_max_lines`).
+- **Open tuning knobs** joins the command bar.
+
+### Fixed
+- Two panes concluding while detached no longer lose one verdict (the pending
+  trigger queue was a single slot).
+- Translate calls now actually route through their intended model tier (the
+  task tag said "shell", the tier map said "translate" — nobody won).
+
 ## 0.3.3
 
 ### Added

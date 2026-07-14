@@ -96,6 +96,12 @@ broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
              remote mars session (attach most-recent, else create "main");
              detaching ends the ssh and returns home, tmux-style — a bare
              remote shell is what plain `ssh` is for.
+briefing.rs  The shift report (save-state restore): pure tier-0 verdict triage
+             (exit codes → tail heuristics → AMBIGUOUS), report assembly types.
+             The escalation ladder is one-way: heuristics free, then ONE
+             batched low-tier call for ambiguous rows only, then model_above
+             on self-check failure — the overlay frame is never blocked on a
+             model, and a keyless mars still gets deterministic verdicts.
 persona.rs   The voice seam: ~/.mars/persona.md (hot-read, capped, redacted)
              rides into VOICE tasks (ask, watch) as the FINAL system message
              under a precedence preamble — style can color prose, never

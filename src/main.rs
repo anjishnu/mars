@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod banner;
+mod briefing;
 mod broker;
 mod buffer;
 mod config;
@@ -414,6 +415,8 @@ fn ask_cli(question: String) -> Result<()> {
             | agent::AgentEvent::WatchSummary { .. }
             | agent::AgentEvent::Mission { .. }
             | agent::AgentEvent::BgDone
+            | agent::AgentEvent::ShiftSuggestion { .. }
+            | agent::AgentEvent::ShiftDone
             | agent::AgentEvent::ShellTranslation { .. } => return Ok(()),
             agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
         }
@@ -436,6 +439,14 @@ fn selfcheck() -> Result<()> {
     ] {
         std::env::remove_var(key);
     }
+    // Hermetic, part 2: keyless watch fires now produce deterministic verdicts
+    // that land in the work journal — point the WHOLE suite at a scratch file so
+    // no block can pollute the user's real ~/.mars/worklog.jsonl. Blocks that
+    // need their own seeded journal set/reset MARS_WORKLOG back to this default.
+    let worklog_default =
+        std::env::temp_dir().join(format!("mars-selfcheck-worklog-{}", std::process::id()));
+    let _ = std::fs::remove_file(&worklog_default);
+    std::env::set_var("MARS_WORKLOG", &worklog_default);
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1754,6 +1765,7 @@ fn selfcheck() -> Result<()> {
     //      deterministic, no API key (broker-ready: only verdict TEXT is LLM-made).
     {
         let mut app = App::new(None)?;
+        app.tuning.shift_report = 1; // this block pins the CLASSIC notice mode
         app.on_detach();
         app.on_attach();
         assert!(app.notices.is_empty(), "briefing appeared when nothing changed");
@@ -2313,6 +2325,7 @@ fn selfcheck() -> Result<()> {
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
             ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
             ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
+            ("shift_batch", prompts::SHIFT_BATCH, vec!["{panes}"]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
             for h in holders {
@@ -2500,7 +2513,7 @@ fn selfcheck() -> Result<()> {
             session::wrap_text("short", 20) == vec!["short"],
             "short summary should stay one line"
         );
-        std::env::remove_var("MARS_WORKLOG");
+        std::env::set_var("MARS_WORKLOG", &worklog_default); // back to the suite default
         let _ = std::fs::remove_file(&wl);
         let _ = std::fs::remove_file(std::env::temp_dir().join(format!("mars-worklog-{}", std::process::id())).with_file_name("mission.json"));
 
@@ -2538,7 +2551,7 @@ fn selfcheck() -> Result<()> {
                 && brief.contains("failed: OOM at step 40"),
             "briefing missing mission or journal lines: {brief}"
         );
-        std::env::remove_var("MARS_WORKLOG");
+        std::env::set_var("MARS_WORKLOG", &worklog_default); // back to the suite default
         let _ = std::fs::remove_file(&wl2);
         let _ = std::fs::remove_file(wl2.with_file_name("mission.json"));
         println!("[selfcheck] worklog + mission + expand PASS");
@@ -3066,6 +3079,138 @@ fn selfcheck() -> Result<()> {
         assert_eq!(retrieval::MemoryMode::from_env().as_str(), "none");
         println!("[selfcheck] retrieval (bm25 + mode) ... PASS");
     }
+
+    // 43. The shift report — the save-state restore. Tier-0 triage table; batch
+    //     reply parsing; end-to-end keyless flow: watched pane fails while
+    //     detached → deterministic verdict → reattach overlay, failures first,
+    //     any key resumes, Enter types the suggestion; knob gates it all.
+    {
+        use briefing::{classify, triage, Verdict};
+        // Triage: exit codes are ground truth, tails refine.
+        assert_eq!(triage("all done", Some(0), false).verdict, Verdict::Done);
+        assert!(!triage("ok\n", Some(0), false).ambiguous, "clean exit should not need a model");
+        let t = triage("...", Some(137), false);
+        assert_eq!(t.verdict, Verdict::Failed);
+        assert!(t.text.contains("137") && t.ambiguous, "nonzero exit wants a modeled cause: {}", t.text);
+        assert_eq!(triage("Continue? [y/N]", None, true).verdict, Verdict::Blocked);
+        assert!(!triage("Continue? [y/N]", None, true).ambiguous);
+        assert_eq!(triage("CUDA out of memory. Tried to allocate", None, true).verdict, Verdict::Failed);
+        assert_eq!(triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).verdict, Verdict::Running);
+        assert!(!triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).ambiguous);
+        assert!(triage("some quiet text", None, true).ambiguous, "quiet-alive is the model's case");
+        // Verdict-string classing (model/tier-0 authored prefixes).
+        assert_eq!(classify("blocked: wants a password", Verdict::Done), Verdict::Blocked);
+        assert_eq!(classify("failed: linker error", Verdict::Done), Verdict::Failed);
+        assert_eq!(classify("done: tests green", Verdict::Failed), Verdict::Done);
+        // Batch reply lines.
+        assert_eq!(agent::parse_shift_line("#3: done: build green"), Some((3, "done: build green".into())));
+        assert_eq!(agent::parse_shift_line("garbage"), None);
+        assert_eq!(agent::parse_shift_line("#x: nope"), None);
+        assert_eq!(briefing::fmt_secs(4212), "1h10m");
+
+        // End-to-end, keyless and hermetic: two watched panes conclude while
+        // detached — one fails, one succeeds — a third keeps running.
+        let mut app = App::new(None)?;
+        app.tuning.shift_report = 2;
+        app.tuning.watch_quiet_secs = 1000; // quiet timer out of the picture
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('!')))?;
+        typ(&mut app, "exit 3")?; // ends the pane's shell itself → real exit code
+        app.handle_key(k(KeyCode::Enter))?;
+        let fail_tid = match app.focused_pane().content {
+            pane::PaneContent::Terminal(id) => id,
+            _ => panic!("no terminal"),
+        };
+        app.run_action(palette::Action::WatchPane);
+        app.on_detach();
+        // Let the shell run and exit; drain events (queues the exit trigger,
+        // keyless fire produces the deterministic tier-0 verdict).
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.frame_tick += 3; // simulated time passes while detached
+            app.tick();
+            if app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false) {
+                break;
+            }
+        }
+        assert!(
+            app.watches.get(&fail_tid).and_then(|w| w.verdict.clone())
+                .map(|v| v.starts_with("failed"))
+                .unwrap_or(false),
+            "keyless exit-3 did not produce a deterministic failed verdict"
+        );
+        app.on_attach();
+        let rep = app.shift_report.as_ref().expect("no shift report after eventful away");
+        assert!(rep.rows.iter().any(|r| r.verdict == Verdict::Failed), "failed row missing");
+        assert_eq!(rep.rows.first().map(|r| r.verdict), Some(Verdict::Failed), "failures must lead");
+        assert!(app.notices.is_empty() || app.shift_report.is_some(), "report should subsume notices");
+        // Renders as a full overlay, telemetry footer honest.
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("MISSION REPORT"), "overlay title missing");
+        assert!(t.contains("✗"), "failure glyph missing from overlay");
+        // Any key resumes: swallowed, report gone, workspace intact.
+        app.handle_key(k(KeyCode::Char('x')))?;
+        assert!(app.shift_report.is_none(), "key did not dismiss the report");
+        // Enter with a suggestion prefills the shell composer, confirm-gated.
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 60,
+            mission: None,
+            rows: vec![briefing::ReportRow {
+                verdict: Verdict::Failed, tab: "t".into(), text: "failed: x".into(),
+                ago_secs: None, dur_secs: None, term_id: None, settling: false,
+            }],
+            suggestion: Some("cargo test -- --nocapture".into()),
+            shown_at: std::time::Instant::now(),
+        });
+        app.handle_key(k(KeyCode::Enter))?;
+        assert!(app.shift_report.is_none(), "Enter did not dismiss the report");
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.query.as_str()),
+            Some("cargo test -- --nocapture"),
+            "suggestion did not prefill the composer"
+        );
+        assert!(app.shell_ready, "prefilled suggestion must be one confirm from running");
+        app.handle_key(k(KeyCode::Esc))?;
+        // ShiftSuggestion only lands while something needs the user; ShiftDone
+        // settles leftover rows.
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 1, mission: None,
+            rows: vec![briefing::ReportRow {
+                verdict: Verdict::Done, tab: "t".into(), text: "done".into(),
+                ago_secs: None, dur_secs: None, term_id: None, settling: true,
+            }],
+            suggestion: None, shown_at: std::time::Instant::now(),
+        });
+        app.agent_tx.send(agent::AgentEvent::ShiftSuggestion { command: "rm -rf /".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDone)?;
+        app.tick();
+        let rep = app.shift_report.as_ref().unwrap();
+        assert!(rep.suggestion.is_none(), "suggestion must not surface on an all-green report");
+        assert!(!rep.rows[0].settling, "ShiftDone did not settle rows");
+        app.shift_report = None;
+        // Knob 1 = classic notice; knob 0 = nothing (digest still scoped).
+        let mut app = App::new(None)?;
+        app.tuning.shift_report = 1;
+        app.on_detach();
+        app.frame_tick += 10;
+        app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
+        app.on_attach();
+        assert!(app.shift_report.is_none(), "knob=1 must not build the overlay");
+        assert!(app.notices.iter().any(|n| n.text.contains("while away")), "knob=1 lost the notice");
+        let mut app = App::new(None)?;
+        app.tuning.shift_report = 0;
+        app.on_detach();
+        app.frame_tick += 10;
+        app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
+        app.on_attach();
+        assert!(app.shift_report.is_none() && app.notices.is_empty(), "knob=0 must be silent");
+        println!("[selfcheck] shift report (save-state) . PASS");
+    }
+
+    let _ = std::fs::remove_file(&worklog_default);
+    std::env::remove_var("MARS_WORKLOG");
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())
