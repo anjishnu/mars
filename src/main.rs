@@ -2551,11 +2551,12 @@ fn selfcheck() -> Result<()> {
         worklog::save_goals("s_fail", &["ship the release".into()], now);
         assert!(session::session_summary("s_fail").starts_with("blocked: waiting on your input · "),
             "a needs-you verdict must lead: {}", session::session_summary("s_fail"));
-        // (2) No failure → the goals (the captured intent) win over a done verdict.
+        // (2) No failure → the goals (the captured intent) win over a done
+        //     verdict, and ALL goals show (one per line), not a "+N more" tease.
         worklog::record(&mk("s_goal", "done: built the thing", false, now - 30));
         worklog::save_goals("s_goal", &["test MARS features".into(), "write the doc".into()], now);
-        assert_eq!(session::session_summary("s_goal"), "→ test MARS features  (+1 more)",
-            "goals should summarize the session");
+        assert_eq!(session::session_summary("s_goal"), "→ test MARS features\n→ write the doc",
+            "all goals should summarize the session, one per line");
         // (3) Lifecycle noise never becomes the headline; a real done verdict does.
         worklog::record(&mk("s_done", "done: user exited terminal voluntarily", false, now - 5));
         worklog::record(&mk("s_done", "done: cargo build green", false, now - 90));

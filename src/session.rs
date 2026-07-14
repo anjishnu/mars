@@ -782,14 +782,11 @@ pub fn session_summary(name: &str) -> String {
         }
     }
     // 2. The goals captured at detach — the clearest "what is this session for."
+    //    All of them, one per line (the renderer wraps each wide); newline-joined
+    //    so the ls table can lay them out as a small block, not a "(+N more)" tease.
     let goals = crate::worklog::load_goals(name);
-    if let Some(first) = goals.first() {
-        let head = clip(first, 52);
-        return if goals.len() > 1 {
-            format!("→ {head}  (+{} more)", goals.len() - 1)
-        } else {
-            format!("→ {head}")
-        };
+    if !goals.is_empty() {
+        return goals.iter().map(|g| format!("→ {}", clip(g, 72))).collect::<Vec<_>>().join("\n");
     }
     // 3. A *recent* inferred mission — age-gated so a days-old vague line doesn't
     //    masquerade as current state (the "basically useless" complaint).
@@ -902,15 +899,19 @@ pub fn list_main(prompt: bool) -> Result<()> {
         );
         let indent = prefix.chars().count();
         let first_width = cols.saturating_sub(indent);
+        let one_line = !e.summary.contains('\n');
         if e.summary.is_empty() {
             println!("{}", prefix.trim_end());
-        } else if e.summary.chars().count() <= first_width {
+        } else if one_line && e.summary.chars().count() <= first_width {
             println!("{prefix}{}", e.summary);
         } else {
-            // Too long for the row — give it the full width on its own lines.
+            // Multi-line (a goal list) or too long for the row — give each line
+            // the full width on its own indented line(s).
             println!("{}", prefix.trim_end());
-            for l in wrap_text(&e.summary, cols.saturating_sub(6)) {
-                println!("      {l}");
+            for seg in e.summary.split('\n') {
+                for l in wrap_text(seg, cols.saturating_sub(6)) {
+                    println!("      {l}");
+                }
             }
         }
     }
