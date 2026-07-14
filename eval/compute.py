@@ -128,12 +128,16 @@ def main():
     avg = {}
     for c in calls:
         a = avg.setdefault(c["task"], [0, 0, 0]); a[0] += 1; a[1] += pin(c); a[2] += pout(c)
+    # "shell" is the pre-0.4 tag for translate calls; fold old-log rows in.
+    if "shell" in avg:
+        a = avg.setdefault("translate", [0, 0, 0]); s = avg["shell"]
+        a[0] += s[0]; a[1] += s[1]; a[2] += s[2]
     tok_of = lambda t, dflt: ((avg[t][1] + avg[t][2]) / max(avg[t][0], 1)) if t in avg else dflt
     # (task, calls/hr, per-call tokens, tier). Frequencies from typical dogfooding.
     WORKLOAD = [
         ("auto_name",    40, tok_of("auto_name", 240),   "low"),
         ("name_session",  3, tok_of("name_session", 240), "low"),
-        ("shell",        15, tok_of("shell", 360),        "mid"),
+        ("translate",    15, tok_of("translate", 360),    "mid"),
         ("ask",           8, tok_of("ask", 1100),         "high"),
     ]
     TIER_MODEL = {"low": "llama-3.1-8b-instant", "mid": "qwen/qwen3-32b",

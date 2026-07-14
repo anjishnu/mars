@@ -8,6 +8,13 @@
 
 use std::path::PathBuf;
 
+/// One journal line. The schema doubles as the future per-command ledger
+/// (OSC 133 shell integration would write the same shape), so the stores
+/// never fork: a watch verdict is just a ledger entry whose `verdict` is
+/// LLM-compressed and whose `error_excerpt` is the deterministic evidence
+/// under it. `cwd`/`command`/`exit`/`error_excerpt` are honest-when-known:
+/// spawn cwd, the last mars-sent command, the PTY exit code, the redacted
+/// tail on failure — absent otherwise (and on pre-0.4 lines).
 pub struct WorkEntry {
     pub ts: u64,
     pub session: String,
@@ -15,6 +22,10 @@ pub struct WorkEntry {
     pub verdict: String,
     pub failed: bool,
     pub dur_secs: Option<u64>,
+    pub cwd: String,
+    pub command: Option<String>,
+    pub exit: Option<i32>,
+    pub error_excerpt: Option<String>,
 }
 
 /// `~/.mars/worklog.jsonl`; `MARS_WORKLOG` overrides (tests, eval isolation).
@@ -35,7 +46,7 @@ pub fn record(e: &WorkEntry) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "ts": e.ts,
         "session": e.session,
         "tab": e.tab,
@@ -43,6 +54,19 @@ pub fn record(e: &WorkEntry) {
         "failed": e.failed,
         "dur_secs": e.dur_secs,
     });
+    // Optional outcome fields stay off old-shape lines entirely when unknown.
+    if !e.cwd.is_empty() {
+        line["cwd"] = serde_json::json!(e.cwd);
+    }
+    if let Some(c) = &e.command {
+        line["command"] = serde_json::json!(c);
+    }
+    if let Some(x) = e.exit {
+        line["exit"] = serde_json::json!(x);
+    }
+    if let Some(x) = &e.error_excerpt {
+        line["error_excerpt"] = serde_json::json!(x);
+    }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
@@ -64,11 +88,35 @@ pub fn recent(session: &str, limit: usize) -> Vec<WorkEntry> {
             verdict: j["verdict"].as_str().unwrap_or("").to_string(),
             failed: j["failed"].as_bool().unwrap_or(false),
             dur_secs: j["dur_secs"].as_u64(),
+            cwd: j["cwd"].as_str().unwrap_or("").to_string(),
+            command: j["command"].as_str().map(str::to_string),
+            exit: j["exit"].as_i64().map(|x| x as i32),
+            error_excerpt: j["error_excerpt"].as_str().map(str::to_string),
         })
         .collect();
     let skip = out.len().saturating_sub(limit);
     out.drain(..skip);
     out
+}
+
+/// Bound the journal: past 2×`max_lines`, rewrite it to the newest `max_lines`
+/// (tmp file + rename, so a crash can't truncate). Called once at App start —
+/// concurrent appends during the rewrite window are best-effort, like the file.
+pub fn compact(max_lines: usize) {
+    if max_lines == 0 {
+        return;
+    }
+    let Some(path) = worklog_path() else { return };
+    let Ok(content) = std::fs::read_to_string(&path) else { return };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= max_lines * 2 {
+        return;
+    }
+    let keep = &lines[lines.len() - max_lines..];
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, keep.join("\n") + "\n").is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
 
 /// Persist the inferred mission for `session` (read by `mars ls`).

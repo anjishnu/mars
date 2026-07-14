@@ -2310,6 +2310,15 @@ fn selfcheck() -> Result<()> {
         assert_eq!(tiers::model_for("groq", "auto_name", "x"), "llama-3.1-8b-instant");
         assert_eq!(tiers::model_for("groq", "name_session", "x"), "llama-3.1-8b-instant");
         assert_eq!(tiers::model_for("groq", "mission", "x"), "llama-3.1-8b-instant");
+        // EVERY call-site tag routes: agent::TASKS ⊆ the default tier map, so a
+        // tag rename can't silently fall through to the provider default model
+        // again (the "shell"/"translate" bug, fixed 0.4).
+        let ring = tiers::Tiers::default();
+        for t in agent::TASKS {
+            assert!(ring.task_tier.contains_key(*t), "task tag {t:?} is unmapped in tiers defaults");
+        }
+        assert_eq!(tiers::model_for("groq", "translate", "x"), "qwen/qwen3-32b",
+            "translate must route to the mid tier");
         println!("[selfcheck] prompt templates ......... PASS");
     }
 
@@ -2332,16 +2341,44 @@ fn selfcheck() -> Result<()> {
                 verdict: v.to_string(),
                 failed: v.starts_with("failed"),
                 dur_secs: Some(60),
+                cwd: "/work/train".into(),
+                command: v.starts_with("failed").then(|| "cargo test".to_string()),
+                exit: v.starts_with("failed").then_some(101),
+                error_excerpt: v.starts_with("failed").then(|| "assertion failed: left == right".to_string()),
             });
         }
         worklog::record(&worklog::WorkEntry {
             ts: 2000, session: "other".into(), tab: "t".into(),
             verdict: "done: unrelated".into(), failed: false, dur_secs: None,
+            cwd: String::new(), command: None, exit: None, error_excerpt: None,
         });
+        // A pre-0.4 line (no outcome fields) must still parse — append raw.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&wl)?;
+            writeln!(f, r#"{{"ts":1500,"session":"train","tab":"old","verdict":"done: legacy","failed":false,"dur_secs":null}}"#)?;
+        }
         let r = worklog::recent("train", 2);
         assert_eq!(r.len(), 2, "recent() limit not applied");
-        assert_eq!(r[0].verdict, "failed: 3 tests red", "recent() order/session filter wrong");
+        assert_eq!(r[1].verdict, "done: legacy", "pre-0.4 line (no outcome fields) failed to parse");
         assert!(r.iter().all(|e| e.session == "train"), "session filter leaked");
+        // Outcome fields round-trip; entries without them read back as absent.
+        let all = worklog::recent("train", 10);
+        let f = all.iter().find(|e| e.failed).expect("failed entry lost");
+        assert_eq!(f.cwd, "/work/train", "cwd lost");
+        assert_eq!(f.command.as_deref(), Some("cargo test"), "command lost");
+        assert_eq!(f.exit, Some(101), "exit code lost");
+        assert_eq!(f.error_excerpt.as_deref(), Some("assertion failed: left == right"), "excerpt lost");
+        let legacy = all.iter().find(|e| e.verdict == "done: legacy").unwrap();
+        assert!(legacy.cwd.is_empty() && legacy.command.is_none() && legacy.exit.is_none()
+            && legacy.error_excerpt.is_none(), "legacy line grew phantom outcome fields");
+        // compact(): past 2×max, the journal is rewritten to the newest max lines.
+        worklog::compact(10_000); // way under threshold — must be a no-op
+        assert_eq!(worklog::recent("train", 10).len(), 4, "compact under threshold rewrote the file");
+        worklog::compact(2);
+        let after = std::fs::read_to_string(&wl)?;
+        assert_eq!(after.lines().count(), 2, "compact did not bound the journal");
+        assert!(after.contains("done: legacy"), "compact dropped the newest lines");
         worklog::save_mission("train", "fixing the red tests", 1234);
         assert_eq!(
             worklog::load_mission("train"),
@@ -2403,6 +2440,7 @@ fn selfcheck() -> Result<()> {
         worklog::record(&worklog::WorkEntry {
             ts: 1000, session: "standalone".into(), tab: "train".into(),
             verdict: "failed: OOM at step 40".into(), failed: true, dur_secs: Some(300),
+            cwd: String::new(), command: None, exit: None, error_excerpt: None,
         });
         worklog::save_mission("standalone", "debugging the OOM in the training run", 1000);
         let mut app = App::new(None)?;
@@ -2431,6 +2469,15 @@ fn selfcheck() -> Result<()> {
         assert!(palette::Action::from_name("OpenDenylist").is_some());
         let clear = palette::Action::from_name("ClearCommandMemory").expect("action");
         assert!(clear.is_destructive(), "memory wipe must be confirmation-gated");
+        // OpenTuning: the knobs file opens in a buffer (self-seeding via load()).
+        let mut app = App::new(None)?;
+        app.run_action(palette::Action::OpenTuning);
+        let opened = app
+            .buffers
+            .values()
+            .any(|b| b.path.as_deref().is_some_and(|p| p.ends_with("tuning.json")));
+        assert!(opened, "OpenTuning did not open tuning.json in a buffer");
+        drop(app);
         println!("[selfcheck] memory actions ........... PASS");
     }
 

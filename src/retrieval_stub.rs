@@ -44,6 +44,13 @@ pub fn load_command_records() -> Vec<CommandMemory> {
     Vec::new()
 }
 
+/// Identity in the memory-free build: nothing is retrieved into prompts here,
+/// so redaction's remaining consumers (worklog excerpts, persona) store/emit
+/// text as-is — local files only.
+pub fn redact(line: &str) -> String {
+    line.to_string()
+}
+
 pub fn fewshot_for(_request: &str) -> String {
     String::new()
 }

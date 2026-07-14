@@ -53,6 +53,7 @@ pub struct Tuning {
     pub memory_recency_boost: f64,
     pub memory_recency_halflife_days: f64,
     pub mission_refresh_secs: u64,
+    pub worklog_max_lines: u64,
 }
 
 impl Default for Tuning {
@@ -99,6 +100,7 @@ impl Default for Tuning {
             memory_recency_boost: 0.15,
             memory_recency_halflife_days: 14.0,
             mission_refresh_secs: 600,
+            worklog_max_lines: 4000,
         }
     }
 }
@@ -240,12 +242,15 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("mission_refresh_secs", knob(json!(d.mission_refresh_secs),
             "How often (at most) the agent re-infers your one-line mission from the \
              work journal of watch verdicts; shown by `mars ls`. 0 disables.")),
+        ("worklog_max_lines", knob(json!(d.worklog_max_lines),
+            "Work-journal size bound (~/.mars/worklog.jsonl): past twice this many \
+             lines it is compacted to the newest this-many at startup. 0 = never.")),
     ]
 }
 
 // ── load() ────────────────────────────────────────────────────────────────────
 
-fn tuning_path() -> Option<std::path::PathBuf> {
+pub fn tuning_path() -> Option<std::path::PathBuf> {
     crate::config::state_path().map(|p| p.with_file_name("tuning.json"))
 }
 
@@ -350,6 +355,7 @@ pub fn load() -> Tuning {
         t.memory_recency_halflife_days =
             get_f64(&map, "memory_recency_halflife_days", t.memory_recency_halflife_days);
         t.mission_refresh_secs = get_u64(&map, "mission_refresh_secs", t.mission_refresh_secs);
+        t.worklog_max_lines = get_u64(&map, "worklog_max_lines", t.worklog_max_lines);
         if let Some(list) = map.get("project_ignore").and_then(|e| e.value.as_array()) {
             let dirs: Vec<String> =
                 list.iter().filter_map(|v| v.as_str().map(String::from)).collect();

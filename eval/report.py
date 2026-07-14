@@ -28,7 +28,9 @@ def toks_by(task, retrieval):
             j = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if j.get("task") == task and j.get("retrieval") == retrieval and j.get("ok"):
+        # "shell" is the pre-0.4 tag for translate calls; old runlogs keep it.
+        tags = {task, "shell"} if task == "translate" else {task}
+        if j.get("task") in tags and j.get("retrieval") == retrieval and j.get("ok"):
             n += 1; i += j.get("prompt_tokens", 0); o += j.get("completion_tokens", 0)
     if not n:
         return (0, 0, 0, 0)
@@ -67,8 +69,8 @@ def main():
             P(f"| {m} | {ca:.0%} | {wa:.0%} | {w2r}/{len(mr)} |")
         P("")
     # compute
-    bn, bi, bo, bt = toks_by("shell", "none")
-    mn, mi, mo, mt = toks_by("shell", "history")
+    bn, bi, bo, bt = toks_by("translate", "none")
+    mn, mi, mo, mt = toks_by("translate", "history")
     if bt or mt:
         P("**Compute (avg tokens per translate call):**\n")
         P("| Variant | avg in | avg out | avg total |")

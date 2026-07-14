@@ -96,6 +96,14 @@ pub struct WatchState {
     /// `frame_tick` when the current run's output first began (0 = idle) — for the
     /// away-digest duration ("build took 4m12s").
     pub run_started_tick: u64,
+    /// The last command mars itself sent to this pane (composer / TYPE:) —
+    /// the work journal's `command` field. Raw-typed commands are opaque
+    /// PTY bytes; this is what mars honestly knows.
+    pub last_command: Option<String>,
+    /// Stashed at watch-fire time for the journal: the deterministic evidence
+    /// under the LLM verdict (redacted tail excerpt) and the PTY exit code.
+    pub fired_excerpt: Option<String>,
+    pub fired_exit: Option<i32>,
 }
 
 /// Why a watch fired.
@@ -446,6 +454,7 @@ impl App {
         let pane_id = app.alloc_pane(buf_id);
         let tab = Tab::new(app.alloc_tab_id(), "1".into(), pane_id);
         app.tabs.push(tab);
+        crate::worklog::compact(app.tuning.worklog_max_lines as usize);
         Ok(app)
     }
 
@@ -3162,6 +3171,9 @@ impl App {
             if let Some(t) = self.terms.get_mut(&tid) {
                 t.send_bytes(cmd.as_bytes());
                 t.send_bytes(b"\n");
+                // The work journal's `command`: the last thing mars itself ran
+                // in this pane (composer + TYPE: both funnel through here).
+                self.watches.entry(tid).or_default().last_command = Some(cmd.to_string());
             }
         }
     }
@@ -3552,6 +3564,7 @@ impl App {
             Action::OpenCommandMemory  => self.open_command_memory(),
             Action::ClearCommandMemory => self.clear_command_memory(),
             Action::OpenDenylist       => self.open_denylist(),
+            Action::OpenTuning         => self.open_tuning(),
             // Quit = detach (2026-07 ruling): leaving mars never ends a
             // session — kill is the deleting verb (KillSession here, `mars
             // kill`/`mars killall` outside). Standalone has nothing to keep
@@ -3623,6 +3636,22 @@ impl App {
         let path = p.to_string_lossy().into_owned();
         if let Err(e) = self.open_file(&path) {
             self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        }
+    }
+
+    fn open_tuning(&mut self) {
+        let Some(p) = crate::tuning::tuning_path() else {
+            self.status_msg = Some("no config dir — can't locate tuning.json".into());
+            return;
+        };
+        if !p.exists() {
+            let _ = crate::tuning::load(); // seeds the annotated defaults file
+        }
+        let path = p.to_string_lossy().into_owned();
+        if let Err(e) = self.open_file(&path) {
+            self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        } else {
+            self.status_msg = Some("edits apply on next start (or new session)".into());
         }
     }
 
@@ -3967,6 +3996,17 @@ impl App {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
+                    let cwd = self
+                        .terms
+                        .get(&term_id)
+                        .and_then(|t| t.spawn_cwd.as_ref())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let (command, exit, error_excerpt) = self
+                        .watches
+                        .get_mut(&term_id)
+                        .map(|w| (w.last_command.clone(), w.fired_exit.take(), w.fired_excerpt.take()))
+                        .unwrap_or_default();
                     crate::worklog::record(&crate::worklog::WorkEntry {
                         ts,
                         session: self.session_label(),
@@ -3974,6 +4014,12 @@ impl App {
                         verdict: verdict.clone(),
                         failed,
                         dur_secs: dur.map(|t| t * self.tuning.poll_interval_ms / 1000),
+                        cwd,
+                        command,
+                        exit,
+                        // The excerpt is evidence for failures; successes keep
+                        // the journal lean (verdict alone).
+                        error_excerpt: failed.then_some(error_excerpt).flatten(),
                     });
                     self.maybe_infer_mission(ts);
                 }
@@ -4295,6 +4341,28 @@ impl App {
             return; // no key at all (not broker) — consumed, so we don't spin
         }
         let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+        // Stash the deterministic outcome evidence for the journal now, while
+        // the pane state is in hand: the redacted last lines of the tail and,
+        // on exit, the shell's exit code (the verdict arrives async later).
+        let excerpt: String = tail
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(crate::retrieval::redact)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let excerpt = excerpt.chars().take(400).collect::<String>();
+        let exit = match reason {
+            WatchReason::Exit => self.terms.get_mut(&id).and_then(|t| t.exit_code()),
+            WatchReason::Quiet => None,
+        };
+        if let Some(w) = self.watches.get_mut(&id) {
+            w.fired_excerpt = (!excerpt.trim().is_empty()).then_some(excerpt);
+            w.fired_exit = exit;
+        }
         self.bg_busy = true;
         agent::watch_summary(cfg, id, reason, tail, self.agent_tx.clone());
     }

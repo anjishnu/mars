@@ -487,6 +487,11 @@ fn is_reasoning_model(model: &str) -> bool {
         .any(|p| m.contains(p))
 }
 
+/// Every task tag a call site sends. The selfcheck pins each to a tiers.json
+/// default key so a tag rename can't silently fall through to the provider
+/// default model again (deliberate non-members: `ask_escalated`, `remote`).
+pub const TASKS: &[&str] = &["ask", "translate", "watch", "mission", "auto_name", "name_session"];
+
 pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
     let mode = crate::retrieval::MemoryMode::from_env();
     let examples = crate::retrieval::fewshot_for(request);
@@ -515,7 +520,9 @@ pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow:
         serde_json::json!({ "role": "system", "content": system }),
         serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
     ];
-    let (text, call_id) = chat_with_id(cfg, messages, "shell", mode.as_str())?;
+    // Tag must match the tiers.json key ("translate") — "shell" routed to the
+    // provider default model for months before anyone noticed.
+    let (text, call_id) = chat_with_id(cfg, messages, "translate", mode.as_str())?;
     let command = text
         .trim()
         .trim_matches('`')
