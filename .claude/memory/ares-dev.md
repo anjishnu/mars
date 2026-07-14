@@ -492,3 +492,10 @@
 - Local Cargo.toml version can lag crates.io: 0.3.0 was published out-of-band
   (2026-07-11) while the repo said 0.2.0 — check `crates.io/api/v1/crates/
   mars-terminal` max_version before bumping for publish.
+- Cargo can silently serve a STALE target/debug/mars: fingerprints got corrupted
+  (Jul 13) such that `cargo build` said "Finished" while never re-uplifting the
+  fresh deps/mars-<hash> artifact — selfcheck runs then "verified" hours-old
+  code. Even `rm target/debug/mars && cargo build` re-materialized the old one.
+  Fix: `cargo clean -p mars-terminal` then rebuild. ALWAYS check
+  `ls -la target/debug/mars` mtime after building before trusting a selfcheck
+  run; same check applies to target/release/mars before install.
