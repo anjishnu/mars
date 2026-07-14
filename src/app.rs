@@ -312,6 +312,11 @@ pub struct App {
     pub away_log: Vec<AwayEvent>,
     /// `frame_tick` at the last detach — the start of the "while away" window.
     detach_tick: Option<u64>,
+    /// `frame_tick` of the last actual work keystroke (typing into an editor or
+    /// terminal — NOT navigation or the detach chord). The shift report's window
+    /// starts here: "since your keyboard went silent," not since a formal detach,
+    /// so a job that ran while you sat idle is still summarized.
+    last_input_tick: u64,
     /// Window start for a re-summonable digest ("away digest" action).
     pub digest_from_tick: Option<u64>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
@@ -438,6 +443,7 @@ impl App {
             detach_snapshot: None,
             away_log: Vec::new(),
             detach_tick: None,
+            last_input_tick: 0,
             digest_from_tick: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
@@ -693,6 +699,7 @@ impl App {
     // ── Text editing ─────────────────────────────────────────────────────────
 
     fn insert_char_at_cursor(&mut self, c: char) {
+        self.last_input_tick = self.frame_tick; // active work — anchors the away window
         let pane = self.focused_pane();
         let buf_id = match pane.content { PaneContent::Editor(id) => id, _ => return };
         let (row, col) = (pane.cursor_row, pane.cursor_col);
@@ -3858,6 +3865,7 @@ impl App {
 
         let bytes = key_to_bytes(&key);
         if !bytes.is_empty() {
+            self.last_input_tick = self.frame_tick; // active work — anchors the away window
             if let Some(t) = self.terms.get_mut(&term_id) {
                 t.scroll_to_live(); // typing snaps out of scrollback
                 t.send_bytes(&bytes);
@@ -4249,6 +4257,47 @@ impl App {
         }
     }
 
+    /// What happened in EVERY pane while away — the raw material for the
+    /// briefing. Not just watched panes: every terminal's recent tail (labeled
+    /// by tab, redacted) plus each editor pane's file, so the narrative can
+    /// summarize the whole workspace and surface anything that needs a decision.
+    /// `active` panes (output moved since the away window opened) are marked so
+    /// the model leads with them.
+    fn all_pane_activity(&self, from: u64) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for tab in &self.tabs {
+            for pid in tab.layout.pane_ids() {
+                match self.panes.get(&pid).map(|p| &p.content) {
+                    Some(&PaneContent::Terminal(tid)) => {
+                        let tail = self.terminal_tail(tid, 40);
+                        if tail.trim().is_empty() {
+                            continue;
+                        }
+                        let moved = self
+                            .watches
+                            .get(&tid)
+                            .map(|w| w.last_output_tick >= from)
+                            .unwrap_or(false);
+                        let mark = if moved { " (active while you were away)" } else { "" };
+                        parts.push(format!(
+                            "PANE [{}]{mark}:\n{}",
+                            tab.name,
+                            crate::retrieval::redact(&tail)
+                        ));
+                    }
+                    Some(&PaneContent::Editor(bid)) => {
+                        if let Some(b) = self.buffers.get(&bid) {
+                            let dirty = if b.modified { " (unsaved edits)" } else { "" };
+                            parts.push(format!("EDITOR [{}]{dirty}", b.name));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        parts.join("\n\n")
+    }
+
     /// Evidence for goal capture: the tail of each live terminal pane plus the
     /// last few work-journal verdicts — what's in flight right now.
     fn goal_evidence(&self) -> String {
@@ -4414,13 +4463,24 @@ impl App {
         // (instant, keyless-safe), then let the persona-voiced version stream in
         // and replace it. Evidence is the sorted rows' facts.
         report.narrative = report.deterministic_narrative();
-        let mut evidence = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
+        // The evidence the narrative summarizes: the deterministic verdicts (what
+        // concluded / needs you) AND the raw activity in every pane (so nothing
+        // that happened in an unwatched pane is missed — the "all quiet" bug).
+        let verdicts = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
+        let pane_activity = self.all_pane_activity(from);
+        let mut evidence = String::new();
+        if !verdicts.trim().is_empty() {
+            evidence.push_str(&format!("Verdicts (what concluded or needs you):\n{verdicts}\n\n"));
+        }
+        if !pane_activity.trim().is_empty() {
+            evidence.push_str(&format!("Everything on the panes right now:\n{pane_activity}\n\n"));
+        }
         // The goals captured at detach: the briefing reports progress against
         // them by comparing to what actually happened on the panes above.
         let goals = crate::worklog::load_goals(&self.session_label());
         if !goals.is_empty() {
             let g = goals.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n");
-            evidence = format!("What they were working toward:\n{g}\n\nWhat happened:\n{evidence}");
+            evidence = format!("What they were working toward:\n{g}\n\n{evidence}");
         }
         crate::llm_log::event(
             "shift_report_shown",
@@ -4498,7 +4558,14 @@ impl App {
         // or nothing (0). The overlay path owns dedupe/digest bookkeeping.
         match self.tuning.shift_report {
             2 => {
-                self.build_shift_report(from);
+                // Window from when the keyboard last went silent for work, not the
+                // formal detach — so a job that ran while you sat idle is covered.
+                let window = if self.last_input_tick > 0 {
+                    self.last_input_tick.min(from)
+                } else {
+                    from
+                };
+                self.build_shift_report(window);
                 return;
             }
             0 => {
