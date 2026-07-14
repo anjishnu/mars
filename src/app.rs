@@ -1063,13 +1063,6 @@ impl App {
         self.pending_osc.take()
     }
 
-    /// Any shift-report rows still waiting on the batched polish?
-    pub fn rows_settling(&self) -> bool {
-        self.shift_report
-            .as_ref()
-            .is_some_and(|r| r.rows.iter().any(|row| row.settling))
-    }
-
     /// Insert a block of text at the cursor (one undo chunk, replaces selection).
     fn insert_text(&mut self, text: &str) {
         if self.editor_pos().is_none() {
@@ -4136,25 +4129,25 @@ impl App {
                         .unwrap_or(0);
                     crate::worklog::save_mission(&self.session_label(), &text, ts);
                 }
-                AgentEvent::ShiftSuggestion { command } => {
-                    // One next move, only while the report is up and something
-                    // actually needs the user (suggestions on success are noise).
+                AgentEvent::ShiftDelta { text } => {
+                    // The persona-voiced briefing streaming in. The first delta
+                    // replaces the deterministic template; the rest append —
+                    // typewriter-in for free (stateless render diffs each frame).
                     if let Some(rep) = self.shift_report.as_mut() {
-                        let needy = rep.rows.iter().any(|r| {
-                            matches!(
-                                r.verdict,
-                                crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked
-                            )
-                        });
-                        if needy {
-                            rep.suggestion = Some(command);
+                        if !rep.narrative_from_model {
+                            rep.narrative.clear();
+                            rep.narrative_from_model = true;
                         }
+                        rep.narrative.push_str(&text);
                     }
                 }
                 AgentEvent::ShiftDone => {
                     if let Some(rep) = self.shift_report.as_mut() {
-                        for r in rep.rows.iter_mut() {
-                            r.settling = false; // whatever the batch skipped keeps tier-0 text
+                        rep.narrative_streaming = false;
+                        // A model that returned nothing keeps the deterministic
+                        // line (never a blank briefing).
+                        if rep.narrative.trim().is_empty() {
+                            rep.narrative = rep.deterministic_narrative();
                         }
                     }
                 }
@@ -4260,18 +4253,20 @@ impl App {
                 ago_secs: Some(t2s(now.saturating_sub(e.tick))),
                 dur_secs: e.dur_ticks.map(t2s),
                 term_id: None,
+                cwd: None,
+                exit: None,
+                error_excerpt: None,
                 settling: false,
             });
         }
         // 2. Watched panes with no verdict yet (held triggers, quiet panes,
-        //    still-running work): tier-0 triage now, batch the ambiguous ones.
+        //    still-running work): tier-0 triage — deterministic, no per-pane LLM.
         let candidates: Vec<TermId> = self
             .watches
             .iter()
             .filter(|(_, w)| w.watched && !w.triggered)
             .map(|(id, _)| *id)
             .collect();
-        let mut batch: Vec<(usize, String, String)> = Vec::new();
         for id in candidates {
             let Some(exited) = self.terms.get(&id).map(|t| t.exited) else { continue };
             let running = !exited;
@@ -4290,21 +4285,13 @@ impl App {
                 .get(&id)
                 .map(|w| (w.run_started_tick, w.last_output_tick))
                 .unwrap_or((0, 0));
-            rows.push(ReportRow {
-                verdict: tri.verdict,
-                tab: tab.clone(),
-                text: tri.text,
-                ago_secs: (!running).then(|| t2s(now.saturating_sub(last_out))),
-                dur_secs: (started > 0).then(|| t2s(last_out.saturating_sub(started))),
-                term_id: Some(id),
-                settling: tri.ambiguous,
-            });
-            if !running {
-                // The pane concluded: consume its trigger here — the report owns
-                // the verdict now (batched or deterministic), and the journal
-                // gets its evidence either way.
-                self.pending_watch.retain(|(qid, _)| *qid != id);
-                let excerpt: String = tail
+            let cwd = self
+                .terms
+                .get(&id)
+                .and_then(|t| t.spawn_cwd.as_ref())
+                .map(|p| p.display().to_string());
+            let excerpt: Option<String> = if matches!(tri.verdict, Verdict::Failed | Verdict::Blocked) {
+                let e: String = tail
                     .lines()
                     .rev()
                     .take(5)
@@ -4314,50 +4301,49 @@ impl App {
                     .map(crate::retrieval::redact)
                     .collect::<Vec<_>>()
                     .join("\n");
+                (!e.trim().is_empty()).then_some(e)
+            } else {
+                None
+            };
+            rows.push(ReportRow {
+                verdict: tri.verdict,
+                tab: tab.clone(),
+                text: tri.text.clone(),
+                ago_secs: (!running).then(|| t2s(now.saturating_sub(last_out))),
+                dur_secs: (started > 0).then(|| t2s(last_out.saturating_sub(started))),
+                term_id: Some(id),
+                cwd: cwd.clone(),
+                exit,
+                error_excerpt: excerpt.clone(),
+                settling: false,
+            });
+            if !running {
+                // The pane concluded: consume its trigger and journal the
+                // deterministic verdict (no per-pane LLM — the narrative call
+                // below does the prose in one shot).
+                self.pending_watch.retain(|(qid, _)| *qid != id);
                 if let Some(w) = self.watches.get_mut(&id) {
                     w.triggered = true;
-                    w.fired_exit = exit;
-                    w.fired_excerpt = (!excerpt.trim().is_empty()).then_some(excerpt);
                 }
-                if tri.ambiguous {
-                    batch.push((id, tab, self.terminal_tail(id, 40)));
-                } else {
-                    // Tier-0 settled it — journal the deterministic verdict, no
-                    // model involved, same bookkeeping as an LLM verdict.
-                    let verdict = format!(
-                        "{}: {}",
-                        if tri.verdict == Verdict::Failed { "failed" } else { "done" },
-                        rows.last().map(|r| r.text.as_str()).unwrap_or("")
-                    );
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let (command, exit, error_excerpt) = self
-                        .watches
-                        .get_mut(&id)
-                        .map(|w| (w.last_command.clone(), w.fired_exit.take(), w.fired_excerpt.take()))
-                        .unwrap_or_default();
-                    crate::worklog::record(&crate::worklog::WorkEntry {
-                        ts,
-                        session: self.session_label(),
-                        tab,
-                        verdict,
-                        failed: tri.verdict == Verdict::Failed,
-                        dur_secs: rows.last().and_then(|r| r.dur_secs),
-                        cwd: self
-                            .terms
-                            .get(&id)
-                            .and_then(|t| t.spawn_cwd.as_ref())
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                        command,
-                        exit,
-                        error_excerpt: (tri.verdict == Verdict::Failed)
-                            .then_some(error_excerpt)
-                            .flatten(),
-                    });
-                }
+                let command = self.watches.get(&id).and_then(|w| w.last_command.clone());
+                let failed = tri.verdict == Verdict::Failed;
+                let prefix = if failed { "failed" } else { "done" };
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                crate::worklog::record(&crate::worklog::WorkEntry {
+                    ts,
+                    session: self.session_label(),
+                    tab,
+                    verdict: format!("{prefix}: {}", tri.text),
+                    failed,
+                    dur_secs: rows.last().and_then(|r| r.dur_secs),
+                    cwd: cwd.unwrap_or_default(),
+                    command,
+                    exit,
+                    error_excerpt: failed.then_some(excerpt).flatten(),
+                });
             }
         }
         if rows.is_empty() {
@@ -4366,36 +4352,42 @@ impl App {
         // The report subsumes notices queued while detached.
         self.notices.retain(|n| !rows.iter().any(|r| n.text.contains(r.text.as_str())));
         self.digest_from_tick = Some(from);
+        let mission = crate::worklog::load_mission(&self.session_label()).map(|(m, _)| m);
         let mut report = briefing::ShiftReport {
             away_secs: t2s(now.saturating_sub(from)),
-            mission: crate::worklog::load_mission(&self.session_label()).map(|(m, _)| m),
+            mission: mission.clone(),
             rows,
             suggestion: None,
+            narrative: String::new(),
+            narrative_streaming: false,
+            narrative_from_model: false,
             shown_at: std::time::Instant::now(),
         };
         report.sort_rows();
+        // The plain-English briefing: start with the deterministic one-liner
+        // (instant, keyless-safe), then let the persona-voiced version stream in
+        // and replace it. Evidence is the sorted rows' facts.
+        report.narrative = report.deterministic_narrative();
+        let evidence = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
         crate::llm_log::event(
             "shift_report_shown",
             serde_json::json!({
                 "rows": report.rows.len(),
                 "failures": report.rows.iter().filter(|r| r.verdict == Verdict::Failed).count(),
-                "settling": report.rows.iter().filter(|r| r.settling).count(),
                 "away_secs": report.away_secs,
             }),
         );
+        let away = crate::briefing::fmt_secs(report.away_secs);
         self.shift_report = Some(report);
-        // ONE batched call polishes every ambiguous row — fired after the
-        // overlay exists, so tokens stream into a screen already on display.
-        if !batch.is_empty() {
-            let cfg = agent::AgentConfig::from_env();
-            if cfg.is_configured() {
-                self.bg_busy = true;
-                agent::shift_batch(cfg, batch, self.agent_tx.clone());
-            } else if let Some(rep) = self.shift_report.as_mut() {
-                for r in rep.rows.iter_mut() {
-                    r.settling = false; // no model available — tier-0 text is final
-                }
+        // Fire the narrative AFTER the overlay exists, so the prose streams into
+        // a screen already on display — the frame is never blocked on the model.
+        let cfg = agent::AgentConfig::from_env();
+        if cfg.is_configured() {
+            self.bg_busy = true;
+            if let Some(rep) = self.shift_report.as_mut() {
+                rep.narrative_streaming = true; // template stays until the first delta
             }
+            agent::shift_brief(cfg, away, mission.unwrap_or_default(), evidence, self.agent_tx.clone());
         }
         true
     }

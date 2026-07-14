@@ -24,4 +24,4 @@ pub const EXPLAIN_THIS: &str = include_str!("prompts/explain_this.md");
 pub const EXPLAIN_FAILURE: &str = include_str!("prompts/explain_failure.md");
 pub const PERSONA_PREAMBLE: &str = include_str!("prompts/persona_preamble.md");
 pub const PERSONA_DEFAULT: &str = include_str!("prompts/persona_default.md");
-pub const SHIFT_BATCH: &str = include_str!("prompts/shift_batch.md");
+pub const SHIFT_BRIEF: &str = include_str!("prompts/shift_brief.md");

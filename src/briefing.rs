@@ -37,9 +37,39 @@ pub struct ReportRow {
     pub dur_secs: Option<u64>,
     /// The pane this row describes, when it still exists.
     pub term_id: Option<crate::terminal::TermId>,
-    /// Tier-0 couldn't settle this row — it renders with a settling marker and
-    /// is a candidate for the batched LLM polish.
+    /// Where the pane was spawned — shown under failed/blocked rows.
+    pub cwd: Option<String>,
+    /// The shell exit code, when the pane concluded.
+    pub exit: Option<i32>,
+    /// The redacted error tail — the "why" under a failure, rendered as one dim
+    /// line beneath failed/blocked rows only.
+    pub error_excerpt: Option<String>,
+    /// Reserved for the streaming-polish animation (unused in the prose model).
     pub settling: bool,
+}
+
+impl ReportRow {
+    /// A compact evidence line for the narrative prompt (deterministic facts the
+    /// model turns into prose).
+    pub fn evidence(&self) -> String {
+        let mut s = format!("{} {}", self.verdict.glyph(), self.text);
+        if !self.tab.is_empty() {
+            s = format!("[{}] {s}", self.tab);
+        }
+        if let Some(d) = self.dur_secs.filter(|d| *d > 0) {
+            s.push_str(&format!(" (ran {})", fmt_secs(d)));
+        }
+        if let Some(x) = self.exit {
+            s.push_str(&format!(" [exit {x}]"));
+        }
+        if let Some(e) = &self.error_excerpt {
+            let one = e.lines().next().unwrap_or("").trim();
+            if !one.is_empty() {
+                s.push_str(&format!(" — {}", one.chars().take(160).collect::<String>()));
+            }
+        }
+        s
+    }
 }
 
 pub struct ShiftReport {
@@ -48,6 +78,14 @@ pub struct ShiftReport {
     pub rows: Vec<ReportRow>,
     /// One suggested next move, shown only when a row failed or blocked.
     pub suggestion: Option<String>,
+    /// The plain-English, persona-voiced situation report — the star of the
+    /// overlay. Streams in token by token above the row manifest; starts with a
+    /// deterministic one-liner so the frame is never blocked on the model.
+    pub narrative: String,
+    /// The narrative is still streaming from the model.
+    pub narrative_streaming: bool,
+    /// The first model delta has landed — the templated line has been replaced.
+    pub narrative_from_model: bool,
     /// Millis timestamp when the overlay first rendered (for instrumentation).
     pub shown_at: std::time::Instant,
 }
@@ -195,5 +233,35 @@ impl ShiftReport {
     /// Sort rows into display order (what needs you first), stable within class.
     pub fn sort_rows(&mut self) {
         self.rows.sort_by_key(|r| r.verdict);
+    }
+
+    /// The deterministic briefing shown instantly (keyless sessions keep it; a
+    /// keyed session replaces it with the persona-voiced version as it streams).
+    /// Plain English from the counts — never blocked on a model, never wrong.
+    pub fn deterministic_narrative(&self) -> String {
+        let n = |v: Verdict| self.rows.iter().filter(|r| r.verdict == v).count();
+        let (failed, blocked, done, running) =
+            (n(Verdict::Failed), n(Verdict::Blocked), n(Verdict::Done), n(Verdict::Running));
+        let mut parts = Vec::new();
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        if blocked > 0 {
+            parts.push(format!("{blocked} waiting on you"));
+        }
+        if done > 0 {
+            parts.push(format!("{done} finished clean"));
+        }
+        if running > 0 {
+            parts.push(format!("{running} still running"));
+        }
+        let away = fmt_secs(self.away_secs);
+        if parts.is_empty() {
+            format!("Welcome back — nothing needs you after {away} away.")
+        } else if failed > 0 || blocked > 0 {
+            format!("Welcome back, captain. {} away — {}.", away, parts.join(", "))
+        } else {
+            format!("Welcome back. {} away — {}.", away, parts.join(", "))
+        }
     }
 }

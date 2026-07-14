@@ -418,7 +418,7 @@ fn ask_cli(question: String) -> Result<()> {
             | agent::AgentEvent::WatchSummary { .. }
             | agent::AgentEvent::Mission { .. }
             | agent::AgentEvent::BgDone
-            | agent::AgentEvent::ShiftSuggestion { .. }
+            | agent::AgentEvent::ShiftDelta { .. }
             | agent::AgentEvent::ShiftDone
             | agent::AgentEvent::ShellTranslation { .. } => return Ok(()),
             agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
@@ -2378,7 +2378,7 @@ fn selfcheck() -> Result<()> {
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
             ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
             ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
-            ("shift_batch", prompts::SHIFT_BATCH, vec!["{panes}"]),
+            ("shift_brief", prompts::SHIFT_BRIEF, vec!["{away}", "{mission}", "{evidence}"]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
             for h in holders {
@@ -3169,10 +3169,6 @@ fn selfcheck() -> Result<()> {
         assert_eq!(classify("blocked: wants a password", Verdict::Done), Verdict::Blocked);
         assert_eq!(classify("failed: linker error", Verdict::Done), Verdict::Failed);
         assert_eq!(classify("done: tests green", Verdict::Failed), Verdict::Done);
-        // Batch reply lines.
-        assert_eq!(agent::parse_shift_line("#3: done: build green"), Some((3, "done: build green".into())));
-        assert_eq!(agent::parse_shift_line("garbage"), None);
-        assert_eq!(agent::parse_shift_line("#x: nope"), None);
         assert_eq!(briefing::fmt_secs(4212), "1h10m");
 
         // End-to-end, keyless and hermetic: two watched panes conclude while
@@ -3210,52 +3206,45 @@ fn selfcheck() -> Result<()> {
         let rep = app.shift_report.as_ref().expect("no shift report after eventful away");
         assert!(rep.rows.iter().any(|r| r.verdict == Verdict::Failed), "failed row missing");
         assert_eq!(rep.rows.first().map(|r| r.verdict), Some(Verdict::Failed), "failures must lead");
+        // The narrative opens with the deterministic plain-English line (keyless
+        // → no model streams, so the template stands).
+        assert!(rep.narrative.to_lowercase().contains("failed"), "narrative missing the failure: {}", rep.narrative);
         assert!(app.notices.is_empty() || app.shift_report.is_some(), "report should subsume notices");
-        // Renders as a full overlay, telemetry footer honest.
+        // Renders as a full overlay: title, the briefing prose, the failure glyph.
         let mut term = Terminal::new(TestBackend::new(100, 30))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("MISSION REPORT"), "overlay title missing");
+        assert!(t.contains("SHIFT REPORT"), "overlay title missing");
         assert!(t.contains("✗"), "failure glyph missing from overlay");
+        assert!(t.to_lowercase().contains("welcome back"), "plain-English briefing missing from overlay");
         // Any key resumes: swallowed, report gone, workspace intact.
         app.handle_key(k(KeyCode::Char('x')))?;
         assert!(app.shift_report.is_none(), "key did not dismiss the report");
-        // Enter with a suggestion prefills the shell composer, confirm-gated.
-        app.shift_report = Some(briefing::ShiftReport {
-            away_secs: 60,
-            mission: None,
-            rows: vec![briefing::ReportRow {
-                verdict: Verdict::Failed, tab: "t".into(), text: "failed: x".into(),
-                ago_secs: None, dur_secs: None, term_id: None, settling: false,
-            }],
-            suggestion: Some("cargo test -- --nocapture".into()),
-            shown_at: std::time::Instant::now(),
-        });
-        app.handle_key(k(KeyCode::Enter))?;
-        assert!(app.shift_report.is_none(), "Enter did not dismiss the report");
-        assert_eq!(
-            app.palette.as_ref().map(|p| p.query.as_str()),
-            Some("cargo test -- --nocapture"),
-            "suggestion did not prefill the composer"
-        );
-        assert!(app.shell_ready, "prefilled suggestion must be one confirm from running");
-        app.handle_key(k(KeyCode::Esc))?;
-        // ShiftSuggestion only lands while something needs the user; ShiftDone
-        // settles leftover rows.
+        // The streamed briefing: first ShiftDelta replaces the template, the rest
+        // append; ShiftDone stops the stream; an empty stream keeps a briefing.
         app.shift_report = Some(briefing::ShiftReport {
             away_secs: 1, mission: None,
             rows: vec![briefing::ReportRow {
-                verdict: Verdict::Done, tab: "t".into(), text: "done".into(),
-                ago_secs: None, dur_secs: None, term_id: None, settling: true,
+                verdict: Verdict::Failed, tab: "train".into(), text: "failed: OOM".into(),
+                ago_secs: None, dur_secs: None, term_id: None,
+                cwd: None, exit: Some(137), error_excerpt: Some("CUDA out of memory".into()), settling: false,
             }],
-            suggestion: None, shown_at: std::time::Instant::now(),
+            suggestion: None, narrative: "2 failed.".into(),
+            narrative_streaming: true, narrative_from_model: false,
+            shown_at: std::time::Instant::now(),
         });
-        app.agent_tx.send(agent::AgentEvent::ShiftSuggestion { command: "rm -rf /".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Welcome back, captain. ".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "the trainer OOM'd.".into() })?;
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?;
         app.tick();
         let rep = app.shift_report.as_ref().unwrap();
-        assert!(rep.suggestion.is_none(), "suggestion must not surface on an all-green report");
-        assert!(!rep.rows[0].settling, "ShiftDone did not settle rows");
+        assert_eq!(rep.narrative, "Welcome back, captain. the trainer OOM'd.", "deltas did not replace+append");
+        assert!(!rep.narrative_streaming, "ShiftDone did not stop the stream");
+        // The failure "why" line (exit + excerpt) renders under the row.
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
         app.shift_report = None;
         // Knob 1 = classic notice; knob 0 = nothing (digest still scoped).
         let mut app = App::new(None)?;

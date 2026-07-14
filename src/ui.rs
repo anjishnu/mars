@@ -643,35 +643,96 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// The shift report — the save-state restore. Splash pattern: Clear + one
-/// centered Paragraph over the workspace. Rows are live state (a settling row
-/// updates in place as the batched call's telemetry streams in); any key
-/// resumes, Enter types the suggestion into the composer.
+/// Greedy word-wrap to `width` columns (char-count approximate; ASCII-dominant
+/// terminal text). Overlong words are hard-split.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+        } else if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+        while line.chars().count() > width {
+            let head: String = line.chars().take(width).collect();
+            out.push(head);
+            line = line.chars().skip(width).collect();
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// The shift report — the save-state restore. The MARS wordmark up top, then a
+/// plain-English persona-voiced situation briefing (the star — it streams in),
+/// then a compact glyph manifest of the workstreams. Splash pattern: Clear + one
+/// centered Paragraph. Any key resumes.
 fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let Some(rep) = app.shift_report.as_ref() else { return };
     frame.render_widget(Clear, inner);
     let accent = rgb(app.tuning.theme_accent);
     let bright = rgb(app.tuning.theme_accent_bright);
+    let teal = rgb(app.tuning.theme_terminal);
     let dim = Style::default().fg(Color::DarkGray);
-    let w = inner.width.saturating_sub(4).min(96) as usize;
+    let white = Style::default().fg(Color::White);
+    let w = inner.width.saturating_sub(6).min(88) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
+    // The MARS wordmark (the six letter-rows of the banner) when there's room;
+    // else a compact caption. The truecolor terracotta gradient is in the art.
+    let logo_rows = &crate::banner::BANNER_LINES[2..=7];
+    if inner.height as usize > rep.rows.len() + logo_rows.len() + 12 {
+        for raw in logo_rows {
+            lines.push(ansi_to_line(raw).0);
+        }
+        lines.push(Line::from(""));
+    }
+    let needs = rep.rows.iter().filter(|r| matches!(r.verdict,
+        crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked)).count();
+    let caption = format!(
+        "   T+{} away · {} workstream{}{}",
+        crate::briefing::fmt_secs(rep.away_secs),
+        rep.rows.len(),
+        if rep.rows.len() == 1 { "" } else { "s" },
+        if needs > 0 { format!(" · {needs} needs you") } else { String::new() },
+    );
     lines.push(Line::from(vec![
-        Span::styled("  MISSION REPORT", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            format!("   T+{} away", crate::briefing::fmt_secs(rep.away_secs)),
-            dim,
-        ),
+        Span::styled("  SHIFT REPORT", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(caption, dim),
     ]));
     if let Some(m) = &rep.mission {
-        lines.push(Line::from(Span::styled(format!("  mission: {m}"), Style::default().fg(Color::White))));
+        lines.push(Line::from(Span::styled(format!("  mission: {m}"), dim)));
     }
+    lines.push(Line::from(""));
+    // The briefing — the readable heart of the screen.
+    let cursor = if rep.narrative_streaming { "▏" } else { "" };
+    let narrative = format!("{}{cursor}", rep.narrative);
+    for (i, l) in wrap(&narrative, w).into_iter().enumerate() {
+        let style = if i == 0 {
+            Style::default().fg(bright).add_modifier(Modifier::BOLD)
+        } else {
+            white
+        };
+        lines.push(Line::from(Span::styled(format!("  {l}"), style)));
+    }
+    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+    // The manifest: one terse glyph line per workstream, failures first, with a
+    // dim "why" line under the ones that need you.
     for r in &rep.rows {
         let fg = match r.verdict {
             crate::briefing::Verdict::Failed => bright,
             crate::briefing::Verdict::Blocked => accent,
-            crate::briefing::Verdict::Done => rgb(app.tuning.theme_terminal),
+            crate::briefing::Verdict::Done => teal,
+            crate::briefing::Verdict::Running => teal,
             _ => Color::Gray,
         };
         let tab = if r.tab.is_empty() { String::new() } else { format!("[{}] ", r.tab) };
@@ -683,26 +744,29 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             meta.push(format!("{} ago", crate::briefing::fmt_secs(a)));
         }
         let meta = if meta.is_empty() { String::new() } else { format!("  ({})", meta.join(", ")) };
-        let settling = if r.settling { " …" } else { "" };
-        let body: String = format!("{tab}{}{meta}{settling}", r.text).chars().take(w.saturating_sub(4)).collect();
+        let body: String = format!("{tab}{}{meta}", r.text).chars().take(w).collect();
         lines.push(Line::from(vec![
             Span::styled(format!("  {} ", r.verdict.glyph()), Style::default().fg(fg).add_modifier(Modifier::BOLD)),
-            Span::styled(body, Style::default().fg(Color::White)),
+            Span::styled(body, white),
         ]));
+        // The "why" under failed/blocked rows: cwd · exit · first error line.
+        if matches!(r.verdict, crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked) {
+            let mut detail = Vec::new();
+            if let Some(c) = &r.cwd { detail.push(c.clone()); }
+            if let Some(x) = r.exit { detail.push(format!("exit {x}")); }
+            if let Some(e) = &r.error_excerpt {
+                if let Some(first) = e.lines().find(|l| !l.trim().is_empty()) {
+                    detail.push(format!("“{}”", first.trim()));
+                }
+            }
+            if !detail.is_empty() {
+                let d: String = format!("      {}", detail.join(" · ")).chars().take(w + 2).collect();
+                lines.push(Line::from(Span::styled(d, dim)));
+            }
+        }
     }
     lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
-    if let Some(s) = &rep.suggestion {
-        lines.push(Line::from(vec![
-            Span::styled("  » next: ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-            Span::styled(s.clone(), Style::default().fg(Color::White)),
-        ]));
-    }
-    let resume = match (&rep.suggestion, app.rows_settling()) {
-        (Some(_), _) => "  Enter types the suggestion · any other key resumes",
-        (None, true) => "  telemetry coming in — any key resumes now",
-        (None, false) => "  any key resumes exactly where you left off",
-    };
-    lines.push(Line::from(Span::styled(resume, dim)));
+    lines.push(Line::from(Span::styled("  any key resumes exactly where you left off", dim)));
 
     let block_h = lines.len() as u16;
     let top_pad = inner.height.saturating_sub(block_h) / 2;

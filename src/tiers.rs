@@ -47,9 +47,9 @@ impl Default for Tiers {
                 ("name_session", "low"),
                 ("mission", "low"),
                 ("watch", "mid"),
-                // The batched shift-report polish: tier-0 heuristics already
-                // classified every row; the model only phrases one-liners.
-                ("shift_batch", "low"),
+                // The reattach situation briefing: a short plain-English summary
+                // — cheap tier is plenty, it's reading deterministic evidence.
+                ("shift_brief", "low"),
                 ("translate", "mid"),
                 ("ask", "high"),
             ]),

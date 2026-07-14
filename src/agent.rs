@@ -54,9 +54,9 @@ pub enum AgentEvent {
     BgDone,
     /// W3 shell translate: English → one shell command (fills the SH bar).
     ShellTranslation { command: String, call_id: u64 },
-    /// Shift report: the batch call volunteered one next-move command.
-    ShiftSuggestion { command: String },
-    /// Shift report: the batch call finished — settle any rows it left as-is.
+    /// Shift report: one streamed chunk of the plain-English situation briefing.
+    ShiftDelta { text: String },
+    /// Shift report: the briefing finished streaming.
     ShiftDone,
     Error(String),
 }
@@ -543,68 +543,44 @@ fn is_reasoning_model(model: &str) -> bool {
 /// default key so a tag rename can't silently fall through to the provider
 /// default model again (deliberate non-members: `ask_escalated`, `remote`).
 pub const TASKS: &[&str] =
-    &["ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_batch"];
+    &["ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_brief"];
 
-/// Parse one `#<id>: <verdict>` line of a shift-batch reply.
-pub fn parse_shift_line(line: &str) -> Option<(usize, String)> {
-    let rest = line.trim().strip_prefix('#')?;
-    let (id, verdict) = rest.split_once(':')?;
-    let verdict = verdict.trim();
-    if verdict.is_empty() {
-        return None;
-    }
-    Some((id.trim().parse().ok()?, verdict.to_string()))
-}
-
-/// The shift report's single batched polish: N pane tails → one low-tier call →
-/// one `WatchSummary` per parsed line (so every downstream bookkeeper — journal,
-/// notices, away log — runs unchanged), plus at most one `ShiftSuggestion`.
-/// Lines stream: each completed line fires as it arrives (the overlay's
-/// telemetry-coming-in effect). FORMAT task — no persona. Unparseable lines are
-/// dropped; the overlay keeps its deterministic tier-0 text for those rows.
-pub fn shift_batch(cfg: AgentConfig, panes: Vec<(usize, String, String)>, tx: mpsc::Sender<AgentEvent>) {
+/// The shift report's plain-English situation briefing — the star of the reattach
+/// overlay. A single VOICE call over the deterministic row evidence, so the
+/// persona applies (the reply is displayed as prose, never machine-parsed, so
+/// there's no format to corrupt). Streams token by token into the overlay; a
+/// non-streaming provider (broker) delivers it in one delta. On failure the
+/// overlay keeps its deterministic templated narrative.
+pub fn shift_brief(
+    cfg: AgentConfig,
+    away: String,
+    mission: String,
+    evidence: String,
+    tx: mpsc::Sender<AgentEvent>,
+) {
     std::thread::spawn(move || {
-        let blocks: Vec<String> = panes
-            .iter()
-            .map(|(id, tab, tail)| format!("#{id} ({tab}):\n{tail}"))
-            .collect();
-        let system = crate::prompts::SHIFT_BATCH
+        let system = crate::prompts::SHIFT_BRIEF
             .trim_end()
-            .replace("{panes}", &blocks.join("\n\n"));
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": system }),
-            serde_json::json!({ "role": "user", "content": "Report." }),
-        ];
-        let mut sent = std::collections::HashSet::new();
-        let emit_line = |line: &str, sent: &mut std::collections::HashSet<usize>| {
-            if let Some((id, verdict)) = parse_shift_line(line) {
-                if panes.iter().any(|(pid, _, _)| *pid == id) && sent.insert(id) {
-                    let _ = tx.send(AgentEvent::WatchSummary { term_id: id, verdict });
-                }
-            } else if let Some(cmd) = line.trim().strip_prefix("next:") {
-                let cmd = cmd.trim();
-                if !cmd.is_empty() {
-                    let _ = tx.send(AgentEvent::ShiftSuggestion { command: cmd.to_string() });
-                }
-            }
-        };
-        let mut buf = String::new();
+            .replace("{away}", &away)
+            .replace("{mission}", if mission.is_empty() { "(none inferred)" } else { &mission })
+            .replace("{evidence}", &evidence);
+        let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
+        if let Some(p) = crate::persona::system_message() {
+            messages.push(p); // VOICE task: the witty mission-control voice applies
+        }
+        messages.push(serde_json::json!({ "role": "user", "content": "Report." }));
+        let streamed = std::cell::Cell::new(false);
         let mut on_delta = |d: &str| {
-            buf.push_str(d);
-            while let Some(nl) = buf.find('\n') {
-                let line: String = buf.drain(..=nl).collect();
-                emit_line(&line, &mut sent);
-            }
+            streamed.set(true);
+            let _ = tx.send(AgentEvent::ShiftDelta { text: d.to_string() });
         };
-        match chat_with_id_streaming(&cfg, messages, "shift_batch", "n/a", &mut on_delta) {
-            Ok((text, _)) => {
-                // Re-walk the full text: catches the final unterminated line and
-                // anything a non-streaming provider (broker) returned in one piece.
-                for line in text.lines() {
-                    emit_line(line, &mut sent);
-                }
+        match chat_with_id_streaming(&cfg, messages, "shift_brief", "n/a", &mut on_delta) {
+            Ok((text, _)) if !streamed.get() && !text.trim().is_empty() => {
+                // A non-streaming provider (broker) never fired the sink — deliver
+                // the whole briefing as one delta so the overlay shows it.
+                let _ = tx.send(AgentEvent::ShiftDelta { text });
             }
-            Err(_) => {} // rows keep their deterministic tier-0 text
+            _ => {} // streamed already, empty, or errored (keep the templated line)
         }
         let _ = tx.send(AgentEvent::ShiftDone);
         let _ = tx.send(AgentEvent::BgDone);
