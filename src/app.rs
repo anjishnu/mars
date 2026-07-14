@@ -96,6 +96,12 @@ pub struct WatchState {
     /// `frame_tick` when the current run's output first began (0 = idle) — for the
     /// away-digest duration ("build took 4m12s").
     pub run_started_tick: u64,
+    /// Armed by auto-watch (not an explicit C-x w). Auto-watched panes stay
+    /// SILENT on the boring lifecycle of an interactive shell — idle at a
+    /// prompt, or a clean user-initiated exit — and only produce a verdict when
+    /// something is noteworthy (a failure, a blocked prompt, a real exit).
+    /// Manual watches summarize everything, as the user explicitly asked.
+    pub auto: bool,
     /// The last command mars itself sent to this pane (composer / TYPE:) —
     /// the work journal's `command` field. Raw-typed commands are opaque
     /// PTY bytes; this is what mars honestly knows.
@@ -3920,9 +3926,11 @@ impl App {
                         w.last_output_tick = now;
                         w.triggered = false;
                         // Auto-watch: sustained output = a real run, not an `ls` —
-                        // arm a verdict without the user reaching for C-x w.
+                        // arm a verdict without the user reaching for C-x w. Marked
+                        // `auto` so it stays silent on idle-shell noise.
                         if auto && !w.watched && now.saturating_sub(w.run_started_tick) >= min_ticks {
                             w.watched = true;
+                            w.auto = true;
                         }
                     }
                 }
@@ -3936,8 +3944,8 @@ impl App {
                             self.pending_watch.push((id, WatchReason::Exit)); // gets an LLM verdict
                         }
                     } else {
-                        // An unwatched shell ending is a deterministic away-event.
-                        self.push_away(AwayKind::Done, "shell exited".into(), None);
+                        // An unwatched shell ending is context, not an accomplishment.
+                        self.push_away(AwayKind::Context, "shell exited".into(), None);
                     }
                 }
             }
@@ -4202,6 +4210,7 @@ impl App {
         let now = self.frame_tick;
         let w = self.watches.entry(id).or_default();
         w.watched = !w.watched;
+        w.auto = false; // an explicit watch summarizes everything, idle included
         w.last_output_tick = now;
         w.triggered = false;
         let watching = w.watched;
@@ -4268,6 +4277,12 @@ impl App {
             let running = !exited;
             let exit = self.terms.get_mut(&id).and_then(|t| t.exited.then(|| t.exit_code()).flatten());
             let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+            // An auto-watched pane that's just an idle shell (or a clean quit)
+            // isn't a workstream — keep it off the report entirely.
+            let auto = self.watches.get(&id).map(|w| w.auto).unwrap_or(false);
+            if auto && !briefing::is_noteworthy(&tail, exit) {
+                continue;
+            }
             let tri = briefing::triage(&tail, exit, running);
             let tab = self.tab_label_of_term(id).trim_start_matches(" · ").trim().to_string();
             let (started, last_out) = self
@@ -4640,6 +4655,18 @@ impl App {
         let Some((id, reason)) = fire else { return };
         if let Some(w) = self.watches.get_mut(&id) {
             w.triggered = true;
+        }
+        // Auto-watch stays silent on the boring shell lifecycle (idle prompt, a
+        // clean user-initiated exit) — those aren't work, and summarizing them
+        // fills the journal (hence the mission) with "user quit" noise. Consume
+        // the trigger, spend no tokens, journal nothing. Manual watches always
+        // summarize. The pane can re-fire once real output resumes.
+        if self.watches.get(&id).map(|w| w.auto).unwrap_or(false) {
+            let exit = self.terms.get_mut(&id).and_then(|t| t.exited.then(|| t.exit_code()).flatten());
+            let tail = self.terminal_tail(id, 12);
+            if !crate::briefing::is_noteworthy(&tail, exit) {
+                return;
+            }
         }
         if !cfg.is_configured() {
             // No key at all (not broker): the trigger is consumed, but tier-0

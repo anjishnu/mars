@@ -3151,6 +3151,20 @@ fn selfcheck() -> Result<()> {
         assert_eq!(triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).verdict, Verdict::Running);
         assert!(!triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).ambiguous);
         assert!(triage("some quiet text", None, true).ambiguous, "quiet-alive is the model's case");
+        // Auto-watch noise gate: an idle shell / clean user-quit is NOT worth a
+        // verdict (this is the "user quit" flood fix); failures, blocks, nonzero
+        // exits, and real completed runs ARE.
+        use briefing::is_noteworthy;
+        assert!(!is_noteworthy("user@host:~/proj$ ", None), "idle prompt should be silent");
+        assert!(!is_noteworthy("$ exit\nexit", Some(0)), "clean user-quit should be silent");
+        assert!(!is_noteworthy("logout", Some(0)), "logout should be silent");
+        assert!(is_noteworthy("error: build failed\n$ ", None), "a failure must speak");
+        assert!(is_noteworthy("Continue? [y/N]", None), "a blocked prompt must speak");
+        assert!(is_noteworthy("segfault", Some(139)), "a nonzero exit must speak");
+        // A mars pane runs $SHELL, so a clean Some(0) exit is the shell ending
+        // (user left), never a completed run — a finished command is a QUIET
+        // (None) event and speaks only if it shows a failure/block.
+        assert!(!is_noteworthy("Finished in 3.2s\n$ ", Some(0)), "clean shell exit stays silent");
         // Verdict-string classing (model/tier-0 authored prefixes).
         assert_eq!(classify("blocked: wants a password", Verdict::Done), Verdict::Blocked);
         assert_eq!(classify("failed: linker error", Verdict::Done), Verdict::Failed);

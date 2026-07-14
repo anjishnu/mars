@@ -153,6 +153,34 @@ pub fn classify(text: &str, default: Verdict) -> Verdict {
     }
 }
 
+/// Does this pane state deserve a verdict from an AUTO-watched pane? The point
+/// of auto-watch is ambient supervision, not narrating an interactive shell:
+/// an idle prompt or a clean user-initiated `exit` is not "work" and floods the
+/// journal (and mission inference) with "user quit"-style noise. So auto-watch
+/// speaks only for things that need you (failures, blocked prompts) or a real
+/// process conclusion — never the boring shell lifecycle. Manual `C-x w`
+/// watches bypass this and summarize everything, as the user asked.
+pub fn is_noteworthy(tail: &str, exit: Option<i32>) -> bool {
+    match exit {
+        // A mars pane runs $SHELL, so a clean pane exit means the SHELL itself
+        // ended — the user left. That is not work; stay silent.
+        Some(0) => false,
+        // A nonzero exit is a crash or an error the user should see.
+        Some(_) => true,
+        // Still alive and quiet: speak only if the tail shows trouble — a failure
+        // or a wait-for-input. An interactive shell idling at a prompt, or a
+        // command that simply finished quietly, says nothing (auto-watch is for
+        // things that NEED you, not a running commentary).
+        None => {
+            let low = tail.to_lowercase();
+            let last6: String = low.lines().rev().take(6).collect::<Vec<_>>().join("\n");
+            FAIL_MARKS.iter().any(|m| last6.contains(m))
+                || BLOCKED_MARKS.iter().any(|m| last6.contains(m))
+                || last6.trim_end().ends_with('?')
+        }
+    }
+}
+
 /// Humanize seconds: 42s, 4m12s, 1h02m, 2d3h.
 pub fn fmt_secs(s: u64) -> String {
     match s {
