@@ -2537,19 +2537,34 @@ fn selfcheck() -> Result<()> {
             "mission round-trip failed"
         );
         assert_eq!(worklog::load_mission("other"), None, "mission leaked across sessions");
-        // The ls SUMMARY column: mission when present, else the last verdict,
-        // never mixed into the liveness status.
-        assert_eq!(
-            session::session_summary("train"),
-            "fixing the red tests",
-            "summary should be the mission"
-        );
-        let s = session::session_summary("other");
-        assert!(
-            s.starts_with("last: done: unrelated (") && s.ends_with(')'),
-            "summary should fall back to the last verdict: {s}"
-        );
+        // The ls SUMMARY column, priority tested with now-relative data (the
+        // seeded 1970-epoch lines age out of every recency gate, as they should).
         assert_eq!(session::session_summary("nowhere"), "", "no journal → empty summary");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mk = |sess: &str, verdict: &str, failed: bool, ts: u64| worklog::WorkEntry {
+            ts, session: sess.into(), tab: "t".into(), verdict: verdict.into(), failed,
+            dur_secs: None, cwd: String::new(), command: None, exit: None, error_excerpt: None,
+        };
+        // (1) A fresh failure/block leads, even with goals present.
+        worklog::record(&mk("s_fail", "blocked: waiting on your input", false, now - 60));
+        worklog::save_goals("s_fail", &["ship the release".into()], now);
+        assert!(session::session_summary("s_fail").starts_with("blocked: waiting on your input · "),
+            "a needs-you verdict must lead: {}", session::session_summary("s_fail"));
+        // (2) No failure → the goals (the captured intent) win over a done verdict.
+        worklog::record(&mk("s_goal", "done: built the thing", false, now - 30));
+        worklog::save_goals("s_goal", &["test MARS features".into(), "write the doc".into()], now);
+        assert_eq!(session::session_summary("s_goal"), "→ test MARS features  (+1 more)",
+            "goals should summarize the session");
+        // (3) Lifecycle noise never becomes the headline; a real done verdict does.
+        worklog::record(&mk("s_done", "done: user exited terminal voluntarily", false, now - 5));
+        worklog::record(&mk("s_done", "done: cargo build green", false, now - 90));
+        assert!(session::session_summary("s_done").starts_with("done: cargo build green · "),
+            "noise must be skipped for the real verdict: {}", session::session_summary("s_done"));
+        // (4) A stale mission is dropped, not shown as if current.
+        worklog::save_mission("s_stale", "vague old mission", now - 5 * 86_400);
+        worklog::record(&mk("s_stale", "done: user exited terminal", false, now - 10));
+        assert_eq!(session::session_summary("s_stale"), "", "a days-old mission must not linger");
         // Overflowing summaries wrap into a block under the column: greedy
         // word-wrap, overlong words hard-split, empty input → no lines.
         assert_eq!(

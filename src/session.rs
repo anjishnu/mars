@@ -747,17 +747,60 @@ fn clip(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-/// What the session is FOR, not just whether it's up: the inferred mission
-/// when one exists, else the last work-journal verdict — so the summary is
-/// meaningful even before the first mission inference runs. The mission prompt
-/// asks for ≤80 chars; the clips here are only a backstop for a model that
-/// ignores that — the table wraps, it doesn't truncate.
+/// Lifecycle noise that says nothing about the work: an interactive shell being
+/// closed, a bare exit. These flooded the summary with "user quit" before the
+/// auto-watch noise gate; filter them here too so the journal's legacy lines
+/// (and any manual-watch lifecycle verdicts) never become the headline.
+fn is_lifecycle_noise(verdict: &str) -> bool {
+    let l = verdict.to_lowercase();
+    [
+        "user exited", "user quit", "shell exited", "shell closed", "user left",
+        "terminal session closed", "exit command", "idle at prompt",
+        "exited voluntarily", "exited terminal",
+    ]
+    .iter()
+    .any(|m| l.contains(m))
+}
+
+/// What the session is FOR / what it needs — the useful glance, not a vague
+/// distillation. Priority, all from cheap on-disk signals: (1) a failure or
+/// block that needs you, (2) the goals captured at detach — the concrete
+/// intent, (3) a *recent* inferred mission (stale ones are dropped, not shown),
+/// (4) the freshest real thing that happened. Lifecycle noise never wins.
 pub fn session_summary(name: &str) -> String {
-    if let Some((mission, _)) = crate::worklog::load_mission(name) {
-        return clip(&mission, 160);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let recent = crate::worklog::recent(name, 12);
+    let meaningful = recent.iter().rev().find(|e| !is_lifecycle_noise(&e.verdict));
+    // 1. A failure/block that needs you leads — the reason you'd scan the list.
+    if let Some(e) = meaningful {
+        let low = e.verdict.to_lowercase();
+        if e.failed || low.starts_with("blocked") || low.contains("failed") {
+            return format!("{} · {}", clip(&e.verdict, 88), crate::broker::ago(e.ts));
+        }
     }
-    if let Some(last) = crate::worklog::recent(name, 1).pop() {
-        return format!("last: {} ({})", clip(&last.verdict, 80), crate::broker::ago(last.ts));
+    // 2. The goals captured at detach — the clearest "what is this session for."
+    let goals = crate::worklog::load_goals(name);
+    if let Some(first) = goals.first() {
+        let head = clip(first, 52);
+        return if goals.len() > 1 {
+            format!("→ {head}  (+{} more)", goals.len() - 1)
+        } else {
+            format!("→ {head}")
+        };
+    }
+    // 3. A *recent* inferred mission — age-gated so a days-old vague line doesn't
+    //    masquerade as current state (the "basically useless" complaint).
+    if let Some((mission, as_of)) = crate::worklog::load_mission(name) {
+        if now.saturating_sub(as_of) < 3 * 86_400 {
+            return clip(&mission, 160);
+        }
+    }
+    // 4. The freshest real event (a completed run, etc.).
+    if let Some(e) = meaningful {
+        return format!("{} · {}", clip(&e.verdict, 88), crate::broker::ago(e.ts));
     }
     String::new()
 }
