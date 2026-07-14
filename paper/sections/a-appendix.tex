@@ -5,7 +5,8 @@ Every example in this appendix is quoted verbatim from the frozen result files t
 evaluation was scored on: \code{axis\_a.jsonl} (112 translation items),
 \code{lift.jsonl} (24 leakage-controlled cold/paraphrase/verbatim items), and
 \code{axis\_b.jsonl} (self-knowledge, 164 rows over the two memory conditions), with the
-model under test claude-haiku-4-5 and the judge claude-sonnet-5 throughout. We organize
+model under test \code{claude-haiku-4-5} and the judge \code{claude-sonnet-5}
+throughout. We organize
 the analysis by experiment, and within each by impressive behavior, unexpected errors,
 phenomena worth naming, and concrete recommendations. The purpose is to show, from the
 raw data, exactly where a simple local-memory mechanism helps, where it does not, and
@@ -57,7 +58,7 @@ model answers a Rust or \code{uv} project with the statistically commonest ecosy
 \code{p04} ``run the unit tests'' $\rightarrow$ \code{npm test} (gold \code{cargo test}),
 \code{p06} ``lint the code'' $\rightarrow$ \code{eslint .} (gold \code{ruff check .}),
 \code{p11} ``build the release binary'' $\rightarrow$ \code{make release} (gold
-\code{cargo build --release}), \code{p18} ``install project dependencies'' $\rightarrow$
+\code{cargo build -{}-release}), \code{p18} ``install project dependencies'' $\rightarrow$
 \code{npm install} (gold \code{uv sync}). A milder personalized pattern is \emph{honest
 abstention}: on the hardest project commands the model declines rather than bluff
 (\code{p03} ``deploy the model,'' \code{p12} ``evaluate the latest checkpoint''
@@ -66,7 +67,7 @@ wrong against a gold command. Both classes are unknowable from the request text,
 are exactly what corrective memory targets.
 
 \paragraph{Phenomena.}
-Even under the stronger claude-sonnet-5 oracle, the judge assigns a \emph{partial} band
+Even under the stronger \code{claude-sonnet-5} oracle, the judge assigns a \emph{partial} band
 that captures near-misses, and reading it is informative: the general failures split into
 6 outright wrong and 3 partial, and the partials are precisely the placeholder-filename
 cases (\code{a22} \code{chmod +x script} vs.\ gold \code{script.sh}; \code{a77}
@@ -107,8 +108,8 @@ answered with the commonest default (\code{npm}, \code{eslint}, \code{shellcheck
 corrected to the user's real toolchain. The second is \emph{exact-argument recall}: the
 model already had the right utility but the wrong specifics, and memory supplies the
 precise config, path, or split the user expects reproduced (\code{p02} ``run the training
-job'' gains \code{--config configs/base.yaml}; \code{p14} ``run inference on the test
-set'' becomes \code{python infer.py --split test}).
+job'' gains \code{-{}-config configs/base.yaml}; \code{p14} ``run inference on the test
+set'' becomes \code{python infer.py -{}-split test}).
 
 \begin{table*}[t]
 \centering
@@ -119,12 +120,12 @@ set'' becomes \code{python infer.py --split test}).
 \midrule
 run the unit tests             & \texttt{npm test}                & \texttt{cargo test} \\
 lint the code                  & \texttt{eslint .}                & \texttt{ruff check .} \\
-build the release binary       & \texttt{make release}            & \texttt{cargo build --release} \\
+build the release binary       & \texttt{make release}            & \texttt{cargo build -{}-release} \\
 install project dependencies   & \texttt{npm install}             & \texttt{uv sync} \\
-check code formatting          & \texttt{shellcheck *.sh}         & \texttt{black --check .} \\
+check code formatting          & \texttt{shellcheck *.sh}         & \texttt{black -{}-check .} \\
 clean the build artifacts      & \texttt{rm -rf build/ dist/ \dots} & \texttt{cargo clean} \\
-run the training job           & \texttt{python train.py}         & \texttt{python train.py --config configs/base.yaml} \\
-deploy the model               & \textit{(asks for more context)} & \texttt{./scripts/deploy.sh --prod} \\
+run the training job           & \texttt{python train.py}         & \texttt{python train.py -{}-config configs/base.yaml} \\
+deploy the model               & \textit{(asks for more context)} & \texttt{./scripts/deploy.sh -{}-prod} \\
 \bottomrule
 \end{tabular}
 \caption{Representative wrong/partial$\rightarrow$correct flips from the
@@ -174,8 +175,8 @@ domain broadens enough that the paraphrase gap dominates
 (\S\ref{sec:future}).
 
 \paragraph{A note on token cost.}
-Memory's effect on token cost is model-dependent, an observation that cuts against a
-claim an earlier draft of this work made. On non-reasoning claude-haiku-4-5, retrieved
+Memory's effect on token cost is model-dependent, an observation that cuts against the claim
+we expected to make. On non-reasoning \code{claude-haiku-4-5}, retrieved
 exemplars add a small input cost (mean 95$\rightarrow$161 tokens per call, $+66$). On a
 \emph{reasoning} model (Qwen3-32B, from the free-tier runs of \S\ref{sec:setup}),
 however, the same few-shot grounding suppresses the verbose chain-of-thought the model
@@ -228,4 +229,4 @@ retriever can hand over intact; a chord is a specific fact the model will still 
 with a more common default, which is why doc memory helps reconfiguration far more than
 keybinding recall. A residual limit is judge slack: a few correct-but-differently-phrased
 answers are marked wrong, so the reported knowledge number is a mild lower bound even
-under the stronger claude-sonnet-5 oracle.
+under the stronger \code{claude-sonnet-5} oracle.

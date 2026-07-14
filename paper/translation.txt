@@ -1,0 +1,2 @@
+Avis en attente
+  · fait : Commit et réinstallation réussis — toutes les auto-vérifications réussies, arbre de travail propre, binaire mis à jour à ~/.cargo/bin/mars.  · 1

@@ -1,41 +1,47 @@
 \section{Related Work}
 \label{sec:related}
 
-\paragraph{Terminal tooling.}
-Multiplexers such as tmux \citep{tmux} and Zellij \citep{zellij} provide persistence but
-no intelligence. Atuin \citep{atuin} makes the user's shell history a first-class
-searchable database, and thefuck \citep{thefuck} repairs a mistyped command from its
-error output; both share our premise that the user's own history is valuable, but
-neither feeds it to a model. AI terminals such as Warp \citep{warp} add command search
-but see only their own blocks. CLI agents such as Claude Code
-\citep{anthropic2024claudecode} and GitHub Copilot in the CLI \citep{copilotcli} put a
-cloud model in the shell and can read the same local files MARS reads; however, they run
-per invocation, so nothing persists between calls, corrections are not captured as they
-happen, and every remote machine needs its own credential. IDE agents such as Cursor
-\citep{cursor} lose context when the window closes. MARS differs in the combination: one
-persistent process that hosts the editor, captures every accepted correction, grounds
-the agent in its own action registry, and keeps the credential home.
-
 \paragraph{Natural language to commands.}
 NL2Bash \citep{lin2018nl2bash} and Tellina \citep{lin2017tellina} established the
 NL-to-shell task and its corpora; we build on the task rather than the models,
 personalizing translation with the user's own history.
 
-\paragraph{Agents and retrieval.}
-Directive-style acting relates to ReAct \citep{yao2023react} and tool use to Toolformer
-\citep{schick2023toolformer}, though we use a portable text protocol with registry
-grounding rather than provider-native tool calls. Our memory is
-retrieval-augmented generation \citep{lewis2020rag} in its simplest lexical form; the
-novelty is the setting, retrieval over the user's \emph{own} local context, embedded
-where it is produced.
+\paragraph{Retrieval and memory.}
+Our memory is retrieval-augmented generation \citep{lewis2020rag} at its lexical
+floor: the neural line retrieves with learned dense encoders
+\citep{guu2020realm,karpukhin2020dpr}, fuses passages in the decoder
+\citep{izacard2021fid}, retrieves per token \citep{khandelwal2020knnlm}, and learns
+when to retrieve \citep{asai2024selfrag}; we hold at BM25 \citep{robertson2009bm25}:
+the terminal's lexically stable vocabulary makes dense retrieval's paraphrase
+advantage marginal (\S\ref{sec:whysimple}). Agent-memory systems page context like an
+OS \citep{packer2023memgpt}, distill experience into retrievable reflections
+\citep{park2023generative}, and decay memories on an Ebbinghaus schedule
+\citep{zhong2024memorybank}; temporal reasoning over such stores remains hard
+\citep{maharana2024locomo}. The keybinding failures of
+\S\ref{sec:eval}, where a parametric prior overrides a
+retrieved fact, are terminal-native instances of the knowledge conflicts studied in QA
+\citep{longpre2021entity}; the personalization axis relates to LaMP
+\citep{salemi2024lamp}, though our profile is captured from use rather than provided.
 
-\paragraph{Computer-use agents.}
-A parallel line of work drives whole desktops rather than terminals. Anthropic's
+\paragraph{Tool use and acting.}
+Directive-style acting relates to ReAct \citep{yao2023react}, tool learning to
+Toolformer \citep{schick2023toolformer}, and grounding calls against large API
+surfaces to Gorilla \citep{patil2023gorilla} and ToolLLM \citep{qin2024toolllm}; we use a
+portable text protocol validated against a live registry rather than provider-native
+tool calls.
+
+\paragraph{Computer-use and web agents.}
+A parallel line of work drives whole desktops and browsers rather than terminals:
 computer use \citep{anthropic2024computeruse} operates GUIs from screenshots, OSWorld
-\citep{xie2024osworld} benchmarks such agents on real operating systems, OS-Atlas
-\citep{wu2025osatlas} pretrains a foundation action model for GUI grounding, and
-Plan-and-Act \citep{erdogan2025planandact} separates a planner from an executor to
-survive long-horizon tasks. The terminal offers the same ambitions a simpler substrate:
-the action space is already text, so grounding is a registry lookup rather than a vision
-problem, and a plan is a command sequence the user can read; \S\ref{sec:future} builds
-on these techniques.
+\citep{xie2024osworld} benchmarks such agents, OS-Atlas \citep{wu2025osatlas}
+pretrains a GUI-grounding action model, and Plan-and-Act \citep{erdogan2025planandact}
+separates planning from execution to survive long horizons. Closest to our memory
+thesis, WebATLAS \citep{cheng2025webatlas} equips a web agent with experience-driven
+memory and simulated action rollouts; MARS brings the same experience-driven memory
+to the terminal, where grounding is a registry lookup rather than a vision problem.
+
+\paragraph{Skill induction.}
+Voyager grows an open-ended library of verified skills \citep{wang2023voyager}, and
+Agent Workflow Memory induces reusable workflows from past trajectories
+\citep{wang2024awm}; \S\ref{sec:future} adapts this recipe to the terminal, mining
+procedures from the reflex store.

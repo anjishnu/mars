@@ -13,34 +13,52 @@ it sits beside. In the remote setting that defines GPU work there is a third pro
 reaching the work at all usually means exporting an API key onto a machine the user does
 not own, where it lingers in the environment, the shell history, and often a dotfile.
 
+The gap is not a shortage of AI tooling. IDEs have capable agents \citep{cursor}, and
+per-invocation CLI tools bring code generation to the shell
+\citep{anthropic2024claudecode,copilotcli}; but no modern agentic tool sits
+\emph{inside} the terminal session and empowers the user there --- close to the
+action, where the command, the log, and the stack trace already are, with nothing
+pasted to and fro. AI terminals such as Warp \citep{warp} transform the terminal
+application itself, so they cannot follow the user onto a headless server, and they
+see only the commands run inside them; classic multiplexers \citep{tmux,zellij}
+persist but carry no intelligence, and history tools \citep{atuin,thefuck} treat the
+user's history as valuable but never feed it to a model. MARS bridges the gap: a
+terminal-native application that runs anywhere a shell runs, including inside an ssh
+session on the box where the work is.
+
 Our observation is that an agent embedded at the terminal has direct access to memory
-that a browser-tab assistant never sees. Two corpora sit within reach of a
-terminal-resident process: the user's own history of commands they actually ran, and the
-tool's own documentation, action registry, and configuration schema. Neither corpus is
-large, and neither requires training. What they require is an agent that lives where
-they live, persists between requests, and captures corrections as they happen;
-per-invocation CLI agents \citep{anthropic2024claudecode}
-satisfy the first condition but not the other two (\S\ref{sec:related}). We built MARS
-(a Memory-Augmented Rust System) to satisfy all three: it retrieves from both corpora
-with plain lexical search and injects the results into the prompt.
+that a browser-tab assistant never sees: the user's own history of commands they
+actually ran, and the tool's own documentation, action registry, and configuration
+schema. Neither corpus is
+large, and neither requires training. What they require is an agent that lives beside
+them, persists between requests, and captures corrections as they happen. CLI agents
+can read the same local files MARS reads; however, at
+the time of writing their persistent context is curated by hand (project memory files)
+rather than captured automatically from the commands a user accepts, and every remote
+machine needs its own credential. MARS differs in the combination: one persistent
+process that captures every accepted correction, grounds the agent in its own action
+registry, and keeps the credential home. We built
+it to satisfy all three conditions\footnote{Code, gold sets, and frozen result files:
+\url{https://github.com/anjishnu/mars} (MIT). Install:
+\code{cargo install mars-terminal}
+(\url{https://crates.io/crates/mars-terminal}). Screencast: [URL].}; it hosts the
+user's shell in its panes rather than replacing it, retrieves from both corpora with
+plain lexical search, and injects the results into the prompt.
 
 We expected local memory to help. We did not expect a method this simple to nearly close
 the gap between a small model and its personalized ceiling, even when the stored memory
-is only a \emph{paraphrase} of the user's earlier request. On a set of project-specific
-commands, retrieving a handful of reworded past corrections lifts claude-haiku-4-5 from
-38\% to 96\% accuracy under a protocol in which a win requires generalizing across a
-paraphrase gap, not looking up a planted answer. In a narrow domain, memory does not
+is only a \emph{paraphrase} of the user's earlier request. On a 24-item set of
+project-specific commands, retrieving a handful of reworded past corrections lifts
+\code{claude-haiku-4-5} from 38\% (9/24) to 96\% (23/24) under a protocol in which
+a win requires generalizing across a paraphrase gap, not looking up a planted answer. In a narrow domain, memory does not
 need to be sophisticated to be decisive.
 
-This paper makes four contributions. Firstly, a memory-augmented terminal agent
-(\S\ref{sec:agent}) built from minimal parts: a registry-validated directive protocol, a
-corrective-memory loop, and a model cascade. Secondly, two axes of \emph{local} memory:
-the user's own commands for translation, and the tool's own ground truth for
-self-knowledge and reconfiguration. Thirdly, the architecture (\S\ref{sec:system}) behind always-present
+This paper makes four contributions. Firstly, an open-source, single-binary
+memory-augmented terminal agent (\S\ref{sec:agent}), built from minimal parts: a registry-validated directive protocol, a
+corrective-memory loop, and a model cascade. Secondly, two kinds of \emph{local} memory
+(\S\ref{sec:m1}--\ref{sec:m2}): a \emph{reflex} memory of the user's own commands, and
+a \emph{reflective} memory of the tool's own ground truth. Thirdly, the architecture (\S\ref{sec:system}) behind always-present
 local memory: a persistent daemon, and an SSH broker that
 keeps the API key off remote machines. Finally, a self-instrumenting evaluation
-(\S\ref{sec:eval}) in which corrective memory takes a small model from 38\% to 96\% on
-personalized commands under a leakage-controlled protocol. MARS is open source under the
-MIT license~\citep{kumar2026mars}, installs with \code{cargo install mars-terminal}, and
-is about 9{,}500 lines of Rust; the gold sets and frozen result files ship with the
-source.
+(\S\ref{sec:eval}) of corrective memory under a leakage-controlled protocol. MARS is about 9{,}500 lines of
+Rust~\citep{kumar2026mars}.

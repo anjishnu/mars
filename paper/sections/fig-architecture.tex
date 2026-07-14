@@ -16,10 +16,10 @@
 % --- nodes ---
 \node[term] (term) at (0,0) {\textbf{Terminal}\\ \textbf{multiplexer}\\[1pt] \scriptsize editor + shell panes};
 \node[core] (core) at (5.4,0) {\textbf{Agent}\\ \textbf{core}};
-\node[mem]  (m1) at (3.35,-2.35) {\textbf{M1: your commands}\\[1pt] \scriptsize \code{\char`~/.mars/cmd\_memory}\\ \scriptsize + shell history};
-\node[mem]  (m2) at (7.45,-2.35) {\textbf{M2: tool self-knowledge}\\[1pt] \scriptsize docs, action registry,\\ \scriptsize tuning knobs};
+\node[mem]  (m1) at (3.35,-1.75) {\textbf{Reflex: your commands}\\[1pt] \scriptsize \code{\char`~/.mars/cmd\_memory}\\ \scriptsize + shell history};
+\node[mem]  (m2) at (7.45,-1.75) {\textbf{Reflective: the tool itself}\\[1pt] \scriptsize docs, action registry,\\ \scriptsize tuning knobs};
 \node[llm]  (llm) at (12.7,0) {\textbf{LLM}\\ model\\ cascade};
-\node[note] (log) at (5.4,1.55) {self-instrumenting log\\ $=$ benchmark corpus};
+\node[note] (log) at (5.4,1.15) {self-instrumenting log\\ $=$ benchmark corpus};
 
 % --- your-machine boundary (behind) ---
 \begin{scope}[on background layer]
@@ -33,28 +33,27 @@
       node[midway, above, el] {NL request / question};
 \draw[<-] ([yshift=-2.4mm]term.east) -- ([yshift=-2.4mm]core.west)
       node[midway, below, el] {directive:\\ \code{RUN}/\code{TYPE}/\code{OPEN}\\ (registry-validated)};
-\draw[->, dashed] (term.north) to[bend left=22] node[midway, above, note] {sees the panes (sight)} (core.north west);
+\draw[->, dashed] (term.north) to[bend left=22] node[midway, above, note] {screen context} (core.north west);
 
 % --- core <-> memory (BM25) ---
 \draw[<->] (core.south) -- (m1.north);
 \draw[<->] (core.south) -- (m2.north);
-\node[el] at (5.4,-1.35) {BM25 retrieve\\ $\rightarrow$ few-shot into prompt};
+\node[el] at (5.4,-1.05) {BM25 retrieve\\ $\rightarrow$ few-shot into prompt};
 
 % --- core <-> LLM (the only thing that leaves) ---
 \draw[->, very thick] ([yshift=2.4mm]core.east) -- ([yshift=2.4mm]llm.west)
       node[midway, above, el] {prompt};
 \draw[<-, very thick] ([yshift=-2.4mm]core.east) -- ([yshift=-2.4mm]llm.west)
       node[midway, below, el] {completion};
-\node[note, text=red!55] at (10.05,-1.05) {the only call that\\ leaves your machine};
+\node[note, text=red!55] at (10.05,-0.95) {the only call that\\ leaves your machine};
 
 % --- broker annotation ---
-\node[note] (brk) at (12.7,-2.2) {\textbf{key-never-leaves-home}\\ on a remote box the call is\\ proxied home; the key stays local};
+\node[note] (brk) at (12.7,-1.65) {\textbf{key-never-leaves-home}\\ on a remote box the call is\\ proxied home; the key stays local};
 \draw[->, dotted, black!55] (brk.north) -- (llm.south);
 
 \end{tikzpicture}
-\caption{MARS retrieves with lexical BM25 from two local stores (M1, the user's past
-commands; M2, the tool's own docs and registry) and injects the results as few-shot
-exemplars. Only the model call leaves the machine; on a remote box even the key stays
-home, and every call is logged.}
+\caption{MARS retrieves with BM25 from two local stores (reflex, the user's past
+commands; reflective, the tool's own docs and registry). Only the model call leaves
+the machine; even the key stays home.}
 \label{fig:arch}
 \end{figure*}
