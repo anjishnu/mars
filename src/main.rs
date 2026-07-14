@@ -1943,6 +1943,9 @@ fn selfcheck() -> Result<()> {
         drop(c2); // hard disconnect — no Detach, just gone
         std::thread::sleep(std::time::Duration::from_millis(150));
         let mut c3 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        // Reattach now always greets with the briefing overlay (iteration mode) —
+        // dismiss it like a real user before reading the workspace underneath.
+        c3.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
         let (pty_survived, _) = c3.read_until("daemon_pty_ok", 5)?;
         assert!(pty_survived, "PTY did not survive the disconnect");
 
@@ -3263,6 +3266,20 @@ fn selfcheck() -> Result<()> {
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
         assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
+        app.shift_report = None;
+        // Iteration mode: knob=2 greets on EVERY return, even a quiet one —
+        // the overlay is present with zero rows and a "welcome back" line.
+        let mut app = App::new(None)?;
+        app.tuning.shift_report = 2;
+        app.on_detach();
+        app.frame_tick += 20;
+        app.on_attach(); // nothing happened while away
+        let rep = app.shift_report.as_ref().expect("quiet return must still greet (iteration mode)");
+        assert!(rep.rows.is_empty(), "quiet return should have no rows");
+        assert!(rep.narrative.to_lowercase().contains("welcome back"), "quiet briefing missing greeting");
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("all quiet"), "quiet-return caption missing");
         app.shift_report = None;
         // Knob 1 = classic notice; knob 0 = nothing (digest still scoped).
         let mut app = App::new(None)?;

@@ -697,13 +697,17 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     }
     let needs = rep.rows.iter().filter(|r| matches!(r.verdict,
         crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked)).count();
-    let caption = format!(
-        "   T+{} away · {} workstream{}{}",
-        crate::briefing::fmt_secs(rep.away_secs),
-        rep.rows.len(),
-        if rep.rows.len() == 1 { "" } else { "s" },
-        if needs > 0 { format!(" · {needs} needs you") } else { String::new() },
-    );
+    let workstreams = if rep.rows.is_empty() {
+        " · all quiet".to_string()
+    } else {
+        format!(
+            " · {} workstream{}{}",
+            rep.rows.len(),
+            if rep.rows.len() == 1 { "" } else { "s" },
+            if needs > 0 { format!(" · {needs} needs you") } else { String::new() },
+        )
+    };
+    let caption = format!("   T+{} away{workstreams}", crate::briefing::fmt_secs(rep.away_secs));
     lines.push(Line::from(vec![
         Span::styled("  SHIFT REPORT", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
         Span::styled(caption, dim),
@@ -723,10 +727,13 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
         };
         lines.push(Line::from(Span::styled(format!("  {l}"), style)));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
     // The manifest: one terse glyph line per workstream, failures first, with a
-    // dim "why" line under the ones that need you.
+    // dim "why" line under the ones that need you. Skipped entirely on a quiet
+    // return — the narrative already said "all clear," no empty rules.
+    if !rep.rows.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+    }
     for r in &rep.rows {
         let fg = match r.verdict {
             crate::briefing::Verdict::Failed => bright,
@@ -765,6 +772,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             }
         }
     }
+    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
     lines.push(Line::from(Span::styled("  any key resumes exactly where you left off", dim)));
 

@@ -4389,9 +4389,12 @@ impl App {
                 });
             }
         }
-        if rows.is_empty() {
-            return false;
-        }
+        // ITERATION MODE: always greet on return, even a quiet one — so the
+        // briefing quality can be tuned. The eventful-only gate (the calm
+        // "absence is the feature" default) is the scale-down lever for later:
+        //   if rows.is_empty() && crate::worklog::load_goals(&self.session_label()).is_empty() {
+        //       return false;
+        //   }
         // The report subsumes notices queued while detached.
         self.notices.retain(|n| !rows.iter().any(|r| n.text.contains(r.text.as_str())));
         self.digest_from_tick = Some(from);
