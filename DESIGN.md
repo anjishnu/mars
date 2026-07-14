@@ -96,6 +96,12 @@ broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
              remote mars session (attach most-recent, else create "main");
              detaching ends the ssh and returns home, tmux-style — a bare
              remote shell is what plain `ssh` is for.
+persona.rs   The voice seam: ~/.mars/persona.md (hot-read, capped, redacted)
+             rides into VOICE tasks (ask, watch) as the FINAL system message
+             under a precedence preamble — style can color prose, never
+             override rules. FORMAT tasks (translate, naming, mission) never
+             see it: their output is machine-parsed or re-ingested. No file =
+             shipped default voice; empty file = off.
 prompts.rs   Every model-facing instruction as editable Markdown in src/prompts/
              (include_str!-embedded, so the single binary still ships whole);
              {name} placeholders substituted at call sites.

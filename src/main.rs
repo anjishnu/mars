@@ -20,6 +20,7 @@ mod project;
 mod session;
 mod tab;
 mod terminal;
+mod persona;
 mod prompts;
 mod tiers;
 mod worklog;
@@ -1304,15 +1305,20 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Esc))?;
     println!("[selfcheck] ask transcript + scroll .... PASS");
 
-    // 26d. History really reaches the provider; directives parse.
-    let msgs = agent::build_messages(
+    // 26d. History really reaches the provider; directives parse. (Pinned to
+    //      the no-persona-file state → the default voice is the last system
+    //      message, before history — regardless of this machine's ~/.mars.)
+    std::env::set_var("MARS_PERSONA", std::env::temp_dir().join("mars-no-such-persona.md"));
+    let msgs = agent::build_ask_messages(
         "reg", "screen",
         &[("user".into(), "q1".into()), ("assistant".into(), "a1".into())],
         "q2",
     );
-    assert_eq!(msgs.len(), 4, "system + 2 history + question expected");
-    assert!(msgs[1]["content"].as_str().unwrap_or("").contains("q1"));
+    std::env::remove_var("MARS_PERSONA");
+    assert_eq!(msgs.len(), 5, "system + persona + 2 history + question expected");
     assert!(msgs[0]["content"].as_str().unwrap_or("").contains("screen"));
+    assert!(msgs[1]["content"].as_str().unwrap_or("").contains("VOICE"), "persona not the last system message");
+    assert!(msgs[2]["content"].as_str().unwrap_or("").contains("q1"));
     let (d1, dir1) = agent::parse_directive("use ls.\nTYPE: ls -la");
     assert_eq!(d1, "use ls.");
     assert_eq!(dir1, Some(agent::AgentDirective::Type("ls -la".into())));
@@ -1832,12 +1838,14 @@ fn selfcheck() -> Result<()> {
         }
         impl TestClient {
             fn connect(path: &std::path::Path, version: &str) -> Result<Self> {
-                let stream = UnixStream::connect(path)?;
-                let reader = BufReader::new(stream.try_clone()?);
+                use anyhow::Context as _;
+                let stream = UnixStream::connect(path).context("testclient: connect")?;
+                let reader = BufReader::new(stream.try_clone().context("testclient: clone")?);
                 let mut me = TestClient { writer: stream, reader, screen: vt100::Parser::new(30, 100, 0) };
                 session::write_frame(&mut me.writer, &session::ClientFrame::Hello {
                     cols: 100, rows: 30, version: version.to_string(),
-                })?;
+                })
+                .context("testclient: hello")?;
                 Ok(me)
             }
             fn key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1853,8 +1861,12 @@ fn selfcheck() -> Result<()> {
             /// Read Output frames until `needle` appears in the interpreted
             /// screen contents (or an Exit arrives), within `secs`.
             fn read_until(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                use anyhow::Context as _;
                 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-                self.reader.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(200)))?;
+                self.reader
+                    .get_ref()
+                    .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                    .context("testclient: set_read_timeout")?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
                 while std::time::Instant::now() < deadline {
                     let mut line = String::new();
@@ -2299,6 +2311,8 @@ fn selfcheck() -> Result<()> {
             ("cursor_insert", prompts::CURSOR_INSERT, vec!["{file}", "{line}"]),
             ("explain_this", prompts::EXPLAIN_THIS, vec![]),
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
+            ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
+            ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
             for h in holders {
@@ -2320,6 +2334,75 @@ fn selfcheck() -> Result<()> {
         assert_eq!(tiers::model_for("groq", "translate", "x"), "qwen/qwen3-32b",
             "translate must route to the mid tier");
         println!("[selfcheck] prompt templates ......... PASS");
+    }
+
+    // 29h2. Persona seam: the user's style file rides only into VOICE tasks
+    //       (ask, watch) as the FINAL system message — hot-read, capped,
+    //       redacted. FORMAT tasks (translate, naming, mission) never see it;
+    //       an empty file is the kill switch; no file means the shipped voice.
+    {
+        let pf = std::env::temp_dir().join(format!("mars-persona-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pf);
+        std::env::set_var("MARS_PERSONA", &pf);
+        // No file → shipped default voice, preamble first, last system message.
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert_eq!(msgs.len(), 3, "base system + persona + question expected");
+        let c = msgs[1]["content"].as_str().unwrap();
+        assert!(c.starts_with("VOICE"), "persona must open with the precedence preamble");
+        assert!(c.contains("mission control"), "shipped default voice missing");
+        // Custom text is hot-read (denylist pattern — next call sees the edit).
+        std::fs::write(&pf, "talk like a pirate\n")?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("talk like a pirate"),
+            "persona edit not hot-read");
+        // Watch (VOICE) carries it, before its user payload.
+        let w = agent::build_watch_messages(app::WatchReason::Quiet, "the tail");
+        assert!(w.iter().any(|m| m["content"].as_str().unwrap_or("").contains("pirate")),
+            "watch lost the voice");
+        assert_eq!(w.last().unwrap()["role"], "user", "watch payload must come last");
+        // FORMAT tasks: machine-parsed output — persona must never appear.
+        let t = agent::build_translate_messages("", "", "list files", "scr");
+        let n = agent::format_task_messages(prompts::AUTO_NAME_SYSTEM, "scr");
+        let m = agent::format_task_messages(prompts::MISSION_SYSTEM, "snapshots");
+        for (name, ms) in [("translate", &t), ("naming", &n), ("mission", &m)] {
+            assert!(
+                ms.iter().all(|msg| {
+                    let s = msg["content"].as_str().unwrap_or("");
+                    !s.contains("pirate") && !s.contains("VOICE")
+                }),
+                "persona leaked into the {name} task"
+            );
+        }
+        // Cap: an oversize persona is truncated, with a visible marker.
+        std::fs::write(&pf, "y".repeat(5000))?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        let c = msgs[1]["content"].as_str().unwrap();
+        assert!(c.chars().count() < 2500, "persona cap not applied");
+        assert!(c.ends_with('…'), "truncation marker missing");
+        // Kill switch: an emptied file disables the voice entirely.
+        std::fs::write(&pf, "\n  \n")?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert_eq!(msgs.len(), 2, "empty persona file must turn the voice off");
+        // Secrets pasted into the style file never ride into a prompt.
+        #[cfg(feature = "memory")]
+        {
+            std::fs::write(&pf, "sign replies as --password=hunter2 always\n")?;
+            let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+            let c = msgs[1]["content"].as_str().unwrap();
+            assert!(!c.contains("hunter2"), "persona leaked a secret into the prompt");
+            assert!(c.contains("[REDACTED]"), "redaction marker missing from persona");
+        }
+        // The palette action seeds a self-documenting file on first open.
+        let _ = std::fs::remove_file(&pf);
+        let mut app = App::new(None)?;
+        app.run_action(palette::Action::OpenPersona);
+        assert!(pf.exists(), "OpenPersona did not seed the persona file");
+        let seeded = std::fs::read_to_string(&pf)?;
+        assert!(seeded.starts_with('#') && seeded.contains("mission control"),
+            "seeded persona missing header/default voice");
+        std::env::remove_var("MARS_PERSONA");
+        let _ = std::fs::remove_file(&pf);
+        println!("[selfcheck] persona voice/format ..... PASS");
     }
 
     // 29g. Work journal + mission + expand-all notices: watch verdicts persist
@@ -2793,11 +2876,24 @@ fn selfcheck() -> Result<()> {
             }
             false
         }
+        // A slow shell start can outlast term_with's fixed settle sleeps, so
+        // every screen-MODE precondition polls instead of asserting once (the
+        // "alt screen not entered" flake).
+        fn wait_mode(app: &mut App, tid: usize, cond: fn(&vt100::Screen) -> bool) -> bool {
+            for _ in 0..50 {
+                app.tick();
+                if cond(&app.terms.get(&tid).unwrap().screen()) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        }
 
         // (a) Alternate screen, no mouse reporting → arrows, not a silent no-op.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h'; cat\n");
-        assert!(app.terms.get(&tid).unwrap().screen().alternate_screen(), "alt screen not entered");
+        assert!(wait_mode(&mut app, tid, |s| s.alternate_screen()), "alt screen not entered");
         app.handle_mouse(wheel(true));
         assert!(wait_for(&mut app, tid, "^[[A^[[A^[[A"),
             "alt-screen wheel-up did not become arrow keys");
@@ -2806,6 +2902,7 @@ fn selfcheck() -> Result<()> {
         // (b) DECCKM set → application-cursor arrows (^[OA), not ^[[A.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h\\033[?1h'; cat\n");
+        assert!(wait_mode(&mut app, tid, |s| s.application_cursor()), "DECCKM not set");
         app.handle_mouse(wheel(true));
         assert!(wait_for(&mut app, tid, "^[OA^[OA^[OA"),
             "DECCKM wheel-up did not send application-cursor arrows");
@@ -2815,8 +2912,7 @@ fn selfcheck() -> Result<()> {
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1002h\\033[?1006h'; cat\n");
         assert!(
-            app.terms.get(&tid).unwrap().screen().mouse_protocol_mode()
-                != vt100::MouseProtocolMode::None,
+            wait_mode(&mut app, tid, |s| s.mouse_protocol_mode() != vt100::MouseProtocolMode::None),
             "mouse mode not entered"
         );
         app.handle_mouse(wheel(true));
@@ -2827,6 +2923,7 @@ fn selfcheck() -> Result<()> {
         // (d) Plain shell (no modes): the wheel still browses mars scrollback.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"seq 1 100\n");
+        assert!(wait_for(&mut app, tid, "100"), "seq output never arrived");
         app.handle_mouse(wheel(true));
         assert!(app.terms.get(&tid).unwrap().view_offset() > 0,
             "plain-shell wheel-up no longer scrolls mars scrollback");

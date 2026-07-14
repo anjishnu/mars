@@ -3565,6 +3565,7 @@ impl App {
             Action::ClearCommandMemory => self.clear_command_memory(),
             Action::OpenDenylist       => self.open_denylist(),
             Action::OpenTuning         => self.open_tuning(),
+            Action::OpenPersona        => self.open_persona(),
             // Quit = detach (2026-07 ruling): leaving mars never ends a
             // session — kill is the deleting verb (KillSession here, `mars
             // kill`/`mars killall` outside). Standalone has nothing to keep
@@ -3636,6 +3637,19 @@ impl App {
         let path = p.to_string_lossy().into_owned();
         if let Err(e) = self.open_file(&path) {
             self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        }
+    }
+
+    fn open_persona(&mut self) {
+        let Some(p) = crate::persona::seed_if_missing() else {
+            self.status_msg = Some("no HOME — can't locate ~/.mars/persona.md".into());
+            return;
+        };
+        let path = p.to_string_lossy().into_owned();
+        if let Err(e) = self.open_file(&path) {
+            self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        } else {
+            self.status_msg = Some("style only — empty file turns the voice off".into());
         }
     }
 

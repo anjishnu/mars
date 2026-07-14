@@ -289,9 +289,13 @@ fn system_prompt(registry: &str, screen: &str) -> String {
     crate::prompts::ASK_SYSTEM.replace("{registry}", registry).replace("{screen}", screen)
 }
 
-/// Build the chat messages: system + up to the last 12 conversation turns +
-/// the new question. Extracted so tests can assert history is really sent.
-pub fn build_messages(
+/// Build the ask messages. The fixed system-message order is the assembly
+/// contract (selfcheck-pinned): base prompt, then docs-context on a retrieval
+/// hit, then the persona ALWAYS LAST — positionally under every rule it is
+/// forbidden to override. Persona and docs never travel through `.replace()`.
+/// Then up to the last 12 turns and the new question. Pure, so tests can
+/// assert the exact shape.
+pub fn build_ask_messages(
     registry: &str,
     screen: &str,
     history: &[(String, String)],
@@ -300,6 +304,12 @@ pub fn build_messages(
     let mut messages = vec![serde_json::json!({
         "role": "system", "content": system_prompt(registry, screen)
     })];
+    if let Some(ctx) = crate::retrieval::docs_context_for(question) {
+        messages.push(serde_json::json!({ "role": "system", "content": ctx }));
+    }
+    if let Some(p) = crate::persona::system_message() {
+        messages.push(p);
+    }
     let start = history.len().saturating_sub(12);
     for (role, content) in &history[start..] {
         messages.push(serde_json::json!({ "role": role, "content": content }));
@@ -318,14 +328,10 @@ pub fn ask(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     std::thread::spawn(move || {
-        // Memory (Axis B): retrieve from Mars's OWN knowledge (docs + tunable knobs)
-        // so the agent can answer "how do I…" and propose self-reconfiguration
-        // accurately. The action registry is already in the base prompt.
+        // Memory (Axis B) and voice both live inside the builder — one place
+        // owns the system-message order.
         let mode = crate::retrieval::MemoryMode::from_env();
-        let mut messages = build_messages(&registry, &screen, &history, &question);
-        if let Some(ctx) = crate::retrieval::docs_context_for(&question) {
-            messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
-        }
+        let messages = build_ask_messages(&registry, &screen, &history, &question);
         // Stream: tokens render as they arrive; the final Answer still carries
         // the complete, directive-parsed text.
         let _ = tx.send(AgentEvent::AnswerStart);
@@ -376,10 +382,7 @@ pub fn ask(
 /// Background tab-naming: tiny prompt, no registry, quiet failure.
 pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::AUTO_NAME_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": screen }),
-        ];
+        let messages = format_task_messages(crate::prompts::AUTO_NAME_SYSTEM, &screen);
         // Task tag matches the ring's `auto_name` key (was "auto-name", which
         // silently skipped tier routing).
         if let Ok(text) = chat(&cfg, messages, "auto_name") {
@@ -402,15 +405,7 @@ pub fn watch_summary(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     std::thread::spawn(move || {
-        let hint = match reason {
-            crate::app::WatchReason::Exit => crate::prompts::WATCH_HINT_EXIT,
-            crate::app::WatchReason::Quiet => crate::prompts::WATCH_HINT_QUIET,
-        };
-        let messages = vec![
-            serde_json::json!({ "role": "system",
-                "content": crate::prompts::WATCH_SYSTEM.trim_end().replace("{hint}", hint.trim_end()) }),
-            serde_json::json!({ "role": "user", "content": tail }),
-        ];
+        let messages = build_watch_messages(reason, &tail);
         match chat(&cfg, messages, "watch") {
             Ok(text) => {
                 let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
@@ -430,15 +425,30 @@ pub fn watch_summary(
     });
 }
 
+/// Watch is a VOICE task: the verdict is prose the user reads many times a
+/// day, so the persona rides along — bounded by WATCH_SYSTEM's one-line rule,
+/// which the persona preamble forbids overriding. Pure, for the selfcheck.
+pub fn build_watch_messages(reason: crate::app::WatchReason, tail: &str) -> Vec<serde_json::Value> {
+    let hint = match reason {
+        crate::app::WatchReason::Exit => crate::prompts::WATCH_HINT_EXIT,
+        crate::app::WatchReason::Quiet => crate::prompts::WATCH_HINT_QUIET,
+    };
+    let mut messages = vec![serde_json::json!({ "role": "system",
+        "content": crate::prompts::WATCH_SYSTEM.trim_end().replace("{hint}", hint.trim_end()) })];
+    if let Some(p) = crate::persona::system_message() {
+        messages.push(p);
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": tail }));
+    messages
+}
+
 /// Background mission inference: read the recent work-journal snapshots and
 /// name, in one line, what the user is working on. Quiet failure — a mission
-/// is a nicety, never worth a notice.
+/// is a nicety, never worth a notice. FORMAT task: no persona, its output is
+/// re-ingested (ls summary, briefings, prompts).
 pub fn infer_mission(cfg: AgentConfig, snapshots: Vec<String>, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::MISSION_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": snapshots.join("\n") }),
-        ];
+        let messages = format_task_messages(crate::prompts::MISSION_SYSTEM, &snapshots.join("\n"));
         if let Ok(text) = chat(&cfg, messages, "mission") {
             let mission = text.trim().lines().next().unwrap_or("").trim().to_string();
             if !mission.is_empty() {
@@ -452,10 +462,7 @@ pub fn infer_mission(cfg: AgentConfig, snapshots: Vec<String>, tx: mpsc::Sender<
 /// Background session-naming — like tab naming but for the whole session.
 pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::NAME_SESSION_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": screen }),
-        ];
+        let messages = format_task_messages(crate::prompts::NAME_SESSION_SYSTEM, &screen);
         // Tag matches the ring's `name_session` key (was "session-name").
         if let Ok(text) = chat(&cfg, messages, "name_session") {
             let name = kebab(&text);
@@ -492,6 +499,33 @@ fn is_reasoning_model(model: &str) -> bool {
 /// default model again (deliberate non-members: `ask_escalated`, `remote`).
 pub const TASKS: &[&str] = &["ask", "translate", "watch", "mission", "auto_name", "name_session"];
 
+/// FORMAT-task builder for translate: machine-parsed output, so the persona
+/// NEVER appears here (selfcheck-pinned). Pure.
+pub fn build_translate_messages(
+    reasoning_cap: &str,
+    examples_block: &str,
+    request: &str,
+    screen: &str,
+) -> Vec<serde_json::Value> {
+    let system = crate::prompts::TRANSLATE_SYSTEM
+        .trim_end()
+        .replace("{reasoning_cap}", reasoning_cap)
+        .replace("{examples_block}", examples_block);
+    vec![
+        serde_json::json!({ "role": "system", "content": system }),
+        serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
+    ]
+}
+
+/// Shared shape of the remaining FORMAT tasks (naming, mission): one static
+/// system prompt + one user payload — persona-free by construction.
+pub fn format_task_messages(system: &str, user: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({ "role": "system", "content": system.trim_end() }),
+        serde_json::json!({ "role": "user", "content": user }),
+    ]
+}
+
 pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
     let mode = crate::retrieval::MemoryMode::from_env();
     let examples = crate::retrieval::fewshot_for(request);
@@ -512,14 +546,7 @@ pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow:
             crate::prompts::TRANSLATE_EXAMPLES.trim_end().replace("{examples}", &examples)
         )
     };
-    let system = crate::prompts::TRANSLATE_SYSTEM
-        .trim_end()
-        .replace("{reasoning_cap}", &reasoning_cap)
-        .replace("{examples_block}", &examples_block);
-    let messages = vec![
-        serde_json::json!({ "role": "system", "content": system }),
-        serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
-    ];
+    let messages = build_translate_messages(&reasoning_cap, &examples_block, request, screen);
     // Tag must match the tiers.json key ("translate") — "shell" routed to the
     // provider default model for months before anyone noticed.
     let (text, call_id) = chat_with_id(cfg, messages, "translate", mode.as_str())?;
