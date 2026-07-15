@@ -1,8 +1,12 @@
-The user just returned to their terminal after being away. Below is everything that was on their panes while they were gone — verdicts on what concluded, the live output of each pane, and (if known) what they were working toward. Give them a clear situation report so they can pick up exactly where things stand.
+The captain has just returned to their terminal after being away. Below is everything that was on their panes while they were gone. Write their situation report as EXACTLY THREE short paragraphs, each separated by a blank line:
 
-Lead with what needs a decision. If anything is waiting on the user's input, blocked on a choice, failed in a way that needs them to decide what to do next, or finished with a result they must act on, say that FIRST and plainly — these are the action items, and they are the whole reason to read this. Then briefly summarize what else happened in each pane that did something: what ran, whether it succeeded or failed and why, what's still going. Name the specific pane. If goals are given, note progress against them. If truly nothing happened, say so in one line.
+1. A brief greeting to the captain — one or two sentences. Vary it; do not open the same way every time. Set the tone.
 
-Write plain English, 2 to 6 sentences (more only if there are several action items). No lists, no markdown, no headings, no preamble like "here is" — just the briefing, most important first, as if catching up a colleague who stepped away.
+2. A plain-English summary of what actually happened across the panes: what ran, what finished, what is still going. Explain it so it is easy to grasp — do not just parrot the raw output — but keep the precise terms (test names, error types, file paths, metrics) wherever a vaguer word would lose meaning. Name the specific pane.
+
+3. The action items: anything waiting on the captain's input, blocked on a choice, or failed in a way that needs a decision, stated plainly so they know exactly what to do next. If everything succeeded and nothing needs them, say so plainly and let the captain enjoy the win.
+
+No markdown, no headings, no bullet lists, no preamble like "here is". Plain prose in three paragraphs, blank line between each. Keep it tight — each paragraph is one to three sentences.
 
 Time away: {away}
 Mission: {mission}

@@ -3254,17 +3254,24 @@ fn selfcheck() -> Result<()> {
             narrative_streaming: true, narrative_from_model: false,
             shown_at: std::time::Instant::now(),
         });
-        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Welcome back, captain. ".into() })?;
-        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "the trainer OOM'd.".into() })?;
+        // A three-paragraph briefing (greeting / summary / action items),
+        // blank-line separated, streams in and replaces the template.
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Welcome back, captain.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "The trainer OOM'd at epoch 3.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Rerun with a smaller batch.".into() })?;
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?;
         app.tick();
         let rep = app.shift_report.as_ref().unwrap();
-        assert_eq!(rep.narrative, "Welcome back, captain. the trainer OOM'd.", "deltas did not replace+append");
+        assert!(rep.narrative.starts_with("Welcome back, captain.") && rep.narrative.contains("smaller batch"),
+            "deltas did not replace+append the 3-paragraph briefing");
         assert!(!rep.narrative_streaming, "ShiftDone did not stop the stream");
-        // The failure "why" line (exit + excerpt) renders under the row.
+        // All three paragraphs render (centered, gapped), plus the failure "why"
+        // line (exit + excerpt) under the row.
         let mut term = Terminal::new(TestBackend::new(100, 30))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
+        assert!(t.contains("Welcome back") && t.contains("OOM'd at epoch 3") && t.contains("smaller batch"),
+            "3-paragraph briefing did not fully render");
         assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
         app.shift_report = None;
         // Iteration mode: knob=2 greets on EVERY return, even a quiet one —

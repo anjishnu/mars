@@ -707,31 +707,50 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             if needs > 0 { format!(" · {needs} needs you") } else { String::new() },
         )
     };
-    let caption = format!("   T+{} away{workstreams}", crate::briefing::fmt_secs(rep.away_secs));
+    // Everything above the manifest is centered in the full width; the caption,
+    // the mission, and the briefing prose all read as a centered dispatch.
+    let cw = inner.width as usize;
+    let center = |len: usize| " ".repeat(cw.saturating_sub(len) / 2);
+    let title = "SHIFT REPORT";
+    let caption = format!("  T+{} away{workstreams}", crate::briefing::fmt_secs(rep.away_secs));
     lines.push(Line::from(vec![
-        Span::styled("  SHIFT REPORT", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}{title}", center(title.chars().count() + caption.chars().count())),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(caption, dim),
     ]));
     if let Some(m) = &rep.mission {
-        lines.push(Line::from(Span::styled(format!("  mission: {m}"), dim)));
+        let s = format!("mission: {m}");
+        lines.push(Line::from(Span::styled(format!("{}{s}", center(s.chars().count())), dim)));
     }
     lines.push(Line::from(""));
-    // The briefing — the readable heart of the screen.
+    // The briefing — the readable heart of the screen. Three centered paragraphs
+    // with a blank line between them: a greeting to the captain, the plain
+    // summary, then the action items (styled to stand out). Split on the blank
+    // lines the model emits; a single-paragraph fallback still centers cleanly.
     let cursor = if rep.narrative_streaming { "▏" } else { "" };
-    let narrative = format!("{}{cursor}", rep.narrative);
-    for (i, l) in wrap(&narrative, w).into_iter().enumerate() {
-        let style = if i == 0 {
-            Style::default().fg(bright).add_modifier(Modifier::BOLD)
+    let full = format!("{}{cursor}", rep.narrative);
+    let paras: Vec<&str> = full.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
+    let npar = paras.len();
+    for (pi, para) in paras.iter().enumerate() {
+        let style = if pi == 0 {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD) // greeting
+        } else if npar >= 3 && pi == npar - 1 {
+            Style::default().fg(bright).add_modifier(Modifier::BOLD) // action items
         } else {
-            white
+            white // the summary
         };
-        lines.push(Line::from(Span::styled(format!("  {l}"), style)));
+        for l in wrap(para, w) {
+            lines.push(Line::from(Span::styled(format!("{}{l}", center(l.chars().count())), style)));
+        }
+        lines.push(Line::from("")); // visual gap between paragraphs
     }
     // The manifest: one terse glyph line per workstream, failures first, with a
     // dim "why" line under the ones that need you. Skipped entirely on a quiet
-    // return — the narrative already said "all clear," no empty rules.
+    // return — the narrative already said "all clear," no empty rules. (The
+    // narrative loop already left a blank line above, so no extra gap here.)
     if !rep.rows.is_empty() {
-        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
     }
     for r in &rep.rows {
