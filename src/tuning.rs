@@ -56,6 +56,8 @@ pub struct Tuning {
     pub worklog_max_lines: u64,
     pub mission_briefing: u64,
     pub mission_briefing_animate: u64,
+    pub mission_briefing_type_ms: u64,
+    pub mission_briefing_prose_rows: u64,
     pub auto_watch: u64,
     pub watch_min_active_secs: u64,
     pub goal_tracking: u64,
@@ -108,6 +110,8 @@ impl Default for Tuning {
             worklog_max_lines: 4000,
             mission_briefing: 2,
             mission_briefing_animate: 1,
+            mission_briefing_type_ms: 13,
+            mission_briefing_prose_rows: 13,
             auto_watch: 1,
             watch_min_active_secs: 10,
             goal_tracking: 1,
@@ -262,6 +266,13 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("mission_briefing_animate", knob(json!(d.mission_briefing_animate),
             "1 = the Mission Briefing boots up on reattach (elements reveal in ~0.4s, \
              failures first); 0 = it appears instantly (thin SSH links, reduced motion).")),
+        ("mission_briefing_type_ms", knob(json!(d.mission_briefing_type_ms),
+            "Milliseconds per character as the briefing prose types itself in behind a \
+             cursor (animate=1 only). Higher is slower; e.g. 13 ≈ 75 chars/sec.")),
+        ("mission_briefing_prose_rows", knob(json!(d.mission_briefing_prose_rows),
+            "Rows reserved for the briefing prose so the layout is a fixed vessel the \
+             text fills top-down — the manifest below never shifts as prose streams. \
+             Raise it if long briefings push the systems board down.")),
         ("auto_watch", knob(json!(d.auto_watch),
             "1 = panes that stay busy past watch_min_active_secs are watched \
              automatically (verdicts without arming a watch); 0 = only C-x w \
@@ -389,6 +400,10 @@ pub fn load() -> Tuning {
             get_u64(&map, "mission_briefing", get_u64(&map, "shift_report", t.mission_briefing));
         t.mission_briefing_animate =
             get_u64(&map, "mission_briefing_animate", t.mission_briefing_animate);
+        t.mission_briefing_type_ms =
+            get_u64(&map, "mission_briefing_type_ms", t.mission_briefing_type_ms);
+        t.mission_briefing_prose_rows =
+            get_u64(&map, "mission_briefing_prose_rows", t.mission_briefing_prose_rows);
         t.auto_watch = get_u64(&map, "auto_watch", t.auto_watch);
         t.watch_min_active_secs = get_u64(&map, "watch_min_active_secs", t.watch_min_active_secs);
         t.goal_tracking = get_u64(&map, "goal_tracking", t.goal_tracking);

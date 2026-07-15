@@ -4145,6 +4145,10 @@ impl App {
                         if !rep.narrative_from_model {
                             rep.narrative.clear();
                             rep.narrative_from_model = true;
+                            // Anchor the typewriter clock to the first token, so the
+                            // prose reveals at a steady pace no matter how bursty the
+                            // network delivery is.
+                            rep.stream_started_at = Some(std::time::Instant::now());
                         }
                         rep.narrative.push_str(&text);
                     }
@@ -4201,9 +4205,16 @@ impl App {
         // self-terminating — once revealed and the stream is done, this goes
         // quiet and no idle frames are sent.
         if let Some(rep) = &self.shift_report {
-            let booting = self.tuning.mission_briefing_animate == 1
-                && rep.shown_at.elapsed().as_millis() < crate::briefing::BOOT_TOTAL_MS;
-            if booting || rep.narrative_streaming {
+            let animate = self.tuning.mission_briefing_animate == 1;
+            let booting = animate && rep.shown_at.elapsed().as_millis() < crate::briefing::BOOT_TOTAL_MS;
+            // The typewriter can still be catching up to the received text after the
+            // stream itself has closed — keep redrawing until it lands the last char.
+            let ms = self.tuning.mission_briefing_type_ms.max(1) as u128;
+            let typing = animate
+                && rep.stream_started_at
+                    .map(|s| s.elapsed().as_millis() / ms < rep.narrative.chars().count() as u128)
+                    .unwrap_or(false);
+            if booting || typing || rep.narrative_streaming {
                 self.needs_redraw = true;
             }
         }
@@ -4483,6 +4494,7 @@ impl App {
             narrative_streaming: false,
             narrative_from_model: false,
             facts: String::new(),
+            stream_started_at: None,
             shown_at: std::time::Instant::now(),
         };
         report.sort_rows();

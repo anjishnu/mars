@@ -89,9 +89,21 @@ pub struct ShiftReport {
     /// Compact manifest distillation, logged when the briefing finalizes so the
     /// next return can report progress against it (continuity).
     pub facts: String,
+    /// When the first model delta landed — the origin for the typewriter reveal,
+    /// so the prose types in at a steady rate behind a cursor rather than in the
+    /// ragged bursts the network delivers. None until the model starts speaking.
+    pub stream_started_at: Option<std::time::Instant>,
     /// Millis timestamp when the overlay first rendered (for instrumentation).
     pub shown_at: std::time::Instant,
 }
+
+/// The mission-control words that flash, one after another, while the briefing
+/// call is in flight — shown in place of the deterministic backup line so the
+/// prose types into a clean slot instead of visibly swapping a stub for the model
+/// text. Cycled by the frame clock.
+pub const BRIEF_LOADING: &[&str] = &["booting", "syncing", "triaging", "collating", "briefing"];
+/// How long each loading word holds before the next (ms).
+pub const LOADING_FLASH_MS: u128 = 200;
 
 /// Tier-0 verdict for one pane, from evidence alone.
 pub struct Triage {

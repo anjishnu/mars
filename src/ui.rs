@@ -777,46 +777,109 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     }
     lines.push(Line::from(""));
 
-    // The briefing prose (instant; streams token-by-token). The model emits four
-    // blocks — greeting, summary, action items, sign-off. The first three sit
-    // above the manifest; the sign-off is held for below it (the peak-end beat).
-    // Each block is set as justified text within the shared centered measure: a
-    // one-line block is centered, a wrapped block is flush on both edges with its
-    // final line ragged (standard justification).
-    let cursor = if rep.narrative_streaming { "▏" } else { "" };
-    let full = format!("{}{cursor}", rep.narrative);
-    let paras: Vec<&str> = full.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
-    let npar = paras.len();
-    let has_signoff = npar >= 4;
-    let above = if has_signoff { &paras[..npar - 1] } else { &paras[..] };
-    let signoff = has_signoff.then(|| paras[npar - 1]);
-    let above_n = above.len();
-    for (pi, para) in above.iter().enumerate() {
-        let style = if pi == 0 {
-            Style::default().fg(accent).add_modifier(Modifier::BOLD) // greeting
-        } else if above_n >= 3 && pi == above_n - 1 {
-            Style::default().fg(bright).add_modifier(Modifier::BOLD) // action items
-        } else {
-            white // the summary
-        };
-        let wrapped = wrap(para, bw);
-        let last = wrapped.len().saturating_sub(1);
-        for (i, l) in wrapped.iter().enumerate() {
-            if wrapped.len() == 1 {
-                lines.push(center1(l.clone(), style)); // a short block reads best centered
-            } else if i < last {
-                lines.push(Line::from(Span::styled(format!("{block_pad}{}", justify(l, bw)), style)));
+    // The briefing prose. The model emits four blocks — greeting, summary, action
+    // items, sign-off — and the first three fill a FIXED vessel above the manifest
+    // (the sign-off is held for below it, the peak-end beat). Three moves make the
+    // fill feel deliberate rather than jittery:
+    //   · while the call is in flight, a mission-control word flashes in the slot
+    //     the greeting will take — so the prose never visibly swaps a backup stub;
+    //   · the model text is revealed at a steady rate behind a cursor (a typewriter),
+    //     not in the ragged bursts the network delivers;
+    //   · the prose region is padded to a reserved height, so it is a shaped vessel
+    //     the text fills top-down and nothing below it shifts as more arrives.
+    let type_ms = app.tuning.mission_briefing_type_ms.max(1) as u128;
+    let prose_rows = (app.tuning.mission_briefing_prose_rows as usize)
+        .min((inner.height as usize).saturating_sub(6))
+        .max(2);
+    let loading = animate && rep.narrative_streaming && !rep.narrative_from_model;
+    let target_len = rep.narrative.chars().count();
+    // How many chars of the model text have been revealed: everything, unless we're
+    // animating an in-flight model stream, in which case it advances on the clock.
+    let show_n = if !animate || !rep.narrative_from_model {
+        target_len
+    } else {
+        rep.stream_started_at
+            .map(|s| (s.elapsed().as_millis() / type_ms) as usize)
+            .unwrap_or(0)
+            .min(target_len)
+    };
+    let typing = animate && rep.narrative_from_model && (show_n < target_len || rep.narrative_streaming);
+    let shown: String = rep.narrative.chars().take(show_n).collect();
+
+    let mut prose: Vec<Line> = Vec::new();
+    let mut signoff: Option<String> = None;
+    if loading {
+        let idx = (rep.shown_at.elapsed().as_millis() / crate::briefing::LOADING_FLASH_MS) as usize
+            % crate::briefing::BRIEF_LOADING.len();
+        prose.push(center1(
+            format!("{}…", crate::briefing::BRIEF_LOADING[idx]),
+            Style::default().fg(accent).add_modifier(Modifier::ITALIC),
+        ));
+    } else {
+        let cursor = if typing { "▏" } else { "" };
+        let full = format!("{shown}{cursor}");
+        let paras: Vec<&str> = full.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
+        let npar = paras.len();
+        let has_signoff = npar >= 4;
+        let above = if has_signoff { &paras[..npar - 1] } else { &paras[..] };
+        signoff = has_signoff.then(|| paras[npar - 1].to_string());
+        let above_n = above.len();
+        for (pi, para) in above.iter().enumerate() {
+            let style = if pi == 0 {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD) // greeting
+            } else if above_n >= 3 && pi == above_n - 1 {
+                Style::default().fg(bright).add_modifier(Modifier::BOLD) // action items
             } else {
-                lines.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
+                white // the summary
+            };
+            let wrapped = wrap(para, bw);
+            let last = wrapped.len().saturating_sub(1);
+            for (i, l) in wrapped.iter().enumerate() {
+                if wrapped.len() == 1 {
+                    prose.push(center1(l.clone(), style)); // a short block reads best centered
+                } else if i < last {
+                    prose.push(Line::from(Span::styled(format!("{block_pad}{}", justify(l, bw)), style)));
+                } else {
+                    prose.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
+                }
             }
+            prose.push(Line::from(""));
         }
-        lines.push(Line::from(""));
+        // A quiet return still feels intentional: one dim radar line under the prose.
+        if rep.rows.is_empty() {
+            prose.push(center1("·   ·   ◜   ·   ·".to_string(), dim));
+            prose.push(Line::from(""));
+        }
     }
-    // A quiet return still feels intentional: one dim radar line under the prose.
-    if rep.rows.is_empty() {
-        lines.push(center1("·   ·   ◜   ·   ·".to_string(), dim));
-        lines.push(Line::from(""));
+    // Pad the prose to its reserved height so the vessel is a fixed shape (only when
+    // animating; instant mode packs tight). Overflow just grows the vessel.
+    if animate {
+        while prose.len() < prose_rows {
+            prose.push(Line::from(""));
+        }
     }
+    lines.extend(prose);
+    // Everything above here is a fixed height across frames; the manifest and
+    // sign-off below reveal into reserved space without moving it.
+    let fixed_head = lines.len();
+    let manifest_full: usize = if rep.rows.is_empty() {
+        0
+    } else {
+        1 + rep
+            .rows
+            .iter()
+            .map(|r| {
+                let needsyou = matches!(
+                    r.verdict,
+                    crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked
+                );
+                let has_detail =
+                    needsyou && (r.cwd.is_some() || r.exit.is_some() || r.error_excerpt.is_some());
+                1 + usize::from(has_detail)
+            })
+            .sum::<usize>()
+    };
+    let signoff_full = if rep.rows.is_empty() { 2 } else { 6 };
 
     // The manifest as a systems board, hung off the same centered measure: a left
     // severity stripe, needs-you rows bright and concluded ones receding. Rows
@@ -877,7 +940,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(format!("{block_pad}{}", "─".repeat(bw)), dim)));
         }
-        if let Some(s) = signoff {
+        if let Some(s) = &signoff {
             let so = Style::default().fg(accent).add_modifier(Modifier::ITALIC);
             for l in wrap(s, bw) {
                 lines.push(center1(l, so));
@@ -887,13 +950,21 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
         lines.push(center1("any key resumes exactly where you left off".to_string(), dim));
     }
 
-    let block_h = lines.len() as u16;
-    let top_pad = inner.height.saturating_sub(block_h) / 2;
+    // Center once against the RESERVED height (fixed head + full manifest + tail),
+    // not the live line count — so the composition holds still while the manifest
+    // cascades and the prose types in. In instant mode there's no reveal, so the
+    // live height is exact.
+    let total = if animate {
+        (fixed_head + manifest_full + signoff_full) as u16
+    } else {
+        lines.len() as u16
+    };
+    let top_pad = inner.height.saturating_sub(total) / 2;
     let area = Rect {
         x: inner.x,
         y: inner.y + top_pad,
         width: inner.width,
-        height: block_h.min(inner.height),
+        height: (lines.len() as u16).max(total).min(inner.height),
     };
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }

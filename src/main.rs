@@ -3260,7 +3260,7 @@ fn selfcheck() -> Result<()> {
             ],
             suggestion: None, narrative: "2 failed.".into(),
             narrative_streaming: true, narrative_from_model: false, facts: String::new(),
-            shown_at: std::time::Instant::now(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
         });
         // A four-block briefing (greeting / summary / action items / sign-off),
         // blank-line separated, streams in and replaces the template. The good-news
@@ -3297,11 +3297,42 @@ fn selfcheck() -> Result<()> {
             away_secs: 60, mission: None, rows: vec![], suggestion: None,
             narrative: "Welcome back — all quiet.".into(),
             narrative_streaming: true, narrative_from_model: false, facts: String::new(),
-            shown_at: std::time::Instant::now(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
         });
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?; // no delta preceded it → failed call
         app.tick();
         assert!(app.shift_report.is_none(), "a failed briefing call must dismiss the overlay");
+        // Boot polish (animate=1): while the call is in flight a mission-control word
+        // flashes in place of the deterministic backup line, so the prose never
+        // visibly swaps a stub; and the model text types in behind a cursor rather
+        // than appearing whole. Both are gated on the animate knob.
+        app.tuning.mission_briefing_animate = 1;
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 5, mission: None, rows: vec![], suggestion: None,
+            narrative: "2 failed.".into(), // the deterministic backup — must NOT be shown
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
+        });
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(briefing::BRIEF_LOADING.iter().any(|w| t.contains(w)),
+            "loading state should flash a mission-control word");
+        assert!(!t.contains("2 failed"), "the backup line must not show under the loading flash");
+        // Typewriter: with the stream just begun, the tail of a long briefing has not
+        // been revealed yet (it types in on the clock), though the chrome is already up.
+        if let Some(rep) = app.shift_report.as_mut() {
+            rep.narrative_from_model = true;
+            rep.narrative = "Welcome back, captain. This long briefing types itself in gradually behind a cursor, not all at once.".into();
+            rep.stream_started_at = Some(std::time::Instant::now());
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("MISSION BRIEFING"), "chrome should be up during the typewriter");
+        assert!(!t.contains("not all at once"), "typewriter must not reveal the tail instantly");
+        app.tuning.mission_briefing_animate = 0;
+        app.shift_report = None;
         // Iteration mode: knob=2 greets on EVERY return, even a quiet one —
         // the overlay is present with zero rows and a "welcome back" line.
         let mut app = App::new(None)?;
