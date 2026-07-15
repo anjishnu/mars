@@ -733,7 +733,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     // The MARS wordmark (instant — the console's always-on identity), centered as
     // a block so its internal art stays aligned while the whole mark sits mid-page.
-    let logo_rows = &crate::banner::BANNER_LINES[2..=7];
+    let logo_rows = &crate::banner::BANNER_LINES[1..=9];
     if inner.height as usize > rep.rows.len() + logo_rows.len() + 14 {
         let logo: Vec<(Line, u16)> = logo_rows.iter().map(|r| ansi_to_line(r)).collect();
         let logo_w = logo.iter().map(|(_, wd)| *wd as usize).max().unwrap_or(0);
@@ -811,10 +811,12 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     if loading {
         let idx = (rep.shown_at.elapsed().as_millis() / crate::briefing::LOADING_FLASH_MS) as usize
             % crate::briefing::BRIEF_LOADING.len();
-        prose.push(center1(
-            format!("{}…", crate::briefing::BRIEF_LOADING[idx]),
+        // Anchored at the block's left edge — where the greeting's first letter
+        // will land — so the swap to real text has no lateral jump.
+        prose.push(Line::from(Span::styled(
+            format!("{block_pad}{}…", crate::briefing::BRIEF_LOADING[idx]),
             Style::default().fg(accent).add_modifier(Modifier::ITALIC),
-        ));
+        )));
     } else {
         let cursor = if typing { "▏" } else { "" };
         let full = format!("{shown}{cursor}");
@@ -832,12 +834,14 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             } else {
                 white // the summary
             };
+            // Every prose line is anchored at the block's left edge, so the text
+            // is only ever written left-to-right and each word stays put as the
+            // typewriter advances — never re-centering (which grows from the
+            // middle out). Non-final lines are justified flush; the last is ragged.
             let wrapped = wrap(para, bw);
             let last = wrapped.len().saturating_sub(1);
             for (i, l) in wrapped.iter().enumerate() {
-                if wrapped.len() == 1 {
-                    prose.push(center1(l.clone(), style)); // a short block reads best centered
-                } else if i < last {
+                if i < last {
                     prose.push(Line::from(Span::styled(format!("{block_pad}{}", justify(l, bw)), style)));
                 } else {
                     prose.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
@@ -941,9 +945,10 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             lines.push(Line::from(Span::styled(format!("{block_pad}{}", "─".repeat(bw)), dim)));
         }
         if let Some(s) = &signoff {
+            // Left-anchored like the prose, so the last word types in left-to-right.
             let so = Style::default().fg(accent).add_modifier(Modifier::ITALIC);
             for l in wrap(s, bw) {
-                lines.push(center1(l, so));
+                lines.push(Line::from(Span::styled(format!("{block_pad}{l}"), so)));
             }
             lines.push(Line::from(""));
         }
