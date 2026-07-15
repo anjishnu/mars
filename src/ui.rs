@@ -671,29 +671,26 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Distribute inter-word spaces so `line` fills exactly `width` columns, flush on
-/// both edges (MS-Word "justify"). Extra spaces spread left-to-right. A single
-/// word, or an already-overfull line, is returned as-is (the caller left-aligns
-/// it) — and by convention the caller never justifies a paragraph's last line.
+/// Pad a wrapped line to exactly `width` columns by widening ONLY the final gap,
+/// so the last word sits flush against the right edge while every earlier word
+/// keeps its natural single-spaced position. This gives a justified right edge
+/// without the jitter of full justification — where a line completing mid-stream
+/// re-spreads every word and visibly nudges text that had already settled. Here
+/// the earlier words never move; only the last word snaps right as the line
+/// closes. A single word, or an already-full line, is returned unchanged (the
+/// caller never justifies a paragraph's last line at all).
 fn justify(line: &str, width: usize) -> String {
     let words: Vec<&str> = line.split_whitespace().collect();
     if words.len() < 2 {
         return line.to_string();
     }
-    let text_len: usize = words.iter().map(|w| w.chars().count()).sum();
-    if text_len >= width {
+    let natural: usize =
+        words.iter().map(|w| w.chars().count()).sum::<usize>() + words.len() - 1;
+    if natural >= width {
         return words.join(" ");
     }
-    let gaps = words.len() - 1;
-    let (base, extra) = ((width - text_len) / gaps, (width - text_len) % gaps);
-    let mut out = String::new();
-    for (i, word) in words.iter().enumerate() {
-        out.push_str(word);
-        if i < gaps {
-            out.push_str(&" ".repeat(base + usize::from(i < extra)));
-        }
-    }
-    out
+    let (head, last) = words.split_at(words.len() - 1);
+    format!("{}{}{}", head.join(" "), " ".repeat(1 + width - natural), last[0])
 }
 
 /// The shift report — the save-state restore. The MARS wordmark up top (centered),
