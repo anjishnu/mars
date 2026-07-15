@@ -675,6 +675,34 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// plain-English persona-voiced situation briefing (the star — it streams in),
 /// then a compact glyph manifest of the workstreams. Splash pattern: Clear + one
 /// centered Paragraph. Any key resumes.
+/// Brighten data-looking tokens (numbers, metrics, file.ext, exit codes) in a
+/// prose line so the eye snags on what moved; everything else stays `base`.
+fn emphasize_data(line: &str, base: Style, bright: Color) -> Vec<Span<'static>> {
+    let hot = Style::default().fg(bright).add_modifier(Modifier::BOLD);
+    let looks_like_data = |w: &str| {
+        let has_digit = w.chars().any(|c| c.is_ascii_digit());
+        let all_numeric = w.chars().all(|c| c.is_ascii_digit() || "._/:%x+-".contains(c));
+        let file_ext = w
+            .rsplit_once('.')
+            .map(|(_, e)| (1..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphabetic()))
+            .unwrap_or(false)
+            && w.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
+        (has_digit && all_numeric) || file_ext
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, word) in line.split(' ').enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", base));
+        }
+        if word.is_empty() {
+            continue;
+        }
+        let style = if looks_like_data(word) { hot } else { base };
+        spans.push(Span::styled(word.to_string(), style));
+    }
+    spans
+}
+
 fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let Some(rep) = app.shift_report.as_ref() else { return };
     frame.render_widget(Clear, inner);
@@ -684,83 +712,118 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let dim = Style::default().fg(Color::DarkGray);
     let white = Style::default().fg(Color::White);
     let w = inner.width.saturating_sub(6).min(88) as usize;
+    let cw = inner.width as usize;
+    // Prepend padding to a span list so its visible width centers in the page.
+    let centered = |spans: Vec<Span<'static>>, vis_len: usize| -> Line<'static> {
+        let pad = " ".repeat(cw.saturating_sub(vis_len) / 2);
+        let mut v = vec![Span::raw(pad)];
+        v.extend(spans);
+        Line::from(v)
+    };
+    let center1 = |s: String, style: Style| -> Line<'static> {
+        let len = s.chars().count();
+        centered(vec![Span::styled(s, style)], len)
+    };
+
+    // The boot-up reveal: elements come online over ~0.5s, worst-news-first.
+    let animate = app.tuning.mission_briefing_animate == 1;
+    let elapsed = if animate { rep.shown_at.elapsed().as_millis() } else { u128::MAX };
+    let rev = crate::briefing::reveal_at(elapsed, rep.rows.len());
 
     let mut lines: Vec<Line> = Vec::new();
-    // The MARS wordmark (the six letter-rows of the banner) when there's room;
-    // else a compact caption. The truecolor terracotta gradient is in the art.
+    // The MARS wordmark (instant — the console's always-on identity).
     let logo_rows = &crate::banner::BANNER_LINES[2..=7];
-    if inner.height as usize > rep.rows.len() + logo_rows.len() + 12 {
+    if inner.height as usize > rep.rows.len() + logo_rows.len() + 14 {
         for raw in logo_rows {
             lines.push(ansi_to_line(raw).0);
         }
         lines.push(Line::from(""));
     }
-    let needs = rep.rows.iter().filter(|r| matches!(r.verdict,
-        crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked)).count();
-    let workstreams = if rep.rows.is_empty() {
+    // Caption: MISSION BRIEFING · T+HH:MM:SS mission clock · status ribbon.
+    let (nf, nb, nd, nr) = (
+        rep.rows.iter().filter(|r| r.verdict == crate::briefing::Verdict::Failed).count(),
+        rep.rows.iter().filter(|r| r.verdict == crate::briefing::Verdict::Blocked).count(),
+        rep.rows.iter().filter(|r| r.verdict == crate::briefing::Verdict::Done).count(),
+        rep.rows.iter().filter(|r| r.verdict == crate::briefing::Verdict::Running).count(),
+    );
+    let ribbon = if rep.rows.is_empty() {
         " · all quiet".to_string()
     } else {
-        format!(
-            " · {} workstream{}{}",
-            rep.rows.len(),
-            if rep.rows.len() == 1 { "" } else { "s" },
-            if needs > 0 { format!(" · {needs} needs you") } else { String::new() },
-        )
+        let mut parts = Vec::new();
+        if nf > 0 { parts.push(format!("✗{nf}")); }
+        if nb > 0 { parts.push(format!("⏸{nb}")); }
+        if nd > 0 { parts.push(format!("✓{nd}")); }
+        if nr > 0 { parts.push(format!("●{nr}")); }
+        format!(" · {}", parts.join(" "))
     };
-    // Everything above the manifest is centered in the full width; the caption,
-    // the mission, and the briefing prose all read as a centered dispatch.
-    let cw = inner.width as usize;
-    let center = |len: usize| " ".repeat(cw.saturating_sub(len) / 2);
     let title = "MISSION BRIEFING";
-    let caption = format!("  T+{} away{workstreams}", crate::briefing::fmt_secs(rep.away_secs));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}{title}", center(title.chars().count() + caption.chars().count())),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(caption, dim),
-    ]));
+    let caption = format!("   T+ {}{ribbon}", crate::briefing::fmt_clock(rep.away_secs));
+    let cap_len = title.chars().count() + caption.chars().count();
+    lines.push(centered(
+        vec![
+            Span::styled(title.to_string(), Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+            Span::styled(caption, dim),
+        ],
+        cap_len,
+    ));
     if let Some(m) = &rep.mission {
-        let s = format!("mission: {m}");
-        lines.push(Line::from(Span::styled(format!("{}{s}", center(s.chars().count())), dim)));
+        lines.push(center1(format!("mission: {m}"), dim));
     }
     lines.push(Line::from(""));
-    // The briefing — the readable heart of the screen. Three centered paragraphs
-    // with a blank line between them: a greeting to the captain, the plain
-    // summary, then the action items (styled to stand out). Split on the blank
-    // lines the model emits; a single-paragraph fallback still centers cleanly.
+
+    // The briefing prose (instant; streams token-by-token). The model emits four
+    // blocks — greeting, summary, action items, sign-off. The first three center
+    // above the manifest; the sign-off is held for below it (the peak-end beat).
     let cursor = if rep.narrative_streaming { "▏" } else { "" };
     let full = format!("{}{cursor}", rep.narrative);
     let paras: Vec<&str> = full.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
     let npar = paras.len();
-    for (pi, para) in paras.iter().enumerate() {
-        let style = if pi == 0 {
-            Style::default().fg(accent).add_modifier(Modifier::BOLD) // greeting
-        } else if npar >= 3 && pi == npar - 1 {
-            Style::default().fg(bright).add_modifier(Modifier::BOLD) // action items
+    let has_signoff = npar >= 4;
+    let above = if has_signoff { &paras[..npar - 1] } else { &paras[..] };
+    let signoff = has_signoff.then(|| paras[npar - 1]);
+    let above_n = above.len();
+    for (pi, para) in above.iter().enumerate() {
+        let (style, is_summary) = if pi == 0 {
+            (Style::default().fg(accent).add_modifier(Modifier::BOLD), false) // greeting
+        } else if above_n >= 3 && pi == above_n - 1 {
+            (Style::default().fg(bright).add_modifier(Modifier::BOLD), false) // action items
         } else {
-            white // the summary
+            (white, true) // the summary — data tokens catch the light
         };
         for l in wrap(para, w) {
-            lines.push(Line::from(Span::styled(format!("{}{l}", center(l.chars().count())), style)));
+            if is_summary {
+                let vis = l.chars().count();
+                lines.push(centered(emphasize_data(&l, white, bright), vis));
+            } else {
+                lines.push(center1(l, style));
+            }
         }
-        lines.push(Line::from("")); // visual gap between paragraphs
+        lines.push(Line::from(""));
     }
-    // The manifest: one terse glyph line per workstream, failures first, with a
-    // dim "why" line under the ones that need you. Skipped entirely on a quiet
-    // return — the narrative already said "all clear," no empty rules. (The
-    // narrative loop already left a blank line above, so no extra gap here.)
-    if !rep.rows.is_empty() {
+    // A quiet return still feels intentional: one dim radar line under the prose.
+    if rep.rows.is_empty() {
+        lines.push(center1("·   ·   ◜   ·   ·".to_string(), dim));
+        lines.push(Line::from(""));
+    }
+
+    // The manifest as a systems board: a left severity stripe, needs-you rows
+    // bright and concluded ones receding. Rows cascade in, failures first.
+    if !rep.rows.is_empty() && rev.rows > 0 {
         lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
     }
-    for r in &rep.rows {
-        let fg = match r.verdict {
+    for r in rep.rows.iter().take(rev.rows) {
+        let needsyou = matches!(r.verdict, crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked);
+        let goodnews = r.verdict == crate::briefing::Verdict::Done
+            && r.dur_secs.map(|d| d > crate::briefing::GOODNEWS_SECS).unwrap_or(false);
+        let hue = match r.verdict {
             crate::briefing::Verdict::Failed => bright,
             crate::briefing::Verdict::Blocked => accent,
-            crate::briefing::Verdict::Done => teal,
-            crate::briefing::Verdict::Running => teal,
-            _ => Color::Gray,
+            crate::briefing::Verdict::Done | crate::briefing::Verdict::Running => teal,
+            _ => Color::DarkGray,
         };
+        let hue = if goodnews { bright } else { hue };
+        let body_style = if needsyou || goodnews { white } else { dim };
+        let glyph = if goodnews { "★" } else { r.verdict.glyph() };
         let tab = if r.tab.is_empty() { String::new() } else { format!("[{}] ", r.tab) };
         let mut meta = Vec::new();
         if let Some(d) = r.dur_secs.filter(|d| *d > 0) {
@@ -772,11 +835,12 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
         let meta = if meta.is_empty() { String::new() } else { format!("  ({})", meta.join(", ")) };
         let body: String = format!("{tab}{}{meta}", r.text).chars().take(w).collect();
         lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", r.verdict.glyph()), Style::default().fg(fg).add_modifier(Modifier::BOLD)),
-            Span::styled(body, white),
+            Span::styled("  ▎ ".to_string(), Style::default().fg(hue)),
+            Span::styled(format!("{glyph} "), Style::default().fg(hue).add_modifier(Modifier::BOLD)),
+            Span::styled(body, body_style),
         ]));
         // The "why" under failed/blocked rows: cwd · exit · first error line.
-        if matches!(r.verdict, crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked) {
+        if needsyou {
             let mut detail = Vec::new();
             if let Some(c) = &r.cwd { detail.push(c.clone()); }
             if let Some(x) = r.exit { detail.push(format!("exit {x}")); }
@@ -791,9 +855,22 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             }
         }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
-    lines.push(Line::from(Span::styled("  any key resumes exactly where you left off", dim)));
+
+    // The sign-off (the last word) and footer arrive once the board is up.
+    if rev.signoff {
+        if !rep.rows.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+        }
+        if let Some(s) = signoff {
+            let so = Style::default().fg(accent).add_modifier(Modifier::ITALIC);
+            for l in wrap(s, w) {
+                lines.push(center1(l, so));
+            }
+            lines.push(Line::from(""));
+        }
+        lines.push(center1("any key resumes exactly where you left off".to_string(), dim));
+    }
 
     let block_h = lines.len() as u16;
     let top_pad = inner.height.saturating_sub(block_h) / 2;

@@ -591,6 +591,7 @@ pub fn shift_brief(
     cfg: AgentConfig,
     away: String,
     mission: String,
+    prev: String,
     evidence: String,
     tx: mpsc::Sender<AgentEvent>,
 ) {
@@ -599,6 +600,7 @@ pub fn shift_brief(
             .trim_end()
             .replace("{away}", &away)
             .replace("{mission}", if mission.is_empty() { "(none inferred)" } else { &mission })
+            .replace("{prev}", if prev.is_empty() { "(this is the first briefing)" } else { &prev })
             .replace("{evidence}", &evidence);
         let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
         if let Some(p) = crate::persona::system_message() {

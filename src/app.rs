@@ -4158,8 +4158,19 @@ impl App {
                     if let Some(rep) = self.shift_report.as_ref() {
                         if !rep.narrative_from_model {
                             self.shift_report = None;
-                        } else if let Some(rep) = self.shift_report.as_mut() {
-                            rep.narrative_streaming = false;
+                        } else {
+                            // Log the finalized briefing for continuity (the next
+                            // return reports progress against it).
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            crate::worklog::log_briefing(
+                                &self.session_label(), &rep.narrative, &rep.facts, rep.away_secs, ts,
+                            );
+                            if let Some(rep) = self.shift_report.as_mut() {
+                                rep.narrative_streaming = false;
+                            }
                         }
                     }
                 }
@@ -4184,6 +4195,17 @@ impl App {
         // an idle screen stays quiet — no draw, no flush, silent link.
         if self.agent_pending || !self.pending_prefix.is_empty() {
             self.needs_redraw = true;
+        }
+        // The Mission Briefing boots up on reattach: redraw while its ~0.5s
+        // reveal animation is running (or while its narrative streams). Both are
+        // self-terminating — once revealed and the stream is done, this goes
+        // quiet and no idle frames are sent.
+        if let Some(rep) = &self.shift_report {
+            let booting = self.tuning.mission_briefing_animate == 1
+                && rep.shown_at.elapsed().as_millis() < crate::briefing::BOOT_TOTAL_MS;
+            if booting || rep.narrative_streaming {
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -4460,9 +4482,27 @@ impl App {
             narrative: String::new(),
             narrative_streaming: false,
             narrative_from_model: false,
+            facts: String::new(),
             shown_at: std::time::Instant::now(),
         };
         report.sort_rows();
+        // A compact manifest distillation, logged when the briefing finalizes so
+        // the NEXT return can report progress against it (the continuity spine).
+        report.facts = report
+            .rows
+            .iter()
+            .map(|r| {
+                let w = match r.verdict {
+                    Verdict::Failed => "failed",
+                    Verdict::Blocked => "blocked",
+                    Verdict::Done => "done",
+                    Verdict::Running => "running",
+                    Verdict::Context => "·",
+                };
+                format!("{w}: {}", r.text)
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
         // The plain-English briefing: start with the deterministic one-liner
         // (instant, keyless-safe), then let the persona-voiced version stream in
         // and replace it. Evidence is the sorted rows' facts.
@@ -4495,6 +4535,13 @@ impl App {
             }),
         );
         let away = crate::briefing::fmt_secs(report.away_secs);
+        // Continuity: what the LAST briefing said, so this one can note progress.
+        let prev = crate::worklog::load_last_briefing(&self.session_label())
+            .map(|p| format!("{}: {}", crate::broker::ago(p.ts), p.facts))
+            .unwrap_or_default();
+        // Captured for the keyless log path (no ShiftDone will fire without a key).
+        let (det_narrative, facts, away_secs) =
+            (report.narrative.clone(), report.facts.clone(), report.away_secs);
         self.shift_report = Some(report);
         // Fire the narrative AFTER the overlay exists, so the prose streams into
         // a screen already on display — the frame is never blocked on the model.
@@ -4504,7 +4551,15 @@ impl App {
             if let Some(rep) = self.shift_report.as_mut() {
                 rep.narrative_streaming = true; // template stays until the first delta
             }
-            agent::shift_brief(cfg, away, mission.unwrap_or_default(), evidence, self.agent_tx.clone());
+            agent::shift_brief(cfg, away, mission.unwrap_or_default(), prev, evidence, self.agent_tx.clone());
+        } else {
+            // Keyless: log the deterministic briefing now, so continuity still
+            // threads across returns even without a model.
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            crate::worklog::log_briefing(&self.session_label(), &det_narrative, &facts, away_secs, ts);
         }
         true
     }

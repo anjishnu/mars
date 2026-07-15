@@ -2382,7 +2382,7 @@ fn selfcheck() -> Result<()> {
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
             ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
             ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
-            ("shift_brief", prompts::SHIFT_BRIEF, vec!["{away}", "{mission}", "{evidence}"]),
+            ("shift_brief", prompts::SHIFT_BRIEF, vec!["{away}", "{mission}", "{prev}", "{evidence}"]),
             ("capture_goals", prompts::CAPTURE_GOALS, vec!["{evidence}"]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
@@ -3196,6 +3196,7 @@ fn selfcheck() -> Result<()> {
         // detached — one fails, one succeeds — a third keeps running.
         let mut app = App::new(None)?;
         app.tuning.mission_briefing = 2;
+        app.tuning.mission_briefing_animate = 0; // instant reveal → deterministic render
         app.tuning.watch_quiet_secs = 1000; // quiet timer out of the picture
         app.handle_key(kc(KeyCode::Char(' ')))?;
         app.handle_key(k(KeyCode::Char('!')))?;
@@ -3245,41 +3246,57 @@ fn selfcheck() -> Result<()> {
         // append; ShiftDone stops the stream; an empty stream keeps a briefing.
         app.shift_report = Some(briefing::ShiftReport {
             away_secs: 1, mission: None,
-            rows: vec![briefing::ReportRow {
-                verdict: Verdict::Failed, tab: "train".into(), text: "failed: OOM".into(),
-                ago_secs: None, dur_secs: None, term_id: None,
-                cwd: None, exit: Some(137), error_excerpt: Some("CUDA out of memory".into()), settling: false,
-            }],
+            rows: vec![
+                briefing::ReportRow {
+                    verdict: Verdict::Failed, tab: "train".into(), text: "failed: OOM".into(),
+                    ago_secs: None, dur_secs: None, term_id: None,
+                    cwd: None, exit: Some(137), error_excerpt: Some("CUDA out of memory".into()), settling: false,
+                },
+                briefing::ReportRow {
+                    verdict: Verdict::Done, tab: "build".into(), text: "training finished".into(),
+                    ago_secs: None, dur_secs: Some(3600), term_id: None, // long success → ★
+                    cwd: None, exit: None, error_excerpt: None, settling: false,
+                },
+            ],
             suggestion: None, narrative: "2 failed.".into(),
-            narrative_streaming: true, narrative_from_model: false,
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
             shown_at: std::time::Instant::now(),
         });
-        // A three-paragraph briefing (greeting / summary / action items),
-        // blank-line separated, streams in and replaces the template.
+        // A four-block briefing (greeting / summary / action items / sign-off),
+        // blank-line separated, streams in and replaces the template. The good-news
+        // ★ and the sign-off (below the manifest) render.
         app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Welcome back, captain.\n\n".into() })?;
         app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "The trainer OOM'd at epoch 3.\n\n".into() })?;
-        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Rerun with a smaller batch.".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Rerun with a smaller batch.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "We'll get it, captain.".into() })?;
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?;
         app.tick();
         let rep = app.shift_report.as_ref().unwrap();
-        assert!(rep.narrative.starts_with("Welcome back, captain.") && rep.narrative.contains("smaller batch"),
-            "deltas did not replace+append the 3-paragraph briefing");
+        assert!(rep.narrative.starts_with("Welcome back, captain.") && rep.narrative.contains("We'll get it"),
+            "deltas did not replace+append the four-block briefing");
         assert!(!rep.narrative_streaming, "ShiftDone did not stop the stream");
-        // All three paragraphs render (centered, gapped), plus the failure "why"
-        // line (exit + excerpt) under the row.
+        // Renders: the prose blocks, the failure "why" line, and the sign-off
+        // below the manifest (after the row glyphs).
         let mut term = Terminal::new(TestBackend::new(100, 30))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
         assert!(t.contains("Welcome back") && t.contains("OOM'd at epoch 3") && t.contains("smaller batch"),
-            "3-paragraph briefing did not fully render");
+            "briefing blocks did not fully render");
         assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
+        assert!(t.contains("We'll get it"), "sign-off did not render");
+        assert!(t.find("We'll get it").unwrap() > t.find("exit 137").unwrap(),
+            "sign-off must render below the manifest");
+        // Systems-board manifest: the severity stripe renders; a long success
+        // gets the good-news ★.
+        assert!(t.contains("▎"), "manifest severity stripe missing");
+        assert!(t.contains("★"), "good-news ★ on the long success missing");
         app.shift_report = None;
         // Fail-hide: the briefing call finishing with NO model output (error /
         // timeout / tunnel down) dismisses the overlay — no bare stub is shown.
         app.shift_report = Some(briefing::ShiftReport {
             away_secs: 60, mission: None, rows: vec![], suggestion: None,
             narrative: "Welcome back — all quiet.".into(),
-            narrative_streaming: true, narrative_from_model: false,
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
             shown_at: std::time::Instant::now(),
         });
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?; // no delta preceded it → failed call
@@ -3289,6 +3306,7 @@ fn selfcheck() -> Result<()> {
         // the overlay is present with zero rows and a "welcome back" line.
         let mut app = App::new(None)?;
         app.tuning.mission_briefing = 2;
+        app.tuning.mission_briefing_animate = 0;
         app.on_detach();
         app.frame_tick += 20;
         app.on_attach(); // nothing happened while away
@@ -3315,7 +3333,30 @@ fn selfcheck() -> Result<()> {
         app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
         app.on_attach();
         assert!(app.shift_report.is_none() && app.notices.is_empty(), "knob=0 must be silent");
-        println!("[selfcheck] shift report (save-state) . PASS");
+        // Continuity: briefings are logged and the last one round-trips for the
+        // next return's "since last time." Session-scoped.
+        let bwl = std::env::temp_dir().join(format!("mars-brief-{}", std::process::id()));
+        std::env::set_var("MARS_WORKLOG", &bwl);
+        worklog::log_briefing("s1", "Welcome back.", "failed: OOM · done: build", 300, 1000);
+        worklog::log_briefing("s1", "Back again.", "done: OOM fixed", 60, 2000);
+        worklog::log_briefing("s2", "Other.", "blocked: deploy", 10, 1500);
+        let last = worklog::load_last_briefing("s1").expect("no briefing logged");
+        assert_eq!(last.facts, "done: OOM fixed", "load_last_briefing returned the wrong/older one");
+        assert_eq!(last.ts, 2000);
+        assert_eq!(worklog::load_last_briefing("s2").map(|p| p.facts).as_deref(), Some("blocked: deploy"),
+            "briefings leaked across sessions");
+        assert!(worklog::load_last_briefing("nope").is_none());
+        std::env::set_var("MARS_WORKLOG", &worklog_default);
+        let _ = std::fs::remove_file(&bwl);
+        let _ = std::fs::remove_file(bwl.with_file_name("briefings.jsonl"));
+        // Pure boot-reveal + clock helpers.
+        assert_eq!(briefing::fmt_clock(4212), "01:10:12");
+        assert_eq!(briefing::fmt_clock(90061), "1:01:01:01");
+        let full = briefing::reveal_at(u128::MAX, 3); // animation off → everything up
+        assert!(full.rows == 3 && full.signoff, "animate-off must reveal all");
+        let start = briefing::reveal_at(0, 3); // t=0 → chrome only, rows not yet
+        assert!(start.rows == 0 && !start.signoff, "at t=0 the manifest has not cascaded in");
+        println!("[selfcheck] mission briefing (save-state) PASS");
     }
 
     // 43b. Goals captured at detach: parse, round-trip, tier route, and feed the

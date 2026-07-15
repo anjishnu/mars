@@ -86,6 +86,9 @@ pub struct ShiftReport {
     pub narrative_streaming: bool,
     /// The first model delta has landed — the templated line has been replaced.
     pub narrative_from_model: bool,
+    /// Compact manifest distillation, logged when the briefing finalizes so the
+    /// next return can report progress against it (continuity).
+    pub facts: String,
     /// Millis timestamp when the overlay first rendered (for instrumentation).
     pub shown_at: std::time::Instant,
 }
@@ -216,6 +219,44 @@ pub fn is_noteworthy(tail: &str, exit: Option<i32>) -> bool {
                 || BLOCKED_MARKS.iter().any(|m| last6.contains(m))
                 || last6.trim_end().ends_with('?')
         }
+    }
+}
+
+/// Total duration of the briefing's boot-up reveal (ms). After this, the page
+/// is fully on screen and the animation clock goes quiet.
+pub const BOOT_TOTAL_MS: u128 = 520;
+/// A row that ran longer than this and succeeded is "good news" worth a ★.
+pub const GOODNEWS_SECS: u64 = 60;
+
+/// Which briefing elements have revealed at `elapsed` ms into the boot, given
+/// `n` manifest rows. Pure, so render and the selfcheck agree. With animation
+/// off, callers pass `u128::MAX` and everything is revealed at once. The
+/// wordmark, caption, and prose are instant (the prose streams on its own); the
+/// boot cascades the *manifest* (failures first) and holds the sign-off for last.
+pub struct Reveal {
+    /// How many manifest rows have cascaded in (failures first).
+    pub rows: usize,
+    /// The sign-off + footer have arrived (end of the boot).
+    pub signoff: bool,
+}
+
+pub fn reveal_at(elapsed_ms: u128, n_rows: usize) -> Reveal {
+    let rows = if elapsed_ms >= 360 {
+        (((elapsed_ms - 360) / 40) as usize + 1).min(n_rows)
+    } else {
+        0
+    };
+    Reveal { rows, signoff: elapsed_ms >= BOOT_TOTAL_MS }
+}
+
+/// Mission-clock format for the caption: HH:MM:SS (or D:HH:MM:SS past a day).
+/// Static — evocative without any idle-redraw cost.
+pub fn fmt_clock(s: u64) -> String {
+    let (d, h, m, sec) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60, s % 60);
+    if d > 0 {
+        format!("{d}:{h:02}:{m:02}:{sec:02}")
+    } else {
+        format!("{h:02}:{m:02}:{sec:02}")
     }
 }
 

@@ -183,3 +183,60 @@ pub fn load_goals(session: &str) -> Vec<String> {
         .map(|a| a.iter().filter_map(|g| g.as_str().map(str::to_string)).collect())
         .unwrap_or_default()
 }
+
+fn briefings_path() -> Option<PathBuf> {
+    worklog_path().map(|p| p.with_file_name("briefings.jsonl"))
+}
+
+/// One prior briefing, distilled for continuity in the next one.
+pub struct PrevBriefing {
+    /// Compact manifest distillation (`"failed: OOM · blocked: deploy y/N"`).
+    pub facts: String,
+    /// When it was shown (unix secs), so the next briefing can say "3h ago".
+    pub ts: u64,
+}
+
+/// Append a finalized briefing to the log — the continuity backbone. Every
+/// return records what it said, so the next one can report progress against it
+/// and (later) a history can be paged back through. Best-effort; bounded.
+pub fn log_briefing(session: &str, narrative: &str, facts: &str, away_secs: u64, ts: u64) {
+    let Some(path) = briefings_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let line = serde_json::json!({
+        "ts": ts, "session": session, "narrative": narrative,
+        "facts": facts, "away_secs": away_secs,
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+    // Bound the file: past 2×500 lines, keep the newest 500 (tmp + rename).
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() > 1000 {
+            let keep = &lines[lines.len() - 500..];
+            let tmp = path.with_extension("jsonl.tmp");
+            if std::fs::write(&tmp, keep.join("\n") + "\n").is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+}
+
+/// The most recent briefing logged for `session`, for the "since last time"
+/// continuity line. None if this is the first return.
+pub fn load_last_briefing(session: &str) -> Option<PrevBriefing> {
+    let path = briefings_path()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    content
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|j| j["session"].as_str() == Some(session))
+        .map(|j| PrevBriefing {
+            facts: j["facts"].as_str().unwrap_or("").to_string(),
+            ts: j["ts"].as_u64().unwrap_or(0),
+        })
+}
