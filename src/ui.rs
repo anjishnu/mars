@@ -671,38 +671,35 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The shift report — the save-state restore. The MARS wordmark up top, then a
-/// plain-English persona-voiced situation briefing (the star — it streams in),
-/// then a compact glyph manifest of the workstreams. Splash pattern: Clear + one
-/// centered Paragraph. Any key resumes.
-/// Brighten data-looking tokens (numbers, metrics, file.ext, exit codes) in a
-/// prose line so the eye snags on what moved; everything else stays `base`.
-fn emphasize_data(line: &str, base: Style, bright: Color) -> Vec<Span<'static>> {
-    let hot = Style::default().fg(bright).add_modifier(Modifier::BOLD);
-    let looks_like_data = |w: &str| {
-        let has_digit = w.chars().any(|c| c.is_ascii_digit());
-        let all_numeric = w.chars().all(|c| c.is_ascii_digit() || "._/:%x+-".contains(c));
-        let file_ext = w
-            .rsplit_once('.')
-            .map(|(_, e)| (1..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphabetic()))
-            .unwrap_or(false)
-            && w.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
-        (has_digit && all_numeric) || file_ext
-    };
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, word) in line.split(' ').enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" ", base));
-        }
-        if word.is_empty() {
-            continue;
-        }
-        let style = if looks_like_data(word) { hot } else { base };
-        spans.push(Span::styled(word.to_string(), style));
+/// Distribute inter-word spaces so `line` fills exactly `width` columns, flush on
+/// both edges (MS-Word "justify"). Extra spaces spread left-to-right. A single
+/// word, or an already-overfull line, is returned as-is (the caller left-aligns
+/// it) — and by convention the caller never justifies a paragraph's last line.
+fn justify(line: &str, width: usize) -> String {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    if words.len() < 2 {
+        return line.to_string();
     }
-    spans
+    let text_len: usize = words.iter().map(|w| w.chars().count()).sum();
+    if text_len >= width {
+        return words.join(" ");
+    }
+    let gaps = words.len() - 1;
+    let (base, extra) = ((width - text_len) / gaps, (width - text_len) % gaps);
+    let mut out = String::new();
+    for (i, word) in words.iter().enumerate() {
+        out.push_str(word);
+        if i < gaps {
+            out.push_str(&" ".repeat(base + usize::from(i < extra)));
+        }
+    }
+    out
 }
 
+/// The shift report — the save-state restore. The MARS wordmark up top (centered),
+/// then a plain-English persona-voiced situation briefing (the star — it streams
+/// in, justified within a centered measure), then a compact glyph manifest of the
+/// workstreams. Splash pattern: Clear + one centered Paragraph. Any key resumes.
 fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let Some(rep) = app.shift_report.as_ref() else { return };
     frame.render_widget(Clear, inner);
@@ -711,8 +708,11 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let teal = rgb(app.tuning.theme_terminal);
     let dim = Style::default().fg(Color::DarkGray);
     let white = Style::default().fg(Color::White);
-    let w = inner.width.saturating_sub(6).min(88) as usize;
     let cw = inner.width as usize;
+    // The reading measure: one centered column the prose and manifest share, so
+    // every element hangs off the same axis down the middle of the screen.
+    let bw = (cw.saturating_sub(8)).clamp(24, 64);
+    let block_pad = " ".repeat(cw.saturating_sub(bw) / 2);
     // Prepend padding to a span list so its visible width centers in the page.
     let centered = |spans: Vec<Span<'static>>, vis_len: usize| -> Line<'static> {
         let pad = " ".repeat(cw.saturating_sub(vis_len) / 2);
@@ -731,11 +731,17 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let rev = crate::briefing::reveal_at(elapsed, rep.rows.len());
 
     let mut lines: Vec<Line> = Vec::new();
-    // The MARS wordmark (instant — the console's always-on identity).
+    // The MARS wordmark (instant — the console's always-on identity), centered as
+    // a block so its internal art stays aligned while the whole mark sits mid-page.
     let logo_rows = &crate::banner::BANNER_LINES[2..=7];
     if inner.height as usize > rep.rows.len() + logo_rows.len() + 14 {
-        for raw in logo_rows {
-            lines.push(ansi_to_line(raw).0);
+        let logo: Vec<(Line, u16)> = logo_rows.iter().map(|r| ansi_to_line(r)).collect();
+        let logo_w = logo.iter().map(|(_, wd)| *wd as usize).max().unwrap_or(0);
+        let logo_pad = " ".repeat(cw.saturating_sub(logo_w) / 2);
+        for (line, _) in logo {
+            let mut spans = vec![Span::raw(logo_pad.clone())];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
     }
@@ -772,8 +778,11 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     lines.push(Line::from(""));
 
     // The briefing prose (instant; streams token-by-token). The model emits four
-    // blocks — greeting, summary, action items, sign-off. The first three center
+    // blocks — greeting, summary, action items, sign-off. The first three sit
     // above the manifest; the sign-off is held for below it (the peak-end beat).
+    // Each block is set as justified text within the shared centered measure: a
+    // one-line block is centered, a wrapped block is flush on both edges with its
+    // final line ragged (standard justification).
     let cursor = if rep.narrative_streaming { "▏" } else { "" };
     let full = format!("{}{cursor}", rep.narrative);
     let paras: Vec<&str> = full.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
@@ -783,19 +792,22 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let signoff = has_signoff.then(|| paras[npar - 1]);
     let above_n = above.len();
     for (pi, para) in above.iter().enumerate() {
-        let (style, is_summary) = if pi == 0 {
-            (Style::default().fg(accent).add_modifier(Modifier::BOLD), false) // greeting
+        let style = if pi == 0 {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD) // greeting
         } else if above_n >= 3 && pi == above_n - 1 {
-            (Style::default().fg(bright).add_modifier(Modifier::BOLD), false) // action items
+            Style::default().fg(bright).add_modifier(Modifier::BOLD) // action items
         } else {
-            (white, true) // the summary — data tokens catch the light
+            white // the summary
         };
-        for l in wrap(para, w) {
-            if is_summary {
-                let vis = l.chars().count();
-                lines.push(centered(emphasize_data(&l, white, bright), vis));
+        let wrapped = wrap(para, bw);
+        let last = wrapped.len().saturating_sub(1);
+        for (i, l) in wrapped.iter().enumerate() {
+            if wrapped.len() == 1 {
+                lines.push(center1(l.clone(), style)); // a short block reads best centered
+            } else if i < last {
+                lines.push(Line::from(Span::styled(format!("{block_pad}{}", justify(l, bw)), style)));
             } else {
-                lines.push(center1(l, style));
+                lines.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
             }
         }
         lines.push(Line::from(""));
@@ -806,22 +818,24 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
         lines.push(Line::from(""));
     }
 
-    // The manifest as a systems board: a left severity stripe, needs-you rows
-    // bright and concluded ones receding. Rows cascade in, failures first.
+    // The manifest as a systems board, hung off the same centered measure: a left
+    // severity stripe, needs-you rows bright and concluded ones receding. Rows
+    // cascade in, failures first. Wins render in teal — never the danger hue.
     if !rep.rows.is_empty() && rev.rows > 0 {
-        lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+        lines.push(Line::from(Span::styled(format!("{block_pad}{}", "─".repeat(bw)), dim)));
     }
     for r in rep.rows.iter().take(rev.rows) {
         let needsyou = matches!(r.verdict, crate::briefing::Verdict::Failed | crate::briefing::Verdict::Blocked);
         let goodnews = r.verdict == crate::briefing::Verdict::Done
             && r.dur_secs.map(|d| d > crate::briefing::GOODNEWS_SECS).unwrap_or(false);
+        // Danger keeps the warm hues; wins (done/running, and the good-news ★) are
+        // always teal — a success never wears the failure colour.
         let hue = match r.verdict {
             crate::briefing::Verdict::Failed => bright,
             crate::briefing::Verdict::Blocked => accent,
             crate::briefing::Verdict::Done | crate::briefing::Verdict::Running => teal,
             _ => Color::DarkGray,
         };
-        let hue = if goodnews { bright } else { hue };
         let body_style = if needsyou || goodnews { white } else { dim };
         let glyph = if goodnews { "★" } else { r.verdict.glyph() };
         let tab = if r.tab.is_empty() { String::new() } else { format!("[{}] ", r.tab) };
@@ -833,9 +847,10 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             meta.push(format!("{} ago", crate::briefing::fmt_secs(a)));
         }
         let meta = if meta.is_empty() { String::new() } else { format!("  ({})", meta.join(", ")) };
-        let body: String = format!("{tab}{}{meta}", r.text).chars().take(w).collect();
+        let body: String = format!("{tab}{}{meta}", r.text).chars().take(bw).collect();
         lines.push(Line::from(vec![
-            Span::styled("  ▎ ".to_string(), Style::default().fg(hue)),
+            Span::raw(block_pad.clone()),
+            Span::styled("▎ ".to_string(), Style::default().fg(hue)),
             Span::styled(format!("{glyph} "), Style::default().fg(hue).add_modifier(Modifier::BOLD)),
             Span::styled(body, body_style),
         ]));
@@ -850,7 +865,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
                 }
             }
             if !detail.is_empty() {
-                let d: String = format!("      {}", detail.join(" · ")).chars().take(w + 2).collect();
+                let d: String = format!("{block_pad}   {}", detail.join(" · ")).chars().take(cw).collect();
                 lines.push(Line::from(Span::styled(d, dim)));
             }
         }
@@ -860,11 +875,11 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     if rev.signoff {
         if !rep.rows.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(format!("  {}", "─".repeat(w)), dim)));
+            lines.push(Line::from(Span::styled(format!("{block_pad}{}", "─".repeat(bw)), dim)));
         }
         if let Some(s) = signoff {
             let so = Style::default().fg(accent).add_modifier(Modifier::ITALIC);
-            for l in wrap(s, w) {
+            for l in wrap(s, bw) {
                 lines.push(center1(l, so));
             }
             lines.push(Line::from(""));
