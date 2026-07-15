@@ -4150,12 +4150,16 @@ impl App {
                     }
                 }
                 AgentEvent::ShiftDone => {
-                    if let Some(rep) = self.shift_report.as_mut() {
-                        rep.narrative_streaming = false;
-                        // A model that returned nothing keeps the deterministic
-                        // line (never a blank briefing).
-                        if rep.narrative.trim().is_empty() {
-                            rep.narrative = rep.deterministic_narrative();
+                    // The briefing call finished. If the model produced nothing —
+                    // it errored, timed out, or the tunnel was down — dismiss the
+                    // overlay entirely rather than show a bare deterministic stub.
+                    // (Keyless sessions never fire the call, so ShiftDone never
+                    // arrives for them and their deterministic briefing stands.)
+                    if let Some(rep) = self.shift_report.as_ref() {
+                        if !rep.narrative_from_model {
+                            self.shift_report = None;
+                        } else if let Some(rep) = self.shift_report.as_mut() {
+                            rep.narrative_streaming = false;
                         }
                     }
                 }
@@ -4556,7 +4560,7 @@ impl App {
         }
         // The save-state restore: full overlay (2, default), classic notice (1),
         // or nothing (0). The overlay path owns dedupe/digest bookkeeping.
-        match self.tuning.shift_report {
+        match self.tuning.mission_briefing {
             2 => {
                 // Window from when the keyboard last went silent for work, not the
                 // formal detach — so a job that ran while you sat idle is covered.

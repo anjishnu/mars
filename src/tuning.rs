@@ -54,7 +54,7 @@ pub struct Tuning {
     pub memory_recency_halflife_days: f64,
     pub mission_refresh_secs: u64,
     pub worklog_max_lines: u64,
-    pub shift_report: u64,
+    pub mission_briefing: u64,
     pub auto_watch: u64,
     pub watch_min_active_secs: u64,
     pub goal_tracking: u64,
@@ -105,7 +105,7 @@ impl Default for Tuning {
             memory_recency_halflife_days: 14.0,
             mission_refresh_secs: 600,
             worklog_max_lines: 4000,
-            shift_report: 2,
+            mission_briefing: 2,
             auto_watch: 1,
             watch_min_active_secs: 10,
             goal_tracking: 1,
@@ -253,10 +253,10 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("worklog_max_lines", knob(json!(d.worklog_max_lines),
             "Work-journal size bound (~/.mars/worklog.jsonl): past twice this many \
              lines it is compacted to the newest this-many at startup. 0 = never.")),
-        ("shift_report", knob(json!(d.shift_report),
-            "What reattach shows when things happened while you were away: \
-             2 = full-screen shift report (any key resumes), 1 = one-line notice, \
-             0 = nothing.")),
+        ("mission_briefing", knob(json!(d.mission_briefing),
+            "What reattach shows: 2 = the full-screen Mission Briefing (a centered, \
+             plain-English summary of what happened while you were away — any key \
+             resumes), 1 = a one-line notice, 0 = nothing.")),
         ("auto_watch", knob(json!(d.auto_watch),
             "1 = panes that stay busy past watch_min_active_secs are watched \
              automatically (verdicts without arming a watch); 0 = only C-x w \
@@ -379,7 +379,9 @@ pub fn load() -> Tuning {
             get_f64(&map, "memory_recency_halflife_days", t.memory_recency_halflife_days);
         t.mission_refresh_secs = get_u64(&map, "mission_refresh_secs", t.mission_refresh_secs);
         t.worklog_max_lines = get_u64(&map, "worklog_max_lines", t.worklog_max_lines);
-        t.shift_report = get_u64(&map, "shift_report", t.shift_report);
+        // Renamed from `shift_report`; honor the old key if a config predates it.
+        t.mission_briefing =
+            get_u64(&map, "mission_briefing", get_u64(&map, "shift_report", t.mission_briefing));
         t.auto_watch = get_u64(&map, "auto_watch", t.auto_watch);
         t.watch_min_active_secs = get_u64(&map, "watch_min_active_secs", t.watch_min_active_secs);
         t.goal_tracking = get_u64(&map, "goal_tracking", t.goal_tracking);

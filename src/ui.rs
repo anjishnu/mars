@@ -711,7 +711,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     // the mission, and the briefing prose all read as a centered dispatch.
     let cw = inner.width as usize;
     let center = |len: usize| " ".repeat(cw.saturating_sub(len) / 2);
-    let title = "SHIFT REPORT";
+    let title = "MISSION BRIEFING";
     let caption = format!("  T+{} away{workstreams}", crate::briefing::fmt_secs(rep.away_secs));
     lines.push(Line::from(vec![
         Span::styled(

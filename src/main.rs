@@ -1769,7 +1769,7 @@ fn selfcheck() -> Result<()> {
     //      deterministic, no API key (broker-ready: only verdict TEXT is LLM-made).
     {
         let mut app = App::new(None)?;
-        app.tuning.shift_report = 1; // this block pins the CLASSIC notice mode
+        app.tuning.mission_briefing = 1; // this block pins the CLASSIC notice mode
         app.on_detach();
         app.on_attach();
         assert!(app.notices.is_empty(), "briefing appeared when nothing changed");
@@ -3195,7 +3195,7 @@ fn selfcheck() -> Result<()> {
         // End-to-end, keyless and hermetic: two watched panes conclude while
         // detached — one fails, one succeeds — a third keeps running.
         let mut app = App::new(None)?;
-        app.tuning.shift_report = 2;
+        app.tuning.mission_briefing = 2;
         app.tuning.watch_quiet_secs = 1000; // quiet timer out of the picture
         app.handle_key(kc(KeyCode::Char(' ')))?;
         app.handle_key(k(KeyCode::Char('!')))?;
@@ -3235,7 +3235,7 @@ fn selfcheck() -> Result<()> {
         let mut term = Terminal::new(TestBackend::new(100, 30))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("SHIFT REPORT"), "overlay title missing");
+        assert!(t.contains("MISSION BRIEFING"), "overlay title missing");
         assert!(t.contains("✗"), "failure glyph missing from overlay");
         assert!(t.to_lowercase().contains("welcome back"), "plain-English briefing missing from overlay");
         // Any key resumes: swallowed, report gone, workspace intact.
@@ -3274,10 +3274,21 @@ fn selfcheck() -> Result<()> {
             "3-paragraph briefing did not fully render");
         assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
         app.shift_report = None;
+        // Fail-hide: the briefing call finishing with NO model output (error /
+        // timeout / tunnel down) dismisses the overlay — no bare stub is shown.
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 60, mission: None, rows: vec![], suggestion: None,
+            narrative: "Welcome back — all quiet.".into(),
+            narrative_streaming: true, narrative_from_model: false,
+            shown_at: std::time::Instant::now(),
+        });
+        app.agent_tx.send(agent::AgentEvent::ShiftDone)?; // no delta preceded it → failed call
+        app.tick();
+        assert!(app.shift_report.is_none(), "a failed briefing call must dismiss the overlay");
         // Iteration mode: knob=2 greets on EVERY return, even a quiet one —
         // the overlay is present with zero rows and a "welcome back" line.
         let mut app = App::new(None)?;
-        app.tuning.shift_report = 2;
+        app.tuning.mission_briefing = 2;
         app.on_detach();
         app.frame_tick += 20;
         app.on_attach(); // nothing happened while away
@@ -3290,7 +3301,7 @@ fn selfcheck() -> Result<()> {
         app.shift_report = None;
         // Knob 1 = classic notice; knob 0 = nothing (digest still scoped).
         let mut app = App::new(None)?;
-        app.tuning.shift_report = 1;
+        app.tuning.mission_briefing = 1;
         app.on_detach();
         app.frame_tick += 10;
         app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
@@ -3298,7 +3309,7 @@ fn selfcheck() -> Result<()> {
         assert!(app.shift_report.is_none(), "knob=1 must not build the overlay");
         assert!(app.notices.iter().any(|n| n.text.contains("while away")), "knob=1 lost the notice");
         let mut app = App::new(None)?;
-        app.tuning.shift_report = 0;
+        app.tuning.mission_briefing = 0;
         app.on_detach();
         app.frame_tick += 10;
         app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
