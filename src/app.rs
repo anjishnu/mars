@@ -4282,7 +4282,12 @@ impl App {
         // Capture what the user was working toward, so the reattach briefing can
         // report progress against it. One low-tier call over the live panes +
         // recent journal; best-effort (a remote detach may find the tunnel gone).
-        if self.tuning.goal_tracking == 1 && !self.bg_busy {
+        // Fire even if another background call is in flight — detach is the
+        // one-shot moment we most need to capture, and a concurrent watch summary
+        // must never cancel it. The daemon keeps ticking headless after the client
+        // leaves (session.rs), so the call completes and its Goals event is
+        // processed; the deterministic summary floor covers us if it still fails.
+        if self.tuning.goal_tracking == 1 {
             let cfg = agent::AgentConfig::from_env();
             if cfg.is_configured() {
                 let evidence = self.goal_evidence();
@@ -4401,19 +4406,28 @@ impl App {
             let running = !exited;
             let exit = self.terms.get_mut(&id).and_then(|t| t.exited.then(|| t.exit_code()).flatten());
             let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
-            // An auto-watched pane that's just an idle shell (or a clean quit)
-            // isn't a workstream — keep it off the report entirely.
-            let auto = self.watches.get(&id).map(|w| w.auto).unwrap_or(false);
-            if auto && !briefing::is_noteworthy(&tail, exit) {
-                continue;
-            }
             let tri = briefing::triage(&tail, exit, running);
-            let tab = self.tab_label_of_term(id).trim_start_matches(" · ").trim().to_string();
             let (started, last_out) = self
                 .watches
                 .get(&id)
                 .map(|w| (w.run_started_tick, w.last_output_tick))
                 .unwrap_or((0, 0));
+            let dur_secs = (started > 0).then(|| t2s(last_out.saturating_sub(started)));
+            // An auto-watched pane that's just an idle shell (or a clean quit) isn't
+            // a workstream — keep it off the report. BUT a genuine WIN earns its
+            // place: a pane that ran real work past the good-news duration and
+            // concluded without failing gets its teal row even though it exited
+            // clean. This is the only way an auto-watched success reaches the board
+            // (is_noteworthy passes only failures/blocks); the short-run threshold
+            // keeps a bare `exit` from an idle shell out.
+            let auto = self.watches.get(&id).map(|w| w.auto).unwrap_or(false);
+            let notable_win = !running
+                && tri.verdict == Verdict::Done
+                && dur_secs.map(|d| d >= briefing::GOODNEWS_SECS).unwrap_or(false);
+            if auto && !briefing::is_noteworthy(&tail, exit) && !notable_win {
+                continue;
+            }
+            let tab = self.tab_label_of_term(id).trim_start_matches(" · ").trim().to_string();
             let cwd = self
                 .terms
                 .get(&id)
@@ -4439,7 +4453,7 @@ impl App {
                 tab: tab.clone(),
                 text: tri.text.clone(),
                 ago_secs: (!running).then(|| t2s(now.saturating_sub(last_out))),
-                dur_secs: (started > 0).then(|| t2s(last_out.saturating_sub(started))),
+                dur_secs,
                 term_id: Some(id),
                 cwd: cwd.clone(),
                 exit,

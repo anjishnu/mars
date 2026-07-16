@@ -2542,7 +2542,8 @@ fn selfcheck() -> Result<()> {
         assert_eq!(worklog::load_mission("other"), None, "mission leaked across sessions");
         // The ls SUMMARY column, priority tested with now-relative data (the
         // seeded 1970-epoch lines age out of every recency gate, as they should).
-        assert_eq!(session::session_summary("nowhere"), "", "no journal → empty summary");
+        assert_eq!(session::session_summary("nowhere"), "active — nothing logged yet",
+            "a live session must never render a blank summary — the floor stands in");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let mk = |sess: &str, verdict: &str, failed: bool, ts: u64| worklog::WorkEntry {
@@ -2565,10 +2566,24 @@ fn selfcheck() -> Result<()> {
         worklog::record(&mk("s_done", "done: cargo build green", false, now - 90));
         assert!(session::session_summary("s_done").starts_with("done: cargo build green · "),
             "noise must be skipped for the real verdict: {}", session::session_summary("s_done"));
-        // (4) A stale mission is dropped, not shown as if current.
+        // (4) A stale mission is dropped, not shown as if current — but the floor
+        //     still stands in, so the column is never blank for a live session.
         worklog::save_mission("s_stale", "vague old mission", now - 5 * 86_400);
         worklog::record(&mk("s_stale", "done: user exited terminal", false, now - 10));
-        assert_eq!(session::session_summary("s_stale"), "", "a days-old mission must not linger");
+        let stale = session::session_summary("s_stale");
+        assert!(!stale.contains("vague old mission"), "a days-old mission must not linger: {stale}");
+        assert!(!stale.is_empty(), "the deterministic floor must fill the column: {stale}");
+        // (5) Floor detail: with only lifecycle noise but a real cwd/command, the
+        //     column shows WHERE and WHEN — dir · command · ago — with no LLM call.
+        worklog::record(&worklog::WorkEntry {
+            ts: now - 20, session: "s_floor".into(), tab: "t".into(),
+            verdict: "user exited terminal".into(), failed: false, dur_secs: None,
+            cwd: "/home/me/rerank".into(), command: Some("vim train.py".into()),
+            exit: None, error_excerpt: None,
+        });
+        let floor = session::session_summary("s_floor");
+        assert!(floor.starts_with("rerank · vim train.py · "),
+            "floor should show dir · command · ago: {floor}");
         // Overflowing summaries wrap into a block under the column: greedy
         // word-wrap, overlong words hard-split, empty input → no lines.
         assert_eq!(

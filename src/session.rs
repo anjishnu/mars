@@ -799,7 +799,16 @@ pub fn session_summary(name: &str) -> String {
     if let Some(e) = meaningful {
         return format!("{} · {}", clip(&e.verdict, 88), crate::broker::ago(e.ts));
     }
-    String::new()
+    // 5. Floor — a live session is NEVER blank, even with no model summary and
+    //    only lifecycle noise in the journal. The freshest line of any kind still
+    //    says where and when: the working directory and how long ago. This is the
+    //    deterministic guarantee — it does not depend on any LLM call landing.
+    if let Some(e) = recent.last() {
+        let dir = e.cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("session");
+        let what = e.command.as_deref().map(|c| clip(c, 48)).unwrap_or_else(|| "active".into());
+        return format!("{dir} · {what} · {}", crate::broker::ago(e.ts));
+    }
+    "active — nothing logged yet".to_string()
 }
 
 /// Greedy word-wrap to `width` columns; words longer than a line are
