@@ -671,11 +671,6 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The faint rail drawn at the briefing's right margin on every full prose line.
-/// It suggests a justified block without justifying the text — the words stay
-/// ragged and unmoved, so nothing shifts as the prose types in.
-const RAIL: &str = "┊";
-
 /// The shift report — the save-state restore. The MARS wordmark up top (centered),
 /// then a plain-English persona-voiced situation briefing (the star — it streams
 /// in, justified within a centered measure), then a compact glyph manifest of the
@@ -816,21 +811,9 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             };
             // Every prose line is anchored at the block's left edge and left ragged
             // — no word is ever moved to justify it, so nothing shifts as the
-            // typewriter advances. A faint rail at the fixed right margin gives the
-            // sense of a justified block without touching the text. The last (short)
-            // line of a paragraph gets no rail, as in a real justified paragraph.
-            let wrapped = wrap(para, bw);
-            let last = wrapped.len().saturating_sub(1);
-            for (i, l) in wrapped.iter().enumerate() {
-                if i < last {
-                    let gap = " ".repeat(bw.saturating_sub(l.chars().count()));
-                    prose.push(Line::from(vec![
-                        Span::styled(format!("{block_pad}{l}"), style),
-                        Span::styled(format!("{gap}{RAIL}"), dim),
-                    ]));
-                } else {
-                    prose.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
-                }
+            // typewriter advances.
+            for l in wrap(para, bw) {
+                prose.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
             }
             prose.push(Line::from(""));
         }
