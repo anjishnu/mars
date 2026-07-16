@@ -8,7 +8,6 @@
 /// session (buffers, panes, shells, agent threads) running.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -68,7 +67,7 @@ pub fn write_frame<T: Serialize>(w: &mut impl Write, frame: &T) -> io::Result<()
     w.flush()
 }
 
-fn send_exit(stream: &UnixStream, message: &str) -> io::Result<()> {
+fn send_exit(stream: &crate::sys::control::Stream, message: &str) -> io::Result<()> {
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ServerFrame::Exit { message: message.to_string() })
 }
@@ -81,18 +80,7 @@ fn send_exit(stream: &UnixStream, message: &str) -> io::Result<()> {
 /// Also run before entering the TUI, so crossterm saves a *sane* state to
 /// restore on exit instead of faithfully re-breaking the terminal.
 pub fn sanitize_tty() {
-    unsafe {
-        if libc::isatty(libc::STDOUT_FILENO) != 1 {
-            return;
-        }
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(libc::STDOUT_FILENO, &mut t) == 0 {
-            t.c_oflag |= libc::OPOST | libc::ONLCR;
-            t.c_lflag |= libc::ICANON | libc::ECHO | libc::ECHOE | libc::ISIG;
-            t.c_iflag |= libc::ICRNL;
-            let _ = libc::tcsetattr(libc::STDOUT_FILENO, libc::TCSANOW, &t);
-        }
-    }
+    crate::sys::tty::sanitize();
 }
 
 /// On panic, put the terminal back together before the message prints —
@@ -117,11 +105,9 @@ pub fn install_panic_restore() {
 // ── Socket paths ─────────────────────────────────────────────────────────────
 
 fn socket_dir() -> Result<PathBuf> {
-    let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!("mars-{}", uid));
+    let dir = std::env::temp_dir().join(format!("mars-{}", crate::sys::proc::uid_tag()));
     std::fs::create_dir_all(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::sys::fsperm::restrict_dir(&dir)?;
     Ok(dir)
 }
 
@@ -134,7 +120,7 @@ pub fn socket_path(name: &str) -> Result<PathBuf> {
 
 /// Ask a live session whether a client is currently attached.
 fn query_attached(path: &std::path::Path) -> Option<bool> {
-    let stream = UnixStream::connect(path).ok()?;
+    let stream = crate::sys::control::connect(path).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     let mut w = stream.try_clone().ok()?;
     write_frame(&mut w, &ClientFrame::Status).ok()?;
@@ -184,13 +170,13 @@ pub fn list_sessions() -> Result<Vec<(String, bool, bool)>> {
 /// flush (i.e. per drawn frame). IO errors mark the client dead instead of
 /// erroring the draw — the reader thread reports the disconnect.
 struct FrameWriter {
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     buf: Vec<u8>,
     dead: bool,
 }
 
 impl FrameWriter {
-    fn new(stream: UnixStream) -> Self {
+    fn new(stream: crate::sys::control::Stream) -> Self {
         // Don't let one wedged client stall the whole session forever.
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
         FrameWriter { stream, buf: Vec::new(), dead: false }
@@ -217,7 +203,7 @@ impl Write for FrameWriter {
 }
 
 enum SrvEvent {
-    Attach { stream: UnixStream, cols: u16, rows: u16, gen: u64 },
+    Attach { stream: crate::sys::control::Stream, cols: u16, rows: u16, gen: u64 },
     Input(InputEvent),
     ClientGone(u64),
     /// `mars kill <name>` — force-quit (autosaves first, skips the dirty guard).
@@ -229,7 +215,7 @@ enum SrvEvent {
 }
 
 fn make_terminal(
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     cols: u16,
     rows: u16,
 ) -> Result<Terminal<CrosstermBackend<FrameWriter>>> {
@@ -249,10 +235,10 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
     let mut name = name.to_string();
     let mut path = socket_path(&name)?;
     // Clean a stale socket (previous daemon died without unlinking).
-    if path.exists() && UnixStream::connect(&path).is_err() {
+    if path.exists() && crate::sys::control::connect(&path).is_err() {
         let _ = std::fs::remove_file(&path);
     }
-    let listener = UnixListener::bind(&path)
+    let listener = crate::sys::control::bind(&path)
         .map_err(|e| anyhow!("cannot create session '{name}': {e} (already running?)"))?;
 
     let (tx, rx) = mpsc::channel::<SrvEvent>();
@@ -282,7 +268,7 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
         app.open_terminal();
     }
 
-    let mut client: Option<(UnixStream, u64)> = None;
+    let mut client: Option<(crate::sys::control::Stream, u64)> = None;
     let mut term: Option<Terminal<CrosstermBackend<FrameWriter>>> = None;
 
     loop {
@@ -419,7 +405,7 @@ pub fn debug_log(msg: &str) {
 
 /// Per-connection thread: handshake, then pump client frames into the server.
 fn client_connection(
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     tx: mpsc::Sender<SrvEvent>,
     gc: Arc<AtomicU64>,
     attached: Arc<std::sync::atomic::AtomicBool>,
@@ -524,7 +510,7 @@ pub fn client_main(name: &str) -> Result<()> {
     };
 
     let path = socket_path(name)?;
-    let stream = UnixStream::connect(&path)
+    let stream = crate::sys::control::connect(&path)
         .map_err(|_| anyhow!("no live session '{name}' — see: mars ls"))?;
     let mut writer = stream.try_clone()?;
     let (cols, rows) = crossterm::terminal::size()?;
@@ -622,7 +608,7 @@ pub fn client_main(name: &str) -> Result<()> {
 /// `~/.local/state/mars` (or $XDG_STATE_HOME/mars) — daemon logs live here.
 fn state_dir() -> Option<PathBuf> {
     let base = std::env::var("XDG_STATE_HOME").map(PathBuf::from).ok().or_else(|| {
-        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local").join("state"))
+        crate::sys::paths::home_dir().map(|h| h.join(".local").join("state"))
     })?;
     let dir = base.join("mars");
     std::fs::create_dir_all(&dir).ok()?;
@@ -632,7 +618,7 @@ fn state_dir() -> Option<PathBuf> {
 /// `mars --session <name>`: attach if alive, else spawn the daemon and attach.
 pub fn session_main(name: &str, file: Option<String>) -> Result<()> {
     let path = socket_path(name)?;
-    if UnixStream::connect(&path).is_err() {
+    if crate::sys::control::connect(&path).is_err() {
         let _ = std::fs::remove_file(&path); // stale
         let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(exe);
@@ -668,19 +654,13 @@ pub fn session_main(name: &str, file: Option<String>) -> Result<()> {
             }
         }
         // Fully detach from this TTY so the daemon survives the window.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+        crate::sys::daemon::detach(&mut cmd);
         cmd.spawn()?;
         // Wait for the daemon's socket to come up.
         let mut ok = false;
         for _ in 0..60 {
             std::thread::sleep(Duration::from_millis(50));
-            if UnixStream::connect(&path).is_ok() {
+            if crate::sys::control::connect(&path).is_ok() {
                 ok = true;
                 break;
             }
@@ -956,7 +936,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
     // Interactive follow-up: an ordinal or (prefix of a) name attaches a local
     // session or sshes to a remote host — same resolver over the same list.
     // Skipped by --no-prompt or when stdin isn't a TTY (scripts).
-    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    let is_tty = crate::sys::tty::is_stdin_tty();
     if prompt && is_tty {
         use std::io::Write;
         print!("\n→ open (number/name, Enter to skip): ");
@@ -982,7 +962,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
 /// opens correctly even though the daemon has a different working directory.
 pub fn open_in_session(name: &str, path: &str) -> Result<()> {
     let sock = socket_path(name)?;
-    let stream = UnixStream::connect(&sock)
+    let stream = crate::sys::control::connect(&sock)
         .map_err(|_| anyhow!("session '{name}' is not running"))?;
     let p = std::path::Path::new(path);
     let abs = if p.is_absolute() {
@@ -1002,7 +982,7 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
         return Err(anyhow!("session '{new}' already exists"));
     }
     let old_path = socket_path(old)?;
-    let stream = UnixStream::connect(&old_path)
+    let stream = crate::sys::control::connect(&old_path)
         .map_err(|_| anyhow!("no live session '{old}' — see: mars ls"))?;
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ClientFrame::Rename { to: new.to_string() })?;
@@ -1039,9 +1019,7 @@ pub fn killall_main(force: bool) -> Result<()> {
     }
     // Anything still standing didn't answer its socket — put it down hard.
     for pat in ["mars --server", "mars keyd"] {
-        let _ = std::process::Command::new("pkill")
-            .arg("-f").arg(pat)
-            .status();
+        crate::sys::proc::kill_matching(pat);
     }
     // Shut down ssh ControlMasters cleanly, then sweep their socket files —
     // a leftover master ambushes the next `mars ssh` with a broken pipe.
@@ -1083,7 +1061,7 @@ pub fn killall_main(force: bool) -> Result<()> {
 /// `mars kill <name>`: terminate a session daemon (autosaves, then exits).
 pub fn kill_main(name: &str) -> Result<()> {
     let path = socket_path(name)?;
-    let stream = UnixStream::connect(&path)
+    let stream = crate::sys::control::connect(&path)
         .map_err(|_| anyhow!("no live session '{name}' — see: mars ls"))?;
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ClientFrame::Kill)?;

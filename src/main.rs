@@ -19,6 +19,7 @@ mod retrieval;
 mod retrieval;
 mod project;
 mod session;
+mod sys;
 mod tab;
 mod terminal;
 mod persona;
@@ -1826,7 +1827,7 @@ fn selfcheck() -> Result<()> {
     //     version handshake; quit removes the socket. Fully headless.
     {
         use std::io::{BufRead, BufReader};
-        use std::os::unix::net::UnixStream;
+        use crate::sys::control::Stream as UnixStream;
 
         let sname = format!("selfcheck-{}", std::process::id());
         let spath = session::socket_path(&sname)?;
@@ -1837,7 +1838,7 @@ fn selfcheck() -> Result<()> {
         let mut up = false;
         for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(30));
-            if UnixStream::connect(&spath).is_ok() { up = true; break; }
+            if crate::sys::control::connect(&spath).is_ok() { up = true; break; }
         }
         assert!(up, "session server did not come up");
 
@@ -1855,7 +1856,7 @@ fn selfcheck() -> Result<()> {
         impl TestClient {
             fn connect(path: &std::path::Path, version: &str) -> Result<Self> {
                 use anyhow::Context as _;
-                let stream = UnixStream::connect(path).context("testclient: connect")?;
+                let stream = crate::sys::control::connect(path).context("testclient: connect")?;
                 let reader = BufReader::new(stream.try_clone().context("testclient: clone")?);
                 let mut me = TestClient { writer: stream, reader, screen: vt100::Parser::new(30, 100, 0) };
                 session::write_frame(&mut me.writer, &session::ClientFrame::Hello {
@@ -1961,7 +1962,7 @@ fn selfcheck() -> Result<()> {
         let renamed = format!("{sname}-renamed");
         let rpath = session::socket_path(&renamed)?;
         {
-            let ctl = UnixStream::connect(&spath)?;
+            let ctl = crate::sys::control::connect(&spath)?;
             let mut w = ctl.try_clone()?;
             session::write_frame(&mut w, &session::ClientFrame::Rename { to: renamed.clone() })?;
         }
@@ -2005,7 +2006,7 @@ fn selfcheck() -> Result<()> {
         let mut up = false;
         for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(30));
-            if UnixStream::connect(&kpath).is_ok() { up = true; break; }
+            if crate::sys::control::connect(&kpath).is_ok() { up = true; break; }
         }
         assert!(up, "kill-test server did not come up");
         assert!(
@@ -2053,7 +2054,7 @@ fn selfcheck() -> Result<()> {
                 let mut up = false;
                 for _ in 0..100 {
                     std::thread::sleep(std::time::Duration::from_millis(30));
-                    if UnixStream::connect(&p).is_ok() { up = true; break; }
+                    if crate::sys::control::connect(&p).is_ok() { up = true; break; }
                 }
                 assert!(up, "killall-test server '{n}' did not come up");
             }
@@ -2724,7 +2725,7 @@ fn selfcheck() -> Result<()> {
         let sock = dir.join("auth.sock");
         let sock_s = sock.to_string_lossy().to_string();
         let _ = std::fs::remove_file(&sock);
-        let listener = std::os::unix::net::UnixListener::bind(&sock)?;
+        let listener = crate::sys::control::bind(&sock)?;
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { break };
@@ -2879,7 +2880,7 @@ fn selfcheck() -> Result<()> {
     assert!(!broker::probe_and_sweep(&dead), "dead socket file read as live");
     assert!(!dead.exists(), "dead socket was not swept");
     let live = tmp.join("live.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&live)?;
+    let _listener = crate::sys::control::bind(&live)?;
     assert!(broker::probe_and_sweep(&live), "bound socket read as dead");
     assert!(live.exists(), "live socket must not be swept");
     // The glob fallback: the socket name carries the HOME uid, so the remote
@@ -2887,15 +2888,15 @@ fn selfcheck() -> Result<()> {
     // still preferring an own-uid socket when one is live.
     assert!(broker::find_live_auth_sock(&tmp).is_none(), "no candidates but one found");
     std::fs::write(tmp.join("mars-auth-777.sock"), b"")?; // dead stand-in
-    let _other = std::os::unix::net::UnixListener::bind(tmp.join("mars-auth-888.sock"))?;
+    let _other = crate::sys::control::bind(tmp.join("mars-auth-888.sock"))?;
     assert_eq!(
         broker::find_live_auth_sock(&tmp).as_deref(),
         Some(tmp.join("mars-auth-888.sock").to_str().unwrap()),
         "glob fallback did not find the live foreign-uid socket"
     );
     assert!(!tmp.join("mars-auth-777.sock").exists(), "dead candidate not swept by scan");
-    let own = tmp.join(format!("mars-auth-{}.sock", unsafe { libc::getuid() }));
-    let _own = std::os::unix::net::UnixListener::bind(&own)?;
+    let own = tmp.join(format!("mars-auth-{}.sock", crate::sys::proc::uid_tag()));
+    let _own = crate::sys::control::bind(&own)?;
     assert_eq!(broker::find_live_auth_sock(&tmp).as_deref(), own.to_str(),
         "own-uid socket must win over a foreign live one");
     let _ = std::fs::remove_dir_all(&tmp);

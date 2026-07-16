@@ -20,7 +20,7 @@ pub fn persona_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARS_PERSONA") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("persona.md"))
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("persona.md"))
 }
 
 /// The active persona text: `None` means persona is off (user emptied the

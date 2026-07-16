@@ -372,7 +372,7 @@ fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return Some(std::path::PathBuf::from(xdg));
     }
-    std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config"))
+    crate::sys::paths::home_dir().map(|h| h.join(".config"))
 }
 
 fn try_read(path: &std::path::Path) -> Option<RawBindings> {

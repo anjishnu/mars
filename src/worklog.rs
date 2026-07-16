@@ -33,7 +33,7 @@ pub fn worklog_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARS_WORKLOG") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("worklog.jsonl"))
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("worklog.jsonl"))
 }
 
 fn mission_path() -> Option<PathBuf> {

@@ -44,8 +44,16 @@ ureq = { version = "2", features = ["json"] }
 portable-pty = "0.8"
 vt100 = "0.15"
 arboard = "3"
-libc = "0.2"
 base64 = "0.22"
+
+# Platform-specific: reached ONLY through `src/sys/` (the platform abstraction
+# layer). `libc` backs the Unix adapter; `interprocess` backs the Windows named-
+# pipe control channel. See WINDOWS_PORT.md.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+interprocess = "2"
 
 # vt100 0.15 has a debug-only integer underflow when the scrollback view is
 # deeper than one screen (grid.rs visible_rows: `rows_len - scrollback_offset`).

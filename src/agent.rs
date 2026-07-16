@@ -324,7 +324,7 @@ impl AgentConfig {
             return self
                 .broker_sock
                 .as_deref()
-                .map(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+                .map(|s| crate::sys::control::probe(std::path::Path::new(s)))
                 .unwrap_or(false);
         }
         !self.key.is_empty()

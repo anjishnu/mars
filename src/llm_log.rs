@@ -30,8 +30,8 @@ pub fn log_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("MARS_LLM_LOG_DIR") {
         return PathBuf::from(d);
     }
-    match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h).join(".mars").join("logs"),
+    match crate::sys::paths::home_dir() {
+        Some(h) => h.join(".mars").join("logs"),
         None => std::env::temp_dir().join("mars-llm"),
     }
 }
