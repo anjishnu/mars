@@ -2,7 +2,7 @@
 # `mars` is taken on crates.io, so the package/crate name is `mars-terminal`.
 # The installed binary stays `mars` regardless (see [[bin]] below).
 name = "mars-terminal"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 # The dependency tree pulls edition2024 crates → a modern toolchain is required.
 # Declaring it makes cargo say "requires rustc 1.85" instead of a cryptic dep error.
@@ -13,7 +13,7 @@ readme = "README.md"
 repository = "https://github.com/anjishnu/mars"
 homepage = "https://github.com/anjishnu/mars"
 authors = ["Anjishnu Kumar <anjishnu.kr@gmail.com>"]
-keywords = ["terminal", "editor", "tui", "multiplexer", "agent"]
+keywords = ["cli", "ai", "llm", "terminal", "tui"]
 categories = ["command-line-utilities", "text-editors"]
 # Keep the published package lean: ship only source + README + LICENSE, not the
 # design docs, .claude/, or scratch. (target/ and .git are auto-excluded.)

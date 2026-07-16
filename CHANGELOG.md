@@ -1,21 +1,30 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0
 
-The mission-aware release: reattaching becomes a save-state restore, the
-assistant gains a configurable voice, and the work journal starts carrying
-outcomes, not just verdicts.
+The mission-aware release: reattaching becomes a save-state restore narrated by
+mission control, the assistant gains a configurable voice, and the work journal
+starts carrying outcomes, not just verdicts.
 
 ### Added
-- **The shift report**: reattach to a session where things happened and get a
-  full-screen briefing — the MARS wordmark, a plain-English situation report in
-  the mission-control voice ("Trainer went down at epoch 3, CUDA OOM — needs a
-  smaller batch before relaunch. Build's green. Quiet otherwise, captain."),
-  then a terse per-workstream manifest (failures first, then blocked ⏸, done,
-  running) with a "why" line (cwd · exit · error) under anything that failed.
-  The prose streams in; any key resumes exactly where you left off. Shows only
-  when something actually happened. Knob `shift_report`: 2 = full screen
-  (default), 1 = the classic one-line notice, 0 = off.
+- **Mission Briefing**: reattach to a session where things happened and the
+  screen boots up like a console coming online — the MARS wordmark, a mission
+  clock (`T+ HH:MM:SS`) and a status ribbon (`✗2 ⏸1 ✓3`), then a plain-English
+  situation report in the mission-control voice that types itself in behind a
+  cursor ("Welcome back, captain. The trainer went down at epoch 3 — CUDA OOM,
+  needs a smaller batch before you relaunch. The build came home green."),
+  then a systems-board manifest of every workstream (failures first, then
+  blocked ⏸, done, running) with a left severity stripe and a "why" line
+  (cwd · exit · error) under anything that failed. A long run that finished
+  clean earns a ★ and renders in teal; the briefing closes with a one-line
+  sign-off. Each briefing is logged, so the next return reports progress
+  against the last ("the OOM you were chasing is still red"). The prose is one
+  low-tier call that streams into an already-on-screen frame — zero perceived
+  latency — and any key resumes exactly where you left off. Shows only when
+  something happened. Knobs: `mission_briefing` (2 = full screen [default],
+  1 = one-line notice, 0 = off), `mission_briefing_animate` (boot-up vs.
+  instant, for thin SSH / reduced motion), `mission_briefing_type_ms`
+  (typewriter speed).
 - **Goal tracking**: when you detach, the agent captures what you were working
   toward (from the live panes + recent journal), so the reattach briefing
   reports progress against it — "you were trying to get the auth test green;
@@ -28,19 +37,18 @@ outcomes, not just verdicts.
   ("telemetry coming in").
 - **Auto-watch**: panes that stay busy past `watch_min_active_secs` (10s) are
   watched automatically — the fleet reaches verdicts without arming anything.
-  The pane you're looking at is never summarized. Knob `auto_watch` to disable.
+  The pane you're looking at is never summarized. A long run that finishes
+  clean now surfaces as a win (teal ★), not just failures. Knob `auto_watch`.
 - **Blocked verdicts**: a pane waiting on your input is its own class (⏸),
   sorted right after failures in notices and the report.
 - **Persona**: the assistant speaks in a configurable voice
   (`~/.mars/persona.md`, "Open persona" in the command bar) — default: mission
-  control addressing the ship's captain. Style only: it structurally cannot
-  change what the agent does. Empty file turns it off.
+  control addressing the ship's captain, in plain sentence case. Style only: it
+  structurally cannot change what the agent does. Empty file turns it off.
 - **Outcome-carrying work journal**: watch records now include cwd, the
   command mars ran, the exit code, and a redacted error excerpt on failure —
   the substrate for failure→fix recall. Journal self-compacts
   (`worklog_max_lines`).
-- **Open tuning knobs** joins the command bar.
-
 - **AWS Bedrock + Azure OpenAI/Foundry**: MARS now speaks to enterprise model
   gateways. Set `AWS_BEARER_TOKEN_BEDROCK` (+ `AWS_REGION`) to use any Bedrock
   model through the Converse API, or `AZURE_OPENAI_API_KEY` +
@@ -48,12 +56,25 @@ outcomes, not just verdicts.
   auth only — no AWS SigV4, so the single static binary stays dependency-light.
   Both slot into the provider cascade (rotation + tiering) and work over the ssh
   broker with the key never leaving home. (Bedrock is non-streaming for now.)
+- **Open tuning knobs** joins the command bar.
 
 ### Fixed
-- **The reattach shift report never appeared after a normal detach**: the
-  intended `C-x C-c` quit-detaches path didn't snapshot session state, so the
-  save-state restore (and the classic briefing) had nothing to diff against.
-  Only an accidental disconnect armed it. Now both do.
+- **`mars ls` summaries were often blank, stale, or rambling**: the column read
+  files only a fire-and-forget LLM call writes, so a skipped or failed call left
+  it empty — and a days-old, verbose model verdict could show as if it were
+  current state. Now every headline tier is age-gated (a stale line ages out),
+  rambling verdicts are trimmed to their first clause, and a deterministic floor
+  (`dir · command · ago`) keeps a live session's column from ever going blank —
+  no LLM call required. While a fresh summary is being generated at detach, the
+  column shows `…summarizing…` until it lands. The detach-time capture also no
+  longer loses to a concurrent watch summary.
+- **The reattach briefing never appeared after a normal detach**: the intended
+  `C-x C-c` quit-detaches path didn't snapshot session state, so the save-state
+  restore had nothing to diff against. Only an accidental disconnect armed it.
+  Now both do.
+- **Auto-watch flooded the journal with "user quit"**: a clean shell exit is the
+  user leaving, not work — it's now silent, so the briefing and `mars ls` stop
+  narrating lifecycle noise.
 - Two panes concluding while detached no longer lose one verdict (the pending
   trigger queue was a single slot).
 - Translate calls now actually route through their intended model tier (the
