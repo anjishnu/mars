@@ -184,6 +184,48 @@ pub fn load_goals(session: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// When the goals for `session` were captured (for freshness gating).
+pub fn goals_as_of(session: &str) -> Option<u64> {
+    let path = goals_path()?;
+    let s = std::fs::read_to_string(path).ok()?;
+    let j: serde_json::Value = serde_json::from_str(&s).ok()?;
+    j[session]["as_of"].as_u64()
+}
+
+fn summarizing_path() -> Option<PathBuf> {
+    worklog_path().map(|p| p.with_file_name("summarizing.json"))
+}
+
+/// Note that a fresh summary (the detach-time goal-capture LLM call) is in flight
+/// for `session`, as of wall-clock `ts`. Kept in its own marker file — never in
+/// goals.json — so goal CONSUMERS (the briefing's evidence) never mistake the
+/// "…summarizing…" placeholder for a real goal. The real goals overwrite nothing
+/// here; the marker simply ages out.
+pub fn mark_summarizing(session: &str, ts: u64) {
+    let Some(path) = summarizing_path() else { return };
+    let mut map: serde_json::Map<String, serde_json::Value> = path
+        .exists()
+        .then(|| std::fs::read_to_string(&path).ok())
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    map.insert(session.to_string(), serde_json::json!(ts));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string(&map) {
+        let _ = std::fs::write(&path, s);
+    }
+}
+
+/// When a summary was last marked in flight for `session` (None if never).
+pub fn summarizing_since(session: &str) -> Option<u64> {
+    let path = summarizing_path()?;
+    let s = std::fs::read_to_string(path).ok()?;
+    let j: serde_json::Value = serde_json::from_str(&s).ok()?;
+    j[session].as_u64()
+}
+
 fn briefings_path() -> Option<PathBuf> {
     worklog_path().map(|p| p.with_file_name("briefings.jsonl"))
 }

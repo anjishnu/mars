@@ -2584,6 +2584,34 @@ fn selfcheck() -> Result<()> {
         let floor = session::session_summary("s_floor");
         assert!(floor.starts_with("rerank · vim train.py · "),
             "floor should show dir · command · ago: {floor}");
+        // (6) A STALE, rambling verdict (the "irrelevant garbage" bug): a 5-day-old
+        //     verbose done-line must NOT surface as the headline — it ages out and
+        //     the floor carries the honest dir · cmd · ago instead.
+        worklog::record(&worklog::WorkEntry {
+            ts: now - 5 * 86_400, session: "s_old".into(), tab: "t".into(),
+            verdict: "done: commit and reinstall completed with video script at paper/VIDEO_RUNBOOK.md; auto-named the pane".into(),
+            failed: false, dur_secs: None, cwd: "/home/me/mars".into(),
+            command: Some("git commit".into()), exit: None, error_excerpt: None,
+        });
+        let old = session::session_summary("s_old");
+        assert!(!old.contains("VIDEO_RUNBOOK"), "a 5-day-old rambling verdict must not be the headline: {old}");
+        assert!(old.starts_with("mars · git commit · "), "stale verdict should fall to the floor: {old}");
+        // (7) A FRESH but rambling verdict is trimmed to its first clause, not dumped
+        //     whole — the ls column wants the headline, not the whole paragraph.
+        worklog::record(&mk("s_wordy", "done: shipped the reranker; also refactored the loader; and cleaned up", false, now - 30));
+        let wordy = session::session_summary("s_wordy");
+        assert!(wordy.starts_with("done: shipped the reranker · "),
+            "a rambling verdict must be trimmed to its first clause: {wordy}");
+        // (8) "…summarizing…": while a fresh capture is in flight (marker recent) and
+        //     nothing fresh exists yet, the column says so; once it expires, the floor
+        //     takes over — the placeholder never lingers.
+        worklog::record(&mk("s_prog", "done: user exited terminal", false, now - 8 * 86_400));
+        worklog::mark_summarizing("s_prog", now - 5);
+        assert_eq!(session::session_summary("s_prog"), "…summarizing…",
+            "a fresh in-flight summary should show the placeholder");
+        worklog::mark_summarizing("s_prog", now - 9_999); // long past the TTL
+        assert_ne!(session::session_summary("s_prog"), "…summarizing…",
+            "an expired summarizing marker must give way to the floor");
         // Overflowing summaries wrap into a block under the column: greedy
         // word-wrap, overlong words hard-split, empty input → no lines.
         assert_eq!(

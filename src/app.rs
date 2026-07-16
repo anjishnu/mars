@@ -4292,6 +4292,13 @@ impl App {
             if cfg.is_configured() {
                 let evidence = self.goal_evidence();
                 if !evidence.trim().is_empty() {
+                    // Mark the summary in flight so `mars ls` shows "…summarizing…"
+                    // instead of a stale line until the fresh goals land.
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::mark_summarizing(&self.session_label(), ts);
                     self.bg_busy = true;
                     agent::capture_goals(cfg, evidence, self.agent_tx.clone());
                 }

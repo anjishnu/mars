@@ -762,44 +762,72 @@ fn is_lifecycle_noise(verdict: &str) -> bool {
     .any(|m| l.contains(m))
 }
 
-/// What the session is FOR / what it needs — the useful glance, not a vague
-/// distillation. Priority, all from cheap on-disk signals: (1) a failure or
-/// block that needs you, (2) the goals captured at detach — the concrete
-/// intent, (3) a *recent* inferred mission (stale ones are dropped, not shown),
-/// (4) the freshest real thing that happened. Lifecycle noise never wins.
+/// Keep a verdict to its headline: model verdicts can ramble across clauses
+/// ("done: shipped X; also touched Y; and auto-…"), which reads as noise in a
+/// narrow column. Take the first clause and a sane width. Paths keep their dots
+/// (we never cut on '.').
+fn trim_verdict(v: &str) -> String {
+    let head = v.split([';', '\n']).next().unwrap_or(v).trim();
+    clip(head, 72)
+}
+
+/// What the session is FOR / what it needs — the useful glance, not a vague or
+/// STALE distillation. Priority, all from cheap on-disk signals: (1) a recent
+/// failure/block that needs you, (2) the goals captured at the last detach —
+/// the concrete intent, (3) a recent inferred mission, (4) the freshest real
+/// event — all age-gated, so a days-old line never masquerades as current.
+/// (5) When a fresh summary is being generated right now, say "…summarizing…"
+/// rather than surface something stale. (6) A deterministic floor so a live
+/// session is never blank. Lifecycle noise and rambling verdicts never win.
 pub fn session_summary(name: &str) -> String {
+    // Anything older than this isn't "what's happening now"; it ages out of the
+    // headline tiers and the floor (dir · cmd · ago) carries the honest staleness.
+    const FRESH_SECS: u64 = 3 * 86_400;
+    // Show "…summarizing…" for at most this long after a detach fires the capture
+    // call — if the model never lands, the placeholder gives way to the floor.
+    const SUMMARIZING_TTL: u64 = 300;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let fresh = |ts: u64| now.saturating_sub(ts) < FRESH_SECS;
     let recent = crate::worklog::recent(name, 12);
     let meaningful = recent.iter().rev().find(|e| !is_lifecycle_noise(&e.verdict));
-    // 1. A failure/block that needs you leads — the reason you'd scan the list.
+    // 1. A RECENT failure/block that needs you leads — the reason you'd scan the list.
     if let Some(e) = meaningful {
         let low = e.verdict.to_lowercase();
-        if e.failed || low.starts_with("blocked") || low.contains("failed") {
-            return format!("{} · {}", clip(&e.verdict, 88), crate::broker::ago(e.ts));
+        if fresh(e.ts) && (e.failed || low.starts_with("blocked") || low.contains("failed")) {
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
         }
     }
-    // 2. The goals captured at detach — the clearest "what is this session for."
-    //    All of them, one per line (the renderer wraps each wide); newline-joined
-    //    so the ls table can lay them out as a small block, not a "(+N more)" tease.
+    // 2. The goals captured at the last detach — the clearest "what is this session
+    //    for" — while still fresh. All of them, one per line (the renderer wraps
+    //    each wide), so the ls table lays them out as a block, not a "+N more" tease.
     let goals = crate::worklog::load_goals(name);
-    if !goals.is_empty() {
+    if !goals.is_empty() && crate::worklog::goals_as_of(name).map(fresh).unwrap_or(false) {
         return goals.iter().map(|g| format!("→ {}", clip(g, 72))).collect::<Vec<_>>().join("\n");
     }
-    // 3. A *recent* inferred mission — age-gated so a days-old vague line doesn't
+    // 3. A recent inferred mission — age-gated so a days-old vague line doesn't
     //    masquerade as current state (the "basically useless" complaint).
     if let Some((mission, as_of)) = crate::worklog::load_mission(name) {
-        if now.saturating_sub(as_of) < 3 * 86_400 {
+        if fresh(as_of) {
             return clip(&mission, 160);
         }
     }
-    // 4. The freshest real event (a completed run, etc.).
+    // 4. The freshest real event (a completed run, etc.) — while fresh.
     if let Some(e) = meaningful {
-        return format!("{} · {}", clip(&e.verdict, 88), crate::broker::ago(e.ts));
+        if fresh(e.ts) {
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
+        }
     }
-    // 5. Floor — a live session is NEVER blank, even with no model summary and
+    // 5. A fresh summary is being generated right now (the detach fired the LLM
+    //    call) — say so, rather than surface something stale, until it lands.
+    if let Some(ts) = crate::worklog::summarizing_since(name) {
+        if now.saturating_sub(ts) < SUMMARIZING_TTL {
+            return "…summarizing…".to_string();
+        }
+    }
+    // 6. Floor — a live session is NEVER blank, even with no model summary and
     //    only lifecycle noise in the journal. The freshest line of any kind still
     //    says where and when: the working directory and how long ago. This is the
     //    deterministic guarantee — it does not depend on any LLM call landing.
