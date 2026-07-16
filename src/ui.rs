@@ -671,27 +671,10 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Pad a wrapped line to exactly `width` columns by widening ONLY the final gap,
-/// so the last word sits flush against the right edge while every earlier word
-/// keeps its natural single-spaced position. This gives a justified right edge
-/// without the jitter of full justification — where a line completing mid-stream
-/// re-spreads every word and visibly nudges text that had already settled. Here
-/// the earlier words never move; only the last word snaps right as the line
-/// closes. A single word, or an already-full line, is returned unchanged (the
-/// caller never justifies a paragraph's last line at all).
-fn justify(line: &str, width: usize) -> String {
-    let words: Vec<&str> = line.split_whitespace().collect();
-    if words.len() < 2 {
-        return line.to_string();
-    }
-    let natural: usize =
-        words.iter().map(|w| w.chars().count()).sum::<usize>() + words.len() - 1;
-    if natural >= width {
-        return words.join(" ");
-    }
-    let (head, last) = words.split_at(words.len() - 1);
-    format!("{}{}{}", head.join(" "), " ".repeat(1 + width - natural), last[0])
-}
+/// The faint rail drawn at the briefing's right margin on every full prose line.
+/// It suggests a justified block without justifying the text — the words stay
+/// ragged and unmoved, so nothing shifts as the prose types in.
+const RAIL: &str = "┊";
 
 /// The shift report — the save-state restore. The MARS wordmark up top (centered),
 /// then a plain-English persona-voiced situation briefing (the star — it streams
@@ -831,15 +814,20 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             } else {
                 white // the summary
             };
-            // Every prose line is anchored at the block's left edge, so the text
-            // is only ever written left-to-right and each word stays put as the
-            // typewriter advances — never re-centering (which grows from the
-            // middle out). Non-final lines are justified flush; the last is ragged.
+            // Every prose line is anchored at the block's left edge and left ragged
+            // — no word is ever moved to justify it, so nothing shifts as the
+            // typewriter advances. A faint rail at the fixed right margin gives the
+            // sense of a justified block without touching the text. The last (short)
+            // line of a paragraph gets no rail, as in a real justified paragraph.
             let wrapped = wrap(para, bw);
             let last = wrapped.len().saturating_sub(1);
             for (i, l) in wrapped.iter().enumerate() {
                 if i < last {
-                    prose.push(Line::from(Span::styled(format!("{block_pad}{}", justify(l, bw)), style)));
+                    let gap = " ".repeat(bw.saturating_sub(l.chars().count()));
+                    prose.push(Line::from(vec![
+                        Span::styled(format!("{block_pad}{l}"), style),
+                        Span::styled(format!("{gap}{RAIL}"), dim),
+                    ]));
                 } else {
                     prose.push(Line::from(Span::styled(format!("{block_pad}{l}"), style)));
                 }
