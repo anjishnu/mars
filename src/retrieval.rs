@@ -261,14 +261,16 @@ fn denylist() -> Vec<String> {
 /// Machine-generated credential prefixes (provider keys, PATs, Slack tokens,
 /// AWS key ids, JWTs). A hit redacts the whole token run when it is long
 /// enough to be a credential rather than a word.
-const TOKEN_PREFIXES: [&str; 11] =
-    ["sk-", "gsk_", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "xoxs-", "AKIA", "AIza", "eyJ"];
+const TOKEN_PREFIXES: [&str; 12] =
+    ["sk-", "gsk_", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "xoxs-", "AKIA", "AIza", "eyJ",
+     "ABSKQmVk"]; // AWS Bedrock API keys base64-encode to an "ABSKQmVk…" prefix
 
 /// Names whose `=`/`:` values are secrets by construction. Matched as a
 /// suffix-insensitive scan (so `GITHUB_TOKEN=` and `--token=` both hit);
 /// over-redacting a value is harmless, leaking one is not.
-const SECRET_NAMES: [&str; 9] =
-    ["password", "passwd", "pwd", "token", "secret", "api_key", "apikey", "access_key", "authorization"];
+const SECRET_NAMES: [&str; 11] =
+    ["password", "passwd", "pwd", "token", "secret", "api_key", "apikey", "access_key", "authorization",
+     "api-key", "aws_bearer_token_bedrock"];
 
 fn token_char(c: char, jwt: bool) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-' || (jwt && c == '.')

@@ -82,6 +82,17 @@ pub fn session_event(kind: &str) {
         &serde_json::json!({ "ts": now_secs(), "kind": kind, "session_id": session_id() }),
     );
 }
+/// A structured, non-call event (shift report shown/dismissed, …): one JSONL
+/// line with arbitrary fields, same debug gate as everything else here.
+pub fn event(kind: &str, mut fields: serde_json::Value) {
+    if let Some(obj) = fields.as_object_mut() {
+        obj.insert("ts".into(), serde_json::json!(now_secs()));
+        obj.insert("kind".into(), serde_json::json!(kind));
+        obj.insert("session_id".into(), serde_json::json!(session_id()));
+    }
+    append(&log_path(), &fields);
+}
+
 pub fn session_start() {
     session_event("session_start");
 }

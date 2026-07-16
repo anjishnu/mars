@@ -50,15 +50,13 @@ teaches itself as you go.
 
 ## Moving around fast
 
-Fast motion is bound to **both `⌘` and `⌥` (Option)**. `⌘` reaches Mars only on
-kitty-protocol terminals (kitty, WezTerm, Ghostty, recent iTerm2); on Terminal.app /
-Warp the OS eats `⌘` — use `⌥` there (enable "Use Option as Meta" if offered). The
-`C-x` jumps work on every terminal.
+Fast motion is bound to **`⌥` (Option)** and to `C-x` jumps that work on every
+terminal (enable "Use Option as Meta" if your terminal offers it).
 
 | Do this | Keys | Also |
 |---|---|---|
-| Jump by code token (`foo·.·bar·(·baz·)`) | `⌘←`/`⌘→` or `⌥←`/`⌥→` | `M-b` / `M-f` (word) |
-| Page up / down | `⌘↑`/`⌘↓` or `⌥↑`/`⌥↓` | `PageUp` / `PageDown` |
+| Jump by code token (`foo·.·bar·(·baz·)`) | `⌥←` / `⌥→` | `M-b` / `M-f` (word) |
+| Page up / down | `⌥↑` / `⌥↓` | `PageUp` / `PageDown` |
 | Extend selection while jumping | add `Shift` (`⌥⇧→`) | `Shift`+`PageUp/Down` |
 | Next/prev blank-line block | `C-x ]` / `C-x [` | |
 | Next/prev definition (`fn`/`def`/`class`…) | `C-x }` / `C-x {` | |
@@ -92,11 +90,16 @@ The daily rhythm:
    the window. Both leave shells running and buffers intact.
 3. **Come back**: `mars attach` (or `mars attach work`). Your layout, buffers, and
    that build you left running in a terminal pane are exactly where you left them.
-   If anything happened while you were gone — a shell exited, a watched task
-   finished, files changed — one **`while away 3h20m — …`** line greets you, failures
-   first, duration up front. Press **`C-x g`** for the full **Away Digest**: a
-   sectioned timeline (✗ needs you / ✓ done / context) with each run's duration,
-   re-summonable anytime. Nothing changed → no briefing.
+   If anything happened while you were gone, the **Mission Briefing** boots up like
+   a console coming online — a mission clock, a plain-English situation report in
+   the mission-control voice that types itself in ("The trainer went down at epoch
+   3 — CUDA OOM, needs a smaller batch. The build came home green."), then a
+   systems board of every workstream (failures first, then blocked ⏸, done ✓,
+   running) with a "why" line under anything that failed and a teal ★ on a long run
+   that finished clean. Any key resumes exactly where you left off. Each briefing
+   is remembered, so the next return reports progress against it. Nothing happened
+   → no briefing. (`mission_briefing = 1` swaps it for a one-line notice; `C-x g`
+   still opens the full **Away Digest** timeline anytime.)
 4. **Finish for real**: quitting (`C-x C-c`) just detaches — a session only ends
    when you *kill* it: **Kill session** in the command bar (confirm-gated),
    `mars kill work` from outside, or `mars killall` to sweep every session and
@@ -254,7 +257,7 @@ Mars speaks three dialects at once — whichever your fingers know:
   `M-x` mission control
 - **Modern/Mac**: `C-c`/`C-v` copy/paste (system clipboard) · Shift+arrows select ·
   typing replaces selection · `Tab`/`Shift-Tab` indent/dedent a selected block ·
-  mouse click/scroll/wheel · `⌘C/⌘V` on kitty-class terminals
+  mouse click/scroll/wheel
 - **tmux/zellij**: `C-t` space warp · `M-{`/`M-}` or `C-PgUp/PgDn` switch tabs ·
   `M-1..9` jump to tab · `C-o`/`Ctrl+arrows` move between panes · `C-|`/`C--` splits ·
   scrollback with the wheel or `Shift+PgUp/PgDn`
@@ -278,13 +281,10 @@ old files are kept as `*.bak`).
   `stty sane`.
 - **`M-…` keys do nothing (macOS)**: enable "Use Option as Meta" in Terminal/iTerm —
   or use the `Ctrl`-based twins (`C-o`, `Ctrl+arrows`), which always work.
-- **`⌘` chords do nothing**: `⌘` only reaches Mars on kitty-protocol terminals
-  (kitty, WezTerm, Ghostty, iTerm2 3.5+); elsewhere the OS keeps it. The `⌥` and
-  `M-…` twins work everywhere.
 - **A session shows `dead (cleaned up)`** in `mars ls`: the daemon crashed or the
   machine rebooted. Check `~/.local/state/mars/<name>.log` for the reason; autosaved
   file changes are already on disk.
-- **Fancy chords (`C-{`, `C--`, `⌘C`) don't fire**: they need a kitty-protocol
+- **Fancy chords (`C-{`, `C--`) don't fire**: they need a kitty-protocol
   terminal. The Alt-based twins work everywhere.
 
 ## More

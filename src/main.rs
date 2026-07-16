@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod banner;
+mod briefing;
 mod broker;
 mod buffer;
 mod config;
@@ -20,6 +21,7 @@ mod project;
 mod session;
 mod tab;
 mod terminal;
+mod persona;
 mod prompts;
 mod tiers;
 mod worklog;
@@ -82,6 +84,9 @@ AGENT  (BETA — an assistant, not an authority; review what it proposes)
                      GEMINI_API_KEY, or MARS_LLM_KEY + MARS_LLM_URL (any
                      OpenAI-compatible endpoint, e.g. local Ollama).
                      MARS_LLM_MODEL overrides the model for any provider.
+  Enterprise:        AWS_BEARER_TOKEN_BEDROCK (+ AWS_REGION) for Bedrock;
+                     AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT
+                     (+ MARS_AZURE_DEPLOYMENT) for Azure OpenAI / Foundry.
 
 LLM DEBUG  (calibrate prompts / right-size models per call)
   mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
@@ -413,6 +418,9 @@ fn ask_cli(question: String) -> Result<()> {
             | agent::AgentEvent::WatchSummary { .. }
             | agent::AgentEvent::Mission { .. }
             | agent::AgentEvent::BgDone
+            | agent::AgentEvent::ShiftDelta { .. }
+            | agent::AgentEvent::ShiftDone
+            | agent::AgentEvent::Goals { .. }
             | agent::AgentEvent::ShellTranslation { .. } => return Ok(()),
             agent::AgentEvent::Error(e) => anyhow::bail!("agent error: {}", e),
         }
@@ -435,6 +443,14 @@ fn selfcheck() -> Result<()> {
     ] {
         std::env::remove_var(key);
     }
+    // Hermetic, part 2: keyless watch fires now produce deterministic verdicts
+    // that land in the work journal — point the WHOLE suite at a scratch file so
+    // no block can pollute the user's real ~/.mars/worklog.jsonl. Blocks that
+    // need their own seeded journal set/reset MARS_WORKLOG back to this default.
+    let worklog_default =
+        std::env::temp_dir().join(format!("mars-selfcheck-worklog-{}", std::process::id()));
+    let _ = std::fs::remove_file(&worklog_default);
+    std::env::set_var("MARS_WORKLOG", &worklog_default);
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1304,15 +1320,20 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Esc))?;
     println!("[selfcheck] ask transcript + scroll .... PASS");
 
-    // 26d. History really reaches the provider; directives parse.
-    let msgs = agent::build_messages(
+    // 26d. History really reaches the provider; directives parse. (Pinned to
+    //      the no-persona-file state → the default voice is the last system
+    //      message, before history — regardless of this machine's ~/.mars.)
+    std::env::set_var("MARS_PERSONA", std::env::temp_dir().join("mars-no-such-persona.md"));
+    let msgs = agent::build_ask_messages(
         "reg", "screen",
         &[("user".into(), "q1".into()), ("assistant".into(), "a1".into())],
         "q2",
     );
-    assert_eq!(msgs.len(), 4, "system + 2 history + question expected");
-    assert!(msgs[1]["content"].as_str().unwrap_or("").contains("q1"));
+    std::env::remove_var("MARS_PERSONA");
+    assert_eq!(msgs.len(), 5, "system + persona + 2 history + question expected");
     assert!(msgs[0]["content"].as_str().unwrap_or("").contains("screen"));
+    assert!(msgs[1]["content"].as_str().unwrap_or("").contains("VOICE"), "persona not the last system message");
+    assert!(msgs[2]["content"].as_str().unwrap_or("").contains("q1"));
     let (d1, dir1) = agent::parse_directive("use ls.\nTYPE: ls -la");
     assert_eq!(d1, "use ls.");
     assert_eq!(dir1, Some(agent::AgentDirective::Type("ls -la".into())));
@@ -1748,6 +1769,7 @@ fn selfcheck() -> Result<()> {
     //      deterministic, no API key (broker-ready: only verdict TEXT is LLM-made).
     {
         let mut app = App::new(None)?;
+        app.tuning.mission_briefing = 1; // this block pins the CLASSIC notice mode
         app.on_detach();
         app.on_attach();
         assert!(app.notices.is_empty(), "briefing appeared when nothing changed");
@@ -1832,12 +1854,14 @@ fn selfcheck() -> Result<()> {
         }
         impl TestClient {
             fn connect(path: &std::path::Path, version: &str) -> Result<Self> {
-                let stream = UnixStream::connect(path)?;
-                let reader = BufReader::new(stream.try_clone()?);
+                use anyhow::Context as _;
+                let stream = UnixStream::connect(path).context("testclient: connect")?;
+                let reader = BufReader::new(stream.try_clone().context("testclient: clone")?);
                 let mut me = TestClient { writer: stream, reader, screen: vt100::Parser::new(30, 100, 0) };
                 session::write_frame(&mut me.writer, &session::ClientFrame::Hello {
                     cols: 100, rows: 30, version: version.to_string(),
-                })?;
+                })
+                .context("testclient: hello")?;
                 Ok(me)
             }
             fn key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1853,8 +1877,12 @@ fn selfcheck() -> Result<()> {
             /// Read Output frames until `needle` appears in the interpreted
             /// screen contents (or an Exit arrives), within `secs`.
             fn read_until(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                use anyhow::Context as _;
                 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-                self.reader.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(200)))?;
+                self.reader
+                    .get_ref()
+                    .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                    .context("testclient: set_read_timeout")?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
                 while std::time::Instant::now() < deadline {
                     let mut line = String::new();
@@ -1915,6 +1943,9 @@ fn selfcheck() -> Result<()> {
         drop(c2); // hard disconnect — no Detach, just gone
         std::thread::sleep(std::time::Duration::from_millis(150));
         let mut c3 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        // Reattach now always greets with the briefing overlay (iteration mode) —
+        // dismiss it like a real user before reading the workspace underneath.
+        c3.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
         let (pty_survived, _) = c3.read_until("daemon_pty_ok", 5)?;
         assert!(pty_survived, "PTY did not survive the disconnect");
 
@@ -2085,7 +2116,10 @@ fn selfcheck() -> Result<()> {
     //     paid providers, and paid-first precedence.
     for v in ["MARS_LLM_KEY", "MARS_LLM_URL", "MARS_LLM_MODEL",
               "ARES_LLM_KEY", "ARES_LLM_URL", "ARES_LLM_MODEL", "MARS_AUTH_SOCK",
-              "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+              "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+              "AWS_BEARER_TOKEN_BEDROCK", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+              "MARS_BEDROCK_REGION", "AWS_REGION", "AWS_DEFAULT_REGION",
+              "MARS_AZURE_DEPLOYMENT", "MARS_AZURE_API_VERSION"] {
         std::env::remove_var(v);
     }
     std::env::set_var("GEMINI_API_KEY", "test-key");
@@ -2106,10 +2140,39 @@ fn selfcheck() -> Result<()> {
     assert_eq!(cfg.provider, "anthropic", "ANTHROPIC should beat OPENAI (paid-first order)");
     assert!(cfg.url.contains("api.anthropic.com"), "wrong Anthropic endpoint: {}", cfg.url);
     assert!(cfg.model.contains("claude"), "wrong Claude default model: {}", cfg.model);
-    // Explicit MARS_LLM_KEY still overrides every named provider.
+    // Azure OpenAI / Foundry: api-key + endpoint → a complete deployment URL.
+    std::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+    std::env::set_var("AZURE_OPENAI_ENDPOINT", "https://acme.openai.azure.com");
+    std::env::set_var("MARS_AZURE_DEPLOYMENT", "gpt-4o");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "azure", "Azure creds should beat Anthropic (enterprise-first)");
+    assert!(cfg.url.contains("/openai/deployments/gpt-4o/chat/completions"), "wrong Azure URL: {}", cfg.url);
+    assert!(cfg.url.contains("api-version="), "Azure URL missing api-version: {}", cfg.url);
+    assert_eq!(cfg.model, "gpt-4o", "Azure model should be the deployment name");
+    // AWS Bedrock: bearer token + region → the Converse region base.
+    std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "test-key");
+    std::env::set_var("MARS_BEDROCK_REGION", "eu-west-1");
+    let cfg = agent::AgentConfig::from_env();
+    assert_eq!(cfg.provider, "bedrock", "Bedrock should beat Azure (chain order)");
+    assert!(cfg.url.contains("bedrock-runtime.eu-west-1.amazonaws.com"), "wrong Bedrock URL: {}", cfg.url);
+    assert!(cfg.model.contains("anthropic.claude"), "wrong Bedrock default model: {}", cfg.model);
+    // The Converse body: system split out, content wrapped, inferenceConfig set.
+    let body = agent::build_bedrock_body(
+        &[serde_json::json!({"role":"system","content":"be terse"}),
+          serde_json::json!({"role":"user","content":"hi"})],
+        256, 0.3,
+    );
+    assert_eq!(body["system"][0]["text"], "be terse", "Bedrock system not split out");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "hi", "Bedrock content not wrapped");
+    assert_eq!(body["inferenceConfig"]["maxTokens"], 256, "Bedrock inferenceConfig missing");
+    assert!(body["messages"].as_array().unwrap().iter().all(|m| m["role"] != "system"),
+        "Bedrock messages must not contain a system role");
+    // Explicit MARS_LLM_KEY still overrides every provider, enterprise included.
     std::env::set_var("MARS_LLM_KEY", "test-key");
     assert_eq!(agent::AgentConfig::from_env().provider, "custom", "MARS_LLM_KEY must win");
-    for v in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MARS_LLM_KEY"] {
+    for v in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MARS_LLM_KEY",
+              "AWS_BEARER_TOKEN_BEDROCK", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+              "MARS_BEDROCK_REGION", "MARS_AZURE_DEPLOYMENT"] {
         std::env::remove_var(v);
     }
     println!("[selfcheck] provider detection ........ PASS");
@@ -2146,6 +2209,19 @@ fn selfcheck() -> Result<()> {
         assert_eq!(alts.len(), 1, "expected exactly one alternate");
         assert_eq!(alts[0].provider, "gemini");
         assert_eq!(agent::rotation_candidates("gemini")[0].provider, "groq");
+        // Enterprise providers rotate too: a throttled Bedrock falls to the
+        // consumer keys, and its own tier table routes by task.
+        std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "test-key");
+        assert!(agent::rotation_candidates("bedrock").iter().any(|c| c.provider == "gemini"),
+            "Bedrock should rotate to a consumer key when throttled");
+        assert_eq!(tiers::model_for("bedrock", "ask", "x"),
+            "us.anthropic.claude-opus-4-20250514-v1:0", "Bedrock ask must route to the high tier");
+        assert_eq!(tiers::model_for("bedrock", "auto_name", "x"),
+            "us.anthropic.claude-3-5-haiku-20241022-v1:0", "Bedrock naming must route to low");
+        // Azure has no tier table: model_for falls through to the deployment.
+        assert_eq!(tiers::model_for("azure", "ask", "my-deployment"), "my-deployment",
+            "Azure should fall through to the configured deployment");
+        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
         std::env::set_var("MARS_LLM_MODEL", "pinned");
         assert!(agent::rotation_candidates("groq").is_empty(), "pin disables rotation");
         std::env::remove_var("MARS_LLM_MODEL");
@@ -2175,6 +2251,11 @@ fn selfcheck() -> Result<()> {
         assert!(r.contains("--password=[REDACTED]") && !r.contains("hunter2"), "{r}");
         let r = redact("curl -H 'Authorization: Bearer abc123def456' api");
         assert!(r.contains("Bearer [REDACTED]") && !r.contains("abc123"), "{r}");
+        // The new enterprise creds never ride into a prompt.
+        let r = redact("export AWS_BEARER_TOKEN_BEDROCK=ABSKQmVkcm9ja0FQSUtleTEyMzQ1Njc4OTA");
+        assert!(r.contains("[REDACTED]") && !r.contains("ABSKQmVkcm9ja0FQSUtleT"), "bedrock key survived: {r}");
+        let r = redact("curl -H 'api-key: 0123456789abcdef0123456789abcdef' azure");
+        assert!(r.contains("[REDACTED]") && !r.contains("0123456789abcdef0123"), "azure key survived: {r}");
         // URL credentials: password goes, user and host stay.
         let r = redact("git clone https://bob:s3cret@github.com/x.git");
         assert!(r.contains("bob:[REDACTED]@github.com") && !r.contains("s3cret"), "{r}");
@@ -2299,6 +2380,10 @@ fn selfcheck() -> Result<()> {
             ("cursor_insert", prompts::CURSOR_INSERT, vec!["{file}", "{line}"]),
             ("explain_this", prompts::EXPLAIN_THIS, vec![]),
             ("explain_failure", prompts::EXPLAIN_FAILURE, vec![]),
+            ("persona_preamble", prompts::PERSONA_PREAMBLE, vec![]),
+            ("persona_default", prompts::PERSONA_DEFAULT, vec![]),
+            ("shift_brief", prompts::SHIFT_BRIEF, vec!["{away}", "{mission}", "{prev}", "{evidence}"]),
+            ("capture_goals", prompts::CAPTURE_GOALS, vec!["{evidence}"]),
         ] {
             assert!(!p.trim().is_empty(), "prompt template {name}.md is empty");
             for h in holders {
@@ -2310,7 +2395,85 @@ fn selfcheck() -> Result<()> {
         assert_eq!(tiers::model_for("groq", "auto_name", "x"), "llama-3.1-8b-instant");
         assert_eq!(tiers::model_for("groq", "name_session", "x"), "llama-3.1-8b-instant");
         assert_eq!(tiers::model_for("groq", "mission", "x"), "llama-3.1-8b-instant");
+        // EVERY call-site tag routes: agent::TASKS ⊆ the default tier map, so a
+        // tag rename can't silently fall through to the provider default model
+        // again (the "shell"/"translate" bug, fixed 0.4).
+        let ring = tiers::Tiers::default();
+        for t in agent::TASKS {
+            assert!(ring.task_tier.contains_key(*t), "task tag {t:?} is unmapped in tiers defaults");
+        }
+        assert_eq!(tiers::model_for("groq", "translate", "x"), "qwen/qwen3-32b",
+            "translate must route to the mid tier");
         println!("[selfcheck] prompt templates ......... PASS");
+    }
+
+    // 29h2. Persona seam: the user's style file rides only into VOICE tasks
+    //       (ask, watch) as the FINAL system message — hot-read, capped,
+    //       redacted. FORMAT tasks (translate, naming, mission) never see it;
+    //       an empty file is the kill switch; no file means the shipped voice.
+    {
+        let pf = std::env::temp_dir().join(format!("mars-persona-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pf);
+        std::env::set_var("MARS_PERSONA", &pf);
+        // No file → shipped default voice, preamble first, last system message.
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert_eq!(msgs.len(), 3, "base system + persona + question expected");
+        let c = msgs[1]["content"].as_str().unwrap();
+        assert!(c.starts_with("VOICE"), "persona must open with the precedence preamble");
+        assert!(c.contains("mission control"), "shipped default voice missing");
+        // Custom text is hot-read (denylist pattern — next call sees the edit).
+        std::fs::write(&pf, "talk like a pirate\n")?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("talk like a pirate"),
+            "persona edit not hot-read");
+        // Watch (VOICE) carries it, before its user payload.
+        let w = agent::build_watch_messages(app::WatchReason::Quiet, "the tail");
+        assert!(w.iter().any(|m| m["content"].as_str().unwrap_or("").contains("pirate")),
+            "watch lost the voice");
+        assert_eq!(w.last().unwrap()["role"], "user", "watch payload must come last");
+        // FORMAT tasks: machine-parsed output — persona must never appear.
+        let t = agent::build_translate_messages("", "", "list files", "scr");
+        let n = agent::format_task_messages(prompts::AUTO_NAME_SYSTEM, "scr");
+        let m = agent::format_task_messages(prompts::MISSION_SYSTEM, "snapshots");
+        for (name, ms) in [("translate", &t), ("naming", &n), ("mission", &m)] {
+            assert!(
+                ms.iter().all(|msg| {
+                    let s = msg["content"].as_str().unwrap_or("");
+                    !s.contains("pirate") && !s.contains("VOICE")
+                }),
+                "persona leaked into the {name} task"
+            );
+        }
+        // Cap: an oversize persona is truncated, with a visible marker.
+        std::fs::write(&pf, "y".repeat(5000))?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        let c = msgs[1]["content"].as_str().unwrap();
+        assert!(c.chars().count() < 2500, "persona cap not applied");
+        assert!(c.ends_with('…'), "truncation marker missing");
+        // Kill switch: an emptied file disables the voice entirely.
+        std::fs::write(&pf, "\n  \n")?;
+        let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+        assert_eq!(msgs.len(), 2, "empty persona file must turn the voice off");
+        // Secrets pasted into the style file never ride into a prompt.
+        #[cfg(feature = "memory")]
+        {
+            std::fs::write(&pf, "sign replies as --password=hunter2 always\n")?;
+            let msgs = agent::build_ask_messages("reg", "scr", &[], "q");
+            let c = msgs[1]["content"].as_str().unwrap();
+            assert!(!c.contains("hunter2"), "persona leaked a secret into the prompt");
+            assert!(c.contains("[REDACTED]"), "redaction marker missing from persona");
+        }
+        // The palette action seeds a self-documenting file on first open.
+        let _ = std::fs::remove_file(&pf);
+        let mut app = App::new(None)?;
+        app.run_action(palette::Action::OpenPersona);
+        assert!(pf.exists(), "OpenPersona did not seed the persona file");
+        let seeded = std::fs::read_to_string(&pf)?;
+        assert!(seeded.starts_with('#') && seeded.contains("mission control"),
+            "seeded persona missing header/default voice");
+        std::env::remove_var("MARS_PERSONA");
+        let _ = std::fs::remove_file(&pf);
+        println!("[selfcheck] persona voice/format ..... PASS");
     }
 
     // 29g. Work journal + mission + expand-all notices: watch verdicts persist
@@ -2332,16 +2495,44 @@ fn selfcheck() -> Result<()> {
                 verdict: v.to_string(),
                 failed: v.starts_with("failed"),
                 dur_secs: Some(60),
+                cwd: "/work/train".into(),
+                command: v.starts_with("failed").then(|| "cargo test".to_string()),
+                exit: v.starts_with("failed").then_some(101),
+                error_excerpt: v.starts_with("failed").then(|| "assertion failed: left == right".to_string()),
             });
         }
         worklog::record(&worklog::WorkEntry {
             ts: 2000, session: "other".into(), tab: "t".into(),
             verdict: "done: unrelated".into(), failed: false, dur_secs: None,
+            cwd: String::new(), command: None, exit: None, error_excerpt: None,
         });
+        // A pre-0.4 line (no outcome fields) must still parse — append raw.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&wl)?;
+            writeln!(f, r#"{{"ts":1500,"session":"train","tab":"old","verdict":"done: legacy","failed":false,"dur_secs":null}}"#)?;
+        }
         let r = worklog::recent("train", 2);
         assert_eq!(r.len(), 2, "recent() limit not applied");
-        assert_eq!(r[0].verdict, "failed: 3 tests red", "recent() order/session filter wrong");
+        assert_eq!(r[1].verdict, "done: legacy", "pre-0.4 line (no outcome fields) failed to parse");
         assert!(r.iter().all(|e| e.session == "train"), "session filter leaked");
+        // Outcome fields round-trip; entries without them read back as absent.
+        let all = worklog::recent("train", 10);
+        let f = all.iter().find(|e| e.failed).expect("failed entry lost");
+        assert_eq!(f.cwd, "/work/train", "cwd lost");
+        assert_eq!(f.command.as_deref(), Some("cargo test"), "command lost");
+        assert_eq!(f.exit, Some(101), "exit code lost");
+        assert_eq!(f.error_excerpt.as_deref(), Some("assertion failed: left == right"), "excerpt lost");
+        let legacy = all.iter().find(|e| e.verdict == "done: legacy").unwrap();
+        assert!(legacy.cwd.is_empty() && legacy.command.is_none() && legacy.exit.is_none()
+            && legacy.error_excerpt.is_none(), "legacy line grew phantom outcome fields");
+        // compact(): past 2×max, the journal is rewritten to the newest max lines.
+        worklog::compact(10_000); // way under threshold — must be a no-op
+        assert_eq!(worklog::recent("train", 10).len(), 4, "compact under threshold rewrote the file");
+        worklog::compact(2);
+        let after = std::fs::read_to_string(&wl)?;
+        assert_eq!(after.lines().count(), 2, "compact did not bound the journal");
+        assert!(after.contains("done: legacy"), "compact dropped the newest lines");
         worklog::save_mission("train", "fixing the red tests", 1234);
         assert_eq!(
             worklog::load_mission("train"),
@@ -2349,19 +2540,78 @@ fn selfcheck() -> Result<()> {
             "mission round-trip failed"
         );
         assert_eq!(worklog::load_mission("other"), None, "mission leaked across sessions");
-        // The ls SUMMARY column: mission when present, else the last verdict,
-        // never mixed into the liveness status.
-        assert_eq!(
-            session::session_summary("train"),
-            "fixing the red tests",
-            "summary should be the mission"
-        );
-        let s = session::session_summary("other");
-        assert!(
-            s.starts_with("last: done: unrelated (") && s.ends_with(')'),
-            "summary should fall back to the last verdict: {s}"
-        );
-        assert_eq!(session::session_summary("nowhere"), "", "no journal → empty summary");
+        // The ls SUMMARY column, priority tested with now-relative data (the
+        // seeded 1970-epoch lines age out of every recency gate, as they should).
+        assert_eq!(session::session_summary("nowhere"), "active — nothing logged yet",
+            "a live session must never render a blank summary — the floor stands in");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mk = |sess: &str, verdict: &str, failed: bool, ts: u64| worklog::WorkEntry {
+            ts, session: sess.into(), tab: "t".into(), verdict: verdict.into(), failed,
+            dur_secs: None, cwd: String::new(), command: None, exit: None, error_excerpt: None,
+        };
+        // (1) A fresh failure/block leads, even with goals present.
+        worklog::record(&mk("s_fail", "blocked: waiting on your input", false, now - 60));
+        worklog::save_goals("s_fail", &["ship the release".into()], now);
+        assert!(session::session_summary("s_fail").starts_with("blocked: waiting on your input · "),
+            "a needs-you verdict must lead: {}", session::session_summary("s_fail"));
+        // (2) No failure → the goals (the captured intent) win over a done
+        //     verdict, and ALL goals show (one per line), not a "+N more" tease.
+        worklog::record(&mk("s_goal", "done: built the thing", false, now - 30));
+        worklog::save_goals("s_goal", &["test MARS features".into(), "write the doc".into()], now);
+        assert_eq!(session::session_summary("s_goal"), "→ test MARS features\n→ write the doc",
+            "all goals should summarize the session, one per line");
+        // (3) Lifecycle noise never becomes the headline; a real done verdict does.
+        worklog::record(&mk("s_done", "done: user exited terminal voluntarily", false, now - 5));
+        worklog::record(&mk("s_done", "done: cargo build green", false, now - 90));
+        assert!(session::session_summary("s_done").starts_with("done: cargo build green · "),
+            "noise must be skipped for the real verdict: {}", session::session_summary("s_done"));
+        // (4) A stale mission is dropped, not shown as if current — but the floor
+        //     still stands in, so the column is never blank for a live session.
+        worklog::save_mission("s_stale", "vague old mission", now - 5 * 86_400);
+        worklog::record(&mk("s_stale", "done: user exited terminal", false, now - 10));
+        let stale = session::session_summary("s_stale");
+        assert!(!stale.contains("vague old mission"), "a days-old mission must not linger: {stale}");
+        assert!(!stale.is_empty(), "the deterministic floor must fill the column: {stale}");
+        // (5) Floor detail: with only lifecycle noise but a real cwd/command, the
+        //     column shows WHERE and WHEN — dir · command · ago — with no LLM call.
+        worklog::record(&worklog::WorkEntry {
+            ts: now - 20, session: "s_floor".into(), tab: "t".into(),
+            verdict: "user exited terminal".into(), failed: false, dur_secs: None,
+            cwd: "/home/me/rerank".into(), command: Some("vim train.py".into()),
+            exit: None, error_excerpt: None,
+        });
+        let floor = session::session_summary("s_floor");
+        assert!(floor.starts_with("rerank · vim train.py · "),
+            "floor should show dir · command · ago: {floor}");
+        // (6) A STALE, rambling verdict (the "irrelevant garbage" bug): a 5-day-old
+        //     verbose done-line must NOT surface as the headline — it ages out and
+        //     the floor carries the honest dir · cmd · ago instead.
+        worklog::record(&worklog::WorkEntry {
+            ts: now - 5 * 86_400, session: "s_old".into(), tab: "t".into(),
+            verdict: "done: commit and reinstall completed with video script at paper/VIDEO_RUNBOOK.md; auto-named the pane".into(),
+            failed: false, dur_secs: None, cwd: "/home/me/mars".into(),
+            command: Some("git commit".into()), exit: None, error_excerpt: None,
+        });
+        let old = session::session_summary("s_old");
+        assert!(!old.contains("VIDEO_RUNBOOK"), "a 5-day-old rambling verdict must not be the headline: {old}");
+        assert!(old.starts_with("mars · git commit · "), "stale verdict should fall to the floor: {old}");
+        // (7) A FRESH but rambling verdict is trimmed to its first clause, not dumped
+        //     whole — the ls column wants the headline, not the whole paragraph.
+        worklog::record(&mk("s_wordy", "done: shipped the reranker; also refactored the loader; and cleaned up", false, now - 30));
+        let wordy = session::session_summary("s_wordy");
+        assert!(wordy.starts_with("done: shipped the reranker · "),
+            "a rambling verdict must be trimmed to its first clause: {wordy}");
+        // (8) "…summarizing…": while a fresh capture is in flight (marker recent) and
+        //     nothing fresh exists yet, the column says so; once it expires, the floor
+        //     takes over — the placeholder never lingers.
+        worklog::record(&mk("s_prog", "done: user exited terminal", false, now - 8 * 86_400));
+        worklog::mark_summarizing("s_prog", now - 5);
+        assert_eq!(session::session_summary("s_prog"), "…summarizing…",
+            "a fresh in-flight summary should show the placeholder");
+        worklog::mark_summarizing("s_prog", now - 9_999); // long past the TTL
+        assert_ne!(session::session_summary("s_prog"), "…summarizing…",
+            "an expired summarizing marker must give way to the floor");
         // Overflowing summaries wrap into a block under the column: greedy
         // word-wrap, overlong words hard-split, empty input → no lines.
         assert_eq!(
@@ -2380,7 +2630,7 @@ fn selfcheck() -> Result<()> {
             session::wrap_text("short", 20) == vec!["short"],
             "short summary should stay one line"
         );
-        std::env::remove_var("MARS_WORKLOG");
+        std::env::set_var("MARS_WORKLOG", &worklog_default); // back to the suite default
         let _ = std::fs::remove_file(&wl);
         let _ = std::fs::remove_file(std::env::temp_dir().join(format!("mars-worklog-{}", std::process::id())).with_file_name("mission.json"));
 
@@ -2403,6 +2653,7 @@ fn selfcheck() -> Result<()> {
         worklog::record(&worklog::WorkEntry {
             ts: 1000, session: "standalone".into(), tab: "train".into(),
             verdict: "failed: OOM at step 40".into(), failed: true, dur_secs: Some(300),
+            cwd: String::new(), command: None, exit: None, error_excerpt: None,
         });
         worklog::save_mission("standalone", "debugging the OOM in the training run", 1000);
         let mut app = App::new(None)?;
@@ -2417,7 +2668,7 @@ fn selfcheck() -> Result<()> {
                 && brief.contains("failed: OOM at step 40"),
             "briefing missing mission or journal lines: {brief}"
         );
-        std::env::remove_var("MARS_WORKLOG");
+        std::env::set_var("MARS_WORKLOG", &worklog_default); // back to the suite default
         let _ = std::fs::remove_file(&wl2);
         let _ = std::fs::remove_file(wl2.with_file_name("mission.json"));
         println!("[selfcheck] worklog + mission + expand PASS");
@@ -2431,6 +2682,15 @@ fn selfcheck() -> Result<()> {
         assert!(palette::Action::from_name("OpenDenylist").is_some());
         let clear = palette::Action::from_name("ClearCommandMemory").expect("action");
         assert!(clear.is_destructive(), "memory wipe must be confirmation-gated");
+        // OpenTuning: the knobs file opens in a buffer (self-seeding via load()).
+        let mut app = App::new(None)?;
+        app.run_action(palette::Action::OpenTuning);
+        let opened = app
+            .buffers
+            .values()
+            .any(|b| b.path.as_deref().is_some_and(|p| p.ends_with("tuning.json")));
+        assert!(opened, "OpenTuning did not open tuning.json in a buffer");
+        drop(app);
         println!("[selfcheck] memory actions ........... PASS");
     }
 
@@ -2746,11 +3006,24 @@ fn selfcheck() -> Result<()> {
             }
             false
         }
+        // A slow shell start can outlast term_with's fixed settle sleeps, so
+        // every screen-MODE precondition polls instead of asserting once (the
+        // "alt screen not entered" flake).
+        fn wait_mode(app: &mut App, tid: usize, cond: fn(&vt100::Screen) -> bool) -> bool {
+            for _ in 0..50 {
+                app.tick();
+                if cond(&app.terms.get(&tid).unwrap().screen()) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        }
 
         // (a) Alternate screen, no mouse reporting → arrows, not a silent no-op.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h'; cat\n");
-        assert!(app.terms.get(&tid).unwrap().screen().alternate_screen(), "alt screen not entered");
+        assert!(wait_mode(&mut app, tid, |s| s.alternate_screen()), "alt screen not entered");
         app.handle_mouse(wheel(true));
         assert!(wait_for(&mut app, tid, "^[[A^[[A^[[A"),
             "alt-screen wheel-up did not become arrow keys");
@@ -2759,6 +3032,7 @@ fn selfcheck() -> Result<()> {
         // (b) DECCKM set → application-cursor arrows (^[OA), not ^[[A.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h\\033[?1h'; cat\n");
+        assert!(wait_mode(&mut app, tid, |s| s.application_cursor()), "DECCKM not set");
         app.handle_mouse(wheel(true));
         assert!(wait_for(&mut app, tid, "^[OA^[OA^[OA"),
             "DECCKM wheel-up did not send application-cursor arrows");
@@ -2768,8 +3042,7 @@ fn selfcheck() -> Result<()> {
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1002h\\033[?1006h'; cat\n");
         assert!(
-            app.terms.get(&tid).unwrap().screen().mouse_protocol_mode()
-                != vt100::MouseProtocolMode::None,
+            wait_mode(&mut app, tid, |s| s.mouse_protocol_mode() != vt100::MouseProtocolMode::None),
             "mouse mode not entered"
         );
         app.handle_mouse(wheel(true));
@@ -2780,6 +3053,7 @@ fn selfcheck() -> Result<()> {
         // (d) Plain shell (no modes): the wheel still browses mars scrollback.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"seq 1 100\n");
+        assert!(wait_for(&mut app, tid, "100"), "seq output never arrived");
         app.handle_mouse(wheel(true));
         assert!(app.terms.get(&tid).unwrap().view_offset() > 0,
             "plain-shell wheel-up no longer scrolls mars scrollback");
@@ -2922,6 +3196,275 @@ fn selfcheck() -> Result<()> {
         assert_eq!(retrieval::MemoryMode::from_env().as_str(), "none");
         println!("[selfcheck] retrieval (bm25 + mode) ... PASS");
     }
+
+    // 43. The shift report — the save-state restore. Tier-0 triage table; batch
+    //     reply parsing; end-to-end keyless flow: watched pane fails while
+    //     detached → deterministic verdict → reattach overlay, failures first,
+    //     any key resumes, Enter types the suggestion; knob gates it all.
+    {
+        use briefing::{classify, triage, Verdict};
+        // Triage: exit codes are ground truth, tails refine.
+        assert_eq!(triage("all done", Some(0), false).verdict, Verdict::Done);
+        assert!(!triage("ok\n", Some(0), false).ambiguous, "clean exit should not need a model");
+        let t = triage("...", Some(137), false);
+        assert_eq!(t.verdict, Verdict::Failed);
+        assert!(t.text.contains("137") && t.ambiguous, "nonzero exit wants a modeled cause: {}", t.text);
+        assert_eq!(triage("Continue? [y/N]", None, true).verdict, Verdict::Blocked);
+        assert!(!triage("Continue? [y/N]", None, true).ambiguous);
+        assert_eq!(triage("CUDA out of memory. Tried to allocate", None, true).verdict, Verdict::Failed);
+        assert_eq!(triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).verdict, Verdict::Running);
+        assert!(!triage("epoch 3/10  loss 0.42  1.2 it/s", None, true).ambiguous);
+        assert!(triage("some quiet text", None, true).ambiguous, "quiet-alive is the model's case");
+        // Auto-watch noise gate: an idle shell / clean user-quit is NOT worth a
+        // verdict (this is the "user quit" flood fix); failures, blocks, nonzero
+        // exits, and real completed runs ARE.
+        use briefing::is_noteworthy;
+        assert!(!is_noteworthy("user@host:~/proj$ ", None), "idle prompt should be silent");
+        assert!(!is_noteworthy("$ exit\nexit", Some(0)), "clean user-quit should be silent");
+        assert!(!is_noteworthy("logout", Some(0)), "logout should be silent");
+        assert!(is_noteworthy("error: build failed\n$ ", None), "a failure must speak");
+        assert!(is_noteworthy("Continue? [y/N]", None), "a blocked prompt must speak");
+        assert!(is_noteworthy("segfault", Some(139)), "a nonzero exit must speak");
+        // A mars pane runs $SHELL, so a clean Some(0) exit is the shell ending
+        // (user left), never a completed run — a finished command is a QUIET
+        // (None) event and speaks only if it shows a failure/block.
+        assert!(!is_noteworthy("Finished in 3.2s\n$ ", Some(0)), "clean shell exit stays silent");
+        // Verdict-string classing (model/tier-0 authored prefixes).
+        assert_eq!(classify("blocked: wants a password", Verdict::Done), Verdict::Blocked);
+        assert_eq!(classify("failed: linker error", Verdict::Done), Verdict::Failed);
+        assert_eq!(classify("done: tests green", Verdict::Failed), Verdict::Done);
+        assert_eq!(briefing::fmt_secs(4212), "1h10m");
+
+        // End-to-end, keyless and hermetic: two watched panes conclude while
+        // detached — one fails, one succeeds — a third keeps running.
+        let mut app = App::new(None)?;
+        app.tuning.mission_briefing = 2;
+        app.tuning.mission_briefing_animate = 0; // instant reveal → deterministic render
+        app.tuning.watch_quiet_secs = 1000; // quiet timer out of the picture
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Char('!')))?;
+        typ(&mut app, "exit 3")?; // ends the pane's shell itself → real exit code
+        app.handle_key(k(KeyCode::Enter))?;
+        let fail_tid = match app.focused_pane().content {
+            pane::PaneContent::Terminal(id) => id,
+            _ => panic!("no terminal"),
+        };
+        app.run_action(palette::Action::WatchPane);
+        app.on_detach();
+        // Let the shell run and exit; drain events (queues the exit trigger,
+        // keyless fire produces the deterministic tier-0 verdict).
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.frame_tick += 3; // simulated time passes while detached
+            app.tick();
+            if app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false) {
+                break;
+            }
+        }
+        assert!(
+            app.watches.get(&fail_tid).and_then(|w| w.verdict.clone())
+                .map(|v| v.starts_with("failed"))
+                .unwrap_or(false),
+            "keyless exit-3 did not produce a deterministic failed verdict"
+        );
+        app.on_attach();
+        let rep = app.shift_report.as_ref().expect("no shift report after eventful away");
+        assert!(rep.rows.iter().any(|r| r.verdict == Verdict::Failed), "failed row missing");
+        assert_eq!(rep.rows.first().map(|r| r.verdict), Some(Verdict::Failed), "failures must lead");
+        // The narrative opens with the deterministic plain-English line (keyless
+        // → no model streams, so the template stands).
+        assert!(rep.narrative.to_lowercase().contains("failed"), "narrative missing the failure: {}", rep.narrative);
+        assert!(app.notices.is_empty() || app.shift_report.is_some(), "report should subsume notices");
+        // Renders as a full overlay: title, the briefing prose, the failure glyph.
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("MISSION BRIEFING"), "overlay title missing");
+        assert!(t.contains("✗"), "failure glyph missing from overlay");
+        assert!(t.to_lowercase().contains("welcome back"), "plain-English briefing missing from overlay");
+        // Any key resumes: swallowed, report gone, workspace intact.
+        app.handle_key(k(KeyCode::Char('x')))?;
+        assert!(app.shift_report.is_none(), "key did not dismiss the report");
+        // The streamed briefing: first ShiftDelta replaces the template, the rest
+        // append; ShiftDone stops the stream; an empty stream keeps a briefing.
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 1, mission: None,
+            rows: vec![
+                briefing::ReportRow {
+                    verdict: Verdict::Failed, tab: "train".into(), text: "failed: OOM".into(),
+                    ago_secs: None, dur_secs: None, term_id: None,
+                    cwd: None, exit: Some(137), error_excerpt: Some("CUDA out of memory".into()), settling: false,
+                },
+                briefing::ReportRow {
+                    verdict: Verdict::Done, tab: "build".into(), text: "training finished".into(),
+                    ago_secs: None, dur_secs: Some(3600), term_id: None, // long success → ★
+                    cwd: None, exit: None, error_excerpt: None, settling: false,
+                },
+            ],
+            suggestion: None, narrative: "2 failed.".into(),
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
+        });
+        // A four-block briefing (greeting / summary / action items / sign-off),
+        // blank-line separated, streams in and replaces the template. The good-news
+        // ★ and the sign-off (below the manifest) render.
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Welcome back, captain.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "The trainer OOM'd at epoch 3.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "Rerun with a smaller batch.\n\n".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDelta { text: "We'll get it, captain.".into() })?;
+        app.agent_tx.send(agent::AgentEvent::ShiftDone)?;
+        app.tick();
+        let rep = app.shift_report.as_ref().unwrap();
+        assert!(rep.narrative.starts_with("Welcome back, captain.") && rep.narrative.contains("We'll get it"),
+            "deltas did not replace+append the four-block briefing");
+        assert!(!rep.narrative_streaming, "ShiftDone did not stop the stream");
+        // Renders: the prose blocks, the failure "why" line, and the sign-off
+        // below the manifest (after the row glyphs).
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("Welcome back") && t.contains("OOM'd at epoch 3") && t.contains("smaller batch"),
+            "briefing blocks did not fully render");
+        assert!(t.contains("exit 137") && t.contains("CUDA out of memory"), "failure detail missing");
+        assert!(t.contains("We'll get it"), "sign-off did not render");
+        assert!(t.find("We'll get it").unwrap() > t.find("exit 137").unwrap(),
+            "sign-off must render below the manifest");
+        // Systems-board manifest: the severity stripe renders; a long success
+        // gets the good-news ★.
+        assert!(t.contains("▎"), "manifest severity stripe missing");
+        assert!(t.contains("★"), "good-news ★ on the long success missing");
+        app.shift_report = None;
+        // Fail-hide: the briefing call finishing with NO model output (error /
+        // timeout / tunnel down) dismisses the overlay — no bare stub is shown.
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 60, mission: None, rows: vec![], suggestion: None,
+            narrative: "Welcome back — all quiet.".into(),
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
+        });
+        app.agent_tx.send(agent::AgentEvent::ShiftDone)?; // no delta preceded it → failed call
+        app.tick();
+        assert!(app.shift_report.is_none(), "a failed briefing call must dismiss the overlay");
+        // Boot polish (animate=1): while the call is in flight a mission-control word
+        // flashes in place of the deterministic backup line, so the prose never
+        // visibly swaps a stub; and the model text types in behind a cursor rather
+        // than appearing whole. Both are gated on the animate knob.
+        app.tuning.mission_briefing_animate = 1;
+        app.shift_report = Some(briefing::ShiftReport {
+            away_secs: 5, mission: None, rows: vec![], suggestion: None,
+            narrative: "2 failed.".into(), // the deterministic backup — must NOT be shown
+            narrative_streaming: true, narrative_from_model: false, facts: String::new(),
+            stream_started_at: None, shown_at: std::time::Instant::now(),
+        });
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(briefing::BRIEF_LOADING.iter().any(|w| t.contains(w)),
+            "loading state should flash a mission-control word");
+        assert!(!t.contains("2 failed"), "the backup line must not show under the loading flash");
+        // Typewriter: with the stream just begun, the tail of a long briefing has not
+        // been revealed yet (it types in on the clock), though the chrome is already up.
+        if let Some(rep) = app.shift_report.as_mut() {
+            rep.narrative_from_model = true;
+            rep.narrative = "Welcome back, captain. This long briefing types itself in gradually behind a cursor, not all at once.".into();
+            rep.stream_started_at = Some(std::time::Instant::now());
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("MISSION BRIEFING"), "chrome should be up during the typewriter");
+        assert!(!t.contains("not all at once"), "typewriter must not reveal the tail instantly");
+        app.tuning.mission_briefing_animate = 0;
+        app.shift_report = None;
+        // Iteration mode: knob=2 greets on EVERY return, even a quiet one —
+        // the overlay is present with zero rows and a "welcome back" line.
+        let mut app = App::new(None)?;
+        app.tuning.mission_briefing = 2;
+        app.tuning.mission_briefing_animate = 0;
+        app.on_detach();
+        app.frame_tick += 20;
+        app.on_attach(); // nothing happened while away
+        let rep = app.shift_report.as_ref().expect("quiet return must still greet (iteration mode)");
+        assert!(rep.rows.is_empty(), "quiet return should have no rows");
+        assert!(rep.narrative.to_lowercase().contains("welcome back"), "quiet briefing missing greeting");
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("all quiet"), "quiet-return caption missing");
+        app.shift_report = None;
+        // Knob 1 = classic notice; knob 0 = nothing (digest still scoped).
+        let mut app = App::new(None)?;
+        app.tuning.mission_briefing = 1;
+        app.on_detach();
+        app.frame_tick += 10;
+        app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
+        app.on_attach();
+        assert!(app.shift_report.is_none(), "knob=1 must not build the overlay");
+        assert!(app.notices.iter().any(|n| n.text.contains("while away")), "knob=1 lost the notice");
+        let mut app = App::new(None)?;
+        app.tuning.mission_briefing = 0;
+        app.on_detach();
+        app.frame_tick += 10;
+        app.push_away(app::AwayKind::NeedsYou, "failed: x".into(), None);
+        app.on_attach();
+        assert!(app.shift_report.is_none() && app.notices.is_empty(), "knob=0 must be silent");
+        // Continuity: briefings are logged and the last one round-trips for the
+        // next return's "since last time." Session-scoped.
+        let bwl = std::env::temp_dir().join(format!("mars-brief-{}", std::process::id()));
+        std::env::set_var("MARS_WORKLOG", &bwl);
+        worklog::log_briefing("s1", "Welcome back.", "failed: OOM · done: build", 300, 1000);
+        worklog::log_briefing("s1", "Back again.", "done: OOM fixed", 60, 2000);
+        worklog::log_briefing("s2", "Other.", "blocked: deploy", 10, 1500);
+        let last = worklog::load_last_briefing("s1").expect("no briefing logged");
+        assert_eq!(last.facts, "done: OOM fixed", "load_last_briefing returned the wrong/older one");
+        assert_eq!(last.ts, 2000);
+        assert_eq!(worklog::load_last_briefing("s2").map(|p| p.facts).as_deref(), Some("blocked: deploy"),
+            "briefings leaked across sessions");
+        assert!(worklog::load_last_briefing("nope").is_none());
+        std::env::set_var("MARS_WORKLOG", &worklog_default);
+        let _ = std::fs::remove_file(&bwl);
+        let _ = std::fs::remove_file(bwl.with_file_name("briefings.jsonl"));
+        // Pure boot-reveal + clock helpers.
+        assert_eq!(briefing::fmt_clock(4212), "01:10:12");
+        assert_eq!(briefing::fmt_clock(90061), "1:01:01:01");
+        let full = briefing::reveal_at(u128::MAX, 3); // animation off → everything up
+        assert!(full.rows == 3 && full.signoff, "animate-off must reveal all");
+        let start = briefing::reveal_at(0, 3); // t=0 → chrome only, rows not yet
+        assert!(start.rows == 0 && !start.signoff, "at t=0 the manifest has not cascaded in");
+        println!("[selfcheck] mission briefing (save-state) PASS");
+    }
+
+    // 43b. Goals captured at detach: parse, round-trip, tier route, and feed the
+    //      return briefing. The capture LLM call itself is gated on a key (never
+    //      fires in the hermetic suite), so we test the deterministic seams.
+    {
+        // Parse tolerates list markers and caps at three.
+        let g = agent::parse_goals("1. get the auth test green\n- finish numpy upgrade\n* land OOM fix\nextra");
+        assert_eq!(g, vec!["get the auth test green", "finish numpy upgrade", "land OOM fix"],
+            "goal parse/markers/cap wrong: {g:?}");
+        assert!(agent::parse_goals("\n\n").is_empty(), "blank capture → no goals");
+        // Round-trip, session-scoped.
+        let gwl = std::env::temp_dir().join(format!("mars-goals-{}", std::process::id()));
+        std::env::set_var("MARS_WORKLOG", &gwl);
+        worklog::save_goals("demo", &["ship the overlay".into(), "fix the OOM".into()], 42);
+        assert_eq!(worklog::load_goals("demo"), vec!["ship the overlay", "fix the OOM"], "goals round-trip");
+        assert!(worklog::load_goals("other").is_empty(), "goals leaked across sessions");
+        // Routes at the cheap tier; the tag is pinned in TASKS (checked in 29h).
+        assert_eq!(tiers::model_for("groq", "capture_goals", "x"), "llama-3.1-8b-instant",
+            "capture_goals must route to low");
+        // The Goals event persists what the model returned.
+        let mut app = App::new(None)?;
+        app.agent_tx.send(agent::AgentEvent::Goals { goals: vec!["debug the daemon".into()] })?;
+        app.tick();
+        assert_eq!(worklog::load_goals(&app.session_label()), vec!["debug the daemon"],
+            "Goals event did not persist");
+        std::env::set_var("MARS_WORKLOG", &worklog_default);
+        let _ = std::fs::remove_file(&gwl);
+        let _ = std::fs::remove_file(gwl.with_file_name("goals.json"));
+        println!("[selfcheck] goals capture + recall ... PASS");
+    }
+
+    let _ = std::fs::remove_file(&worklog_default);
+    std::env::remove_var("MARS_WORKLOG");
 
     println!("\nALL SELFCHECKS PASSED ✓");
     Ok(())

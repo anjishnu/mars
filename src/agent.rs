@@ -54,6 +54,12 @@ pub enum AgentEvent {
     BgDone,
     /// W3 shell translate: English → one shell command (fills the SH bar).
     ShellTranslation { command: String, call_id: u64 },
+    /// Shift report: one streamed chunk of the plain-English situation briefing.
+    ShiftDelta { text: String },
+    /// Shift report: the briefing finished streaming.
+    ShiftDone,
+    /// Goals captured at detach — what the user was working toward.
+    Goals { goals: Vec<String> },
     Error(String),
 }
 
@@ -181,27 +187,68 @@ impl std::error::Error for RateLimited {}
 /// free Groq/Gemini tiers. Position 0 is what `from_env` picks; the rest are
 /// rotation targets when it rate-limits. Cheap defaults per provider
 /// (right-size, don't reach for the biggest); override any with MARS_LLM_MODEL.
-fn provider_chain() -> Vec<(String, &'static str, &'static str, &'static str)> {
-    let mut chain = Vec::new();
+/// One resolved provider: (key, provider tag, base url, default model). URL and
+/// model are owned Strings because enterprise providers compute them from region
+/// / endpoint / deployment env vars rather than a fixed literal.
+type Provider = (String, &'static str, String, String);
+
+fn provider_chain() -> Vec<Provider> {
+    let mut chain: Vec<Provider> = Vec::new();
+    let p = |k: String, tag: &'static str, url: &str, model: &str| {
+        (k, tag, url.to_string(), model.to_string())
+    };
     if let Ok(k) = env_var("LLM_KEY") {
-        chain.push((k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"));
+        chain.push(p(k, "custom", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"));
+    }
+    // Enterprise gateways win over consumer keys — a box deliberately configured
+    // for Bedrock/Azure means to use it. Bearer/api-key auth only (no SigV4).
+    if let Ok(k) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+        // Bedrock Converse API. cfg.url holds the region base; chat_bedrock fills
+        // the /model/{id}/converse path. Default: a cross-region Haiku profile.
+        let region = env_var("BEDROCK_REGION")
+            .or_else(|_| std::env::var("AWS_REGION"))
+            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+            .unwrap_or_else(|_| "us-east-1".to_string());
+        chain.push(p(
+            k,
+            "bedrock",
+            &format!("https://bedrock-runtime.{region}.amazonaws.com"),
+            "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        ));
+    }
+    if let (Ok(k), Ok(endpoint)) =
+        (std::env::var("AZURE_OPENAI_API_KEY"), std::env::var("AZURE_OPENAI_ENDPOINT"))
+    {
+        // Azure OpenAI / Foundry: OpenAI-compatible body, but api-key header and a
+        // deployment+api-version URL. The "model" is the deployment name.
+        let deployment = env_var("AZURE_DEPLOYMENT")
+            .or_else(|_| env_var("LLM_MODEL"))
+            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        let version = env_var("AZURE_API_VERSION").unwrap_or_else(|_| "2024-10-21".to_string());
+        let base = endpoint.trim_end_matches('/');
+        chain.push((
+            k,
+            "azure",
+            format!("{base}/openai/deployments/{deployment}/chat/completions?api-version={version}"),
+            deployment,
+        ));
     }
     if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
         // Claude — Anthropic's own Messages API (not OpenAI-compatible; handled
         // in chat()). Haiku is the cheap/fast default.
-        chain.push((k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5"));
+        chain.push(p(k, "anthropic", "https://api.anthropic.com", "claude-haiku-4-5"));
     }
     if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        chain.push((k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
+        chain.push(p(k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
     }
     if let Ok(k) = std::env::var("GROQ_API_KEY") {
         // Qwen3-32B: strong open model on Groq's fast free tier.
-        chain.push((k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
+        chain.push(p(k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
     }
     if let Ok(k) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY")) {
         // Flash-Lite: cheapest + highest free-tier limits. (Pinned dated
         // versions age out of the free tier, so track the lite line.)
-        chain.push((
+        chain.push(p(
             k,
             "gemini",
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -261,8 +308,8 @@ impl AgentConfig {
             provider_chain().into_iter().next().unwrap_or((
                 String::new(),
                 "none",
-                "https://api.groq.com/openai/v1",
-                "llama-3.1-8b-instant",
+                "https://api.groq.com/openai/v1".to_string(),
+                "llama-3.1-8b-instant".to_string(),
             ));
 
         // Explicit URL/model overrides apply to any provider.
@@ -289,9 +336,13 @@ fn system_prompt(registry: &str, screen: &str) -> String {
     crate::prompts::ASK_SYSTEM.replace("{registry}", registry).replace("{screen}", screen)
 }
 
-/// Build the chat messages: system + up to the last 12 conversation turns +
-/// the new question. Extracted so tests can assert history is really sent.
-pub fn build_messages(
+/// Build the ask messages. The fixed system-message order is the assembly
+/// contract (selfcheck-pinned): base prompt, then docs-context on a retrieval
+/// hit, then the persona ALWAYS LAST — positionally under every rule it is
+/// forbidden to override. Persona and docs never travel through `.replace()`.
+/// Then up to the last 12 turns and the new question. Pure, so tests can
+/// assert the exact shape.
+pub fn build_ask_messages(
     registry: &str,
     screen: &str,
     history: &[(String, String)],
@@ -300,6 +351,12 @@ pub fn build_messages(
     let mut messages = vec![serde_json::json!({
         "role": "system", "content": system_prompt(registry, screen)
     })];
+    if let Some(ctx) = crate::retrieval::docs_context_for(question) {
+        messages.push(serde_json::json!({ "role": "system", "content": ctx }));
+    }
+    if let Some(p) = crate::persona::system_message() {
+        messages.push(p);
+    }
     let start = history.len().saturating_sub(12);
     for (role, content) in &history[start..] {
         messages.push(serde_json::json!({ "role": role, "content": content }));
@@ -318,14 +375,10 @@ pub fn ask(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     std::thread::spawn(move || {
-        // Memory (Axis B): retrieve from Mars's OWN knowledge (docs + tunable knobs)
-        // so the agent can answer "how do I…" and propose self-reconfiguration
-        // accurately. The action registry is already in the base prompt.
+        // Memory (Axis B) and voice both live inside the builder — one place
+        // owns the system-message order.
         let mode = crate::retrieval::MemoryMode::from_env();
-        let mut messages = build_messages(&registry, &screen, &history, &question);
-        if let Some(ctx) = crate::retrieval::docs_context_for(&question) {
-            messages.insert(1, serde_json::json!({ "role": "system", "content": ctx }));
-        }
+        let messages = build_ask_messages(&registry, &screen, &history, &question);
         // Stream: tokens render as they arrive; the final Answer still carries
         // the complete, directive-parsed text.
         let _ = tx.send(AgentEvent::AnswerStart);
@@ -376,10 +429,7 @@ pub fn ask(
 /// Background tab-naming: tiny prompt, no registry, quiet failure.
 pub fn auto_name(cfg: AgentConfig, tab_id: usize, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::AUTO_NAME_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": screen }),
-        ];
+        let messages = format_task_messages(crate::prompts::AUTO_NAME_SYSTEM, &screen);
         // Task tag matches the ring's `auto_name` key (was "auto-name", which
         // silently skipped tier routing).
         if let Ok(text) = chat(&cfg, messages, "auto_name") {
@@ -402,15 +452,7 @@ pub fn watch_summary(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     std::thread::spawn(move || {
-        let hint = match reason {
-            crate::app::WatchReason::Exit => crate::prompts::WATCH_HINT_EXIT,
-            crate::app::WatchReason::Quiet => crate::prompts::WATCH_HINT_QUIET,
-        };
-        let messages = vec![
-            serde_json::json!({ "role": "system",
-                "content": crate::prompts::WATCH_SYSTEM.trim_end().replace("{hint}", hint.trim_end()) }),
-            serde_json::json!({ "role": "user", "content": tail }),
-        ];
+        let messages = build_watch_messages(reason, &tail);
         match chat(&cfg, messages, "watch") {
             Ok(text) => {
                 let verdict = text.trim().lines().next().unwrap_or("").trim().to_string();
@@ -430,15 +472,30 @@ pub fn watch_summary(
     });
 }
 
+/// Watch is a VOICE task: the verdict is prose the user reads many times a
+/// day, so the persona rides along — bounded by WATCH_SYSTEM's one-line rule,
+/// which the persona preamble forbids overriding. Pure, for the selfcheck.
+pub fn build_watch_messages(reason: crate::app::WatchReason, tail: &str) -> Vec<serde_json::Value> {
+    let hint = match reason {
+        crate::app::WatchReason::Exit => crate::prompts::WATCH_HINT_EXIT,
+        crate::app::WatchReason::Quiet => crate::prompts::WATCH_HINT_QUIET,
+    };
+    let mut messages = vec![serde_json::json!({ "role": "system",
+        "content": crate::prompts::WATCH_SYSTEM.trim_end().replace("{hint}", hint.trim_end()) })];
+    if let Some(p) = crate::persona::system_message() {
+        messages.push(p);
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": tail }));
+    messages
+}
+
 /// Background mission inference: read the recent work-journal snapshots and
 /// name, in one line, what the user is working on. Quiet failure — a mission
-/// is a nicety, never worth a notice.
+/// is a nicety, never worth a notice. FORMAT task: no persona, its output is
+/// re-ingested (ls summary, briefings, prompts).
 pub fn infer_mission(cfg: AgentConfig, snapshots: Vec<String>, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::MISSION_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": snapshots.join("\n") }),
-        ];
+        let messages = format_task_messages(crate::prompts::MISSION_SYSTEM, &snapshots.join("\n"));
         if let Ok(text) = chat(&cfg, messages, "mission") {
             let mission = text.trim().lines().next().unwrap_or("").trim().to_string();
             if !mission.is_empty() {
@@ -452,10 +509,7 @@ pub fn infer_mission(cfg: AgentConfig, snapshots: Vec<String>, tx: mpsc::Sender<
 /// Background session-naming — like tab naming but for the whole session.
 pub fn name_session(cfg: AgentConfig, screen: String, tx: mpsc::Sender<AgentEvent>) {
     std::thread::spawn(move || {
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": crate::prompts::NAME_SESSION_SYSTEM.trim_end() }),
-            serde_json::json!({ "role": "user", "content": screen }),
-        ];
+        let messages = format_task_messages(crate::prompts::NAME_SESSION_SYSTEM, &screen);
         // Tag matches the ring's `name_session` key (was "session-name").
         if let Ok(text) = chat(&cfg, messages, "name_session") {
             let name = kebab(&text);
@@ -487,6 +541,117 @@ fn is_reasoning_model(model: &str) -> bool {
         .any(|p| m.contains(p))
 }
 
+/// Every task tag a call site sends. The selfcheck pins each to a tiers.json
+/// default key so a tag rename can't silently fall through to the provider
+/// default model again (deliberate non-members: `ask_escalated`, `remote`).
+pub const TASKS: &[&str] = &[
+    "ask", "translate", "watch", "mission", "auto_name", "name_session", "shift_brief",
+    "capture_goals",
+];
+
+/// Parse a goal-capture reply into 1-3 clean goal lines (strips list markers,
+/// caps the count). Pure.
+pub fn parse_goals(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' '))
+                .trim()
+                .to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect()
+}
+
+/// Capture the user's active goals at detach: one low-tier FORMAT call over the
+/// current pane evidence. Quiet failure — goals are a nicety, and a remote
+/// detach may find the tunnel already gone.
+pub fn capture_goals(cfg: AgentConfig, evidence: String, tx: mpsc::Sender<AgentEvent>) {
+    std::thread::spawn(move || {
+        let system = crate::prompts::CAPTURE_GOALS.trim_end().replace("{evidence}", &evidence);
+        let messages = format_task_messages(&system, "What am I working on?");
+        if let Ok(text) = chat(&cfg, messages, "capture_goals") {
+            let goals = parse_goals(&text);
+            if !goals.is_empty() {
+                let _ = tx.send(AgentEvent::Goals { goals });
+            }
+        }
+        let _ = tx.send(AgentEvent::BgDone);
+    });
+}
+
+/// The shift report's plain-English situation briefing — the star of the reattach
+/// overlay. A single VOICE call over the deterministic row evidence, so the
+/// persona applies (the reply is displayed as prose, never machine-parsed, so
+/// there's no format to corrupt). Streams token by token into the overlay; a
+/// non-streaming provider (broker) delivers it in one delta. On failure the
+/// overlay keeps its deterministic templated narrative.
+pub fn shift_brief(
+    cfg: AgentConfig,
+    away: String,
+    mission: String,
+    prev: String,
+    evidence: String,
+    tx: mpsc::Sender<AgentEvent>,
+) {
+    std::thread::spawn(move || {
+        let system = crate::prompts::SHIFT_BRIEF
+            .trim_end()
+            .replace("{away}", &away)
+            .replace("{mission}", if mission.is_empty() { "(none inferred)" } else { &mission })
+            .replace("{prev}", if prev.is_empty() { "(this is the first briefing)" } else { &prev })
+            .replace("{evidence}", &evidence);
+        let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
+        if let Some(p) = crate::persona::system_message() {
+            messages.push(p); // VOICE task: the witty mission-control voice applies
+        }
+        messages.push(serde_json::json!({ "role": "user", "content": "Report." }));
+        let streamed = std::cell::Cell::new(false);
+        let mut on_delta = |d: &str| {
+            streamed.set(true);
+            let _ = tx.send(AgentEvent::ShiftDelta { text: d.to_string() });
+        };
+        match chat_with_id_streaming(&cfg, messages, "shift_brief", "n/a", &mut on_delta) {
+            Ok((text, _)) if !streamed.get() && !text.trim().is_empty() => {
+                // A non-streaming provider (broker) never fired the sink — deliver
+                // the whole briefing as one delta so the overlay shows it.
+                let _ = tx.send(AgentEvent::ShiftDelta { text });
+            }
+            _ => {} // streamed already, empty, or errored (keep the templated line)
+        }
+        let _ = tx.send(AgentEvent::ShiftDone);
+        let _ = tx.send(AgentEvent::BgDone);
+    });
+}
+
+/// FORMAT-task builder for translate: machine-parsed output, so the persona
+/// NEVER appears here (selfcheck-pinned). Pure.
+pub fn build_translate_messages(
+    reasoning_cap: &str,
+    examples_block: &str,
+    request: &str,
+    screen: &str,
+) -> Vec<serde_json::Value> {
+    let system = crate::prompts::TRANSLATE_SYSTEM
+        .trim_end()
+        .replace("{reasoning_cap}", reasoning_cap)
+        .replace("{examples_block}", examples_block);
+    vec![
+        serde_json::json!({ "role": "system", "content": system }),
+        serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
+    ]
+}
+
+/// Shared shape of the remaining FORMAT tasks (naming, mission): one static
+/// system prompt + one user payload — persona-free by construction.
+pub fn format_task_messages(system: &str, user: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({ "role": "system", "content": system.trim_end() }),
+        serde_json::json!({ "role": "user", "content": user }),
+    ]
+}
+
 pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow::Result<(String, u64)> {
     let mode = crate::retrieval::MemoryMode::from_env();
     let examples = crate::retrieval::fewshot_for(request);
@@ -507,15 +672,10 @@ pub fn translate_once(cfg: &AgentConfig, request: &str, screen: &str) -> anyhow:
             crate::prompts::TRANSLATE_EXAMPLES.trim_end().replace("{examples}", &examples)
         )
     };
-    let system = crate::prompts::TRANSLATE_SYSTEM
-        .trim_end()
-        .replace("{reasoning_cap}", &reasoning_cap)
-        .replace("{examples_block}", &examples_block);
-    let messages = vec![
-        serde_json::json!({ "role": "system", "content": system }),
-        serde_json::json!({ "role": "user", "content": format!("SCREEN:\n{screen}\n\nREQUEST: {request}") }),
-    ];
-    let (text, call_id) = chat_with_id(cfg, messages, "shell", mode.as_str())?;
+    let messages = build_translate_messages(&reasoning_cap, &examples_block, request, screen);
+    // Tag must match the tiers.json key ("translate") — "shell" routed to the
+    // provider default model for months before anyone noticed.
+    let (text, call_id) = chat_with_id(cfg, messages, "translate", mode.as_str())?;
     let command = text
         .trim()
         .trim_matches('`')
@@ -696,10 +856,10 @@ fn attempt(
             }
             None => None,
         };
-        if cfg.provider == "anthropic" {
-            chat_anthropic(cfg, messages, provider_sink)
-        } else {
-            chat_openai(cfg, messages, provider_sink)
+        match cfg.provider {
+            "anthropic" => chat_anthropic(cfg, messages, provider_sink),
+            "bedrock" => chat_bedrock(cfg, messages, provider_sink),
+            _ => chat_openai(cfg, messages, provider_sink),
         }
     };
     let latency_ms = start.elapsed().as_millis() as u64;
@@ -739,7 +899,14 @@ fn chat_openai(
     messages: &[serde_json::Value],
     sink: DeltaSink,
 ) -> anyhow::Result<(String, u64, u64)> {
-    let url = format!("{}/chat/completions", cfg.url);
+    // Azure bakes deployment + api-version into cfg.url (already a complete
+    // endpoint) and authenticates with an `api-key` header, not a bearer token.
+    let azure = cfg.provider == "azure";
+    let url = if azure {
+        cfg.url.clone()
+    } else {
+        format!("{}/chat/completions", cfg.url)
+    };
     let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages,
@@ -750,19 +917,22 @@ fn chat_openai(
         body["stream"] = serde_json::json!(true);
         // Usage-in-final-chunk is an opt-in extension; only request it where
         // it's known-supported (other shims reject unknown fields).
-        if matches!(cfg.provider, "openai" | "groq") {
+        if matches!(cfg.provider, "openai" | "groq" | "azure") {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
     }
 
     // Bound the call so a stalled connection surfaces as an error instead of
     // hanging the agent (and the spinner) forever.
-    let resp = match ureq::post(&url)
+    let mut req = ureq::post(&url)
         .timeout(std::time::Duration::from_secs(30))
-        .set("Authorization", &format!("Bearer {}", cfg.key))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-    {
+        .set("Content-Type", "application/json");
+    req = if azure {
+        req.set("api-key", &cfg.key)
+    } else {
+        req.set("Authorization", &format!("Bearer {}", cfg.key))
+    };
+    let resp = match req.send_json(body) {
         Ok(r) => r,
         // Pull the real message out of the error body (bad key, quota, etc.).
         // Gemini wraps it in a JSON array: [{"error":{"message": …}}].
@@ -945,5 +1115,94 @@ fn chat_anthropic(
         .unwrap_or_default();
     let pt = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let ct = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    Ok((text, pt, ct))
+}
+
+/// The Bedrock Converse request body from OpenAI-style messages: system split
+/// into a top-level `system` array, each turn's content wrapped as `[{text}]`,
+/// generation params under `inferenceConfig`. Pure, so the selfcheck can pin
+/// the shape without a network call.
+pub fn build_bedrock_body(
+    messages: &[serde_json::Value],
+    max_tokens: u32,
+    temperature: f64,
+) -> serde_json::Value {
+    let mut system: Vec<serde_json::Value> = Vec::new();
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        let content = m["content"].as_str().unwrap_or("");
+        if m["role"].as_str() == Some("system") {
+            system.push(serde_json::json!({ "text": content }));
+        } else {
+            msgs.push(serde_json::json!({
+                "role": m["role"].as_str().unwrap_or("user"),
+                "content": [{ "text": content }],
+            }));
+        }
+    }
+    serde_json::json!({
+        "system": system,
+        "messages": msgs,
+        "inferenceConfig": { "maxTokens": max_tokens, "temperature": temperature },
+    })
+}
+
+/// AWS Bedrock via the Converse API. Bearer auth (a Bedrock API key — no SigV4),
+/// modelId in the URL path, a provider-neutral body shape that covers every
+/// Bedrock model (Claude, Llama, Mistral, Nova). Non-streaming for now: the
+/// `converse-stream` endpoint uses AWS binary event-stream framing, not SSE — so
+/// the sink is accepted and ignored (the answer renders at once), exactly like
+/// the broker path.
+fn chat_bedrock(
+    cfg: &AgentConfig,
+    messages: &[serde_json::Value],
+    _sink: DeltaSink,
+) -> anyhow::Result<(String, u64, u64)> {
+    // cfg.url is the region base; the modelId (cfg.model) goes in the path.
+    let url = format!("{}/model/{}/converse", cfg.url, cfg.model);
+    let body = build_bedrock_body(messages, cfg.max_tokens, cfg.temperature);
+    let resp = match ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("Authorization", &format!("Bearer {}", cfg.key))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            let api_msg = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|j| j["message"].as_str().map(str::to_string));
+            let msg = match code {
+                429 => "rate limit / throttled (Bedrock) — wait and retry, or switch model \
+                        with MARS_LLM_MODEL."
+                    .to_string(),
+                401 | 403 => format!(
+                    "auth failed — check AWS_BEARER_TOKEN_BEDROCK and the region/model access. ({})",
+                    api_msg.as_deref().unwrap_or("invalid credentials")
+                ),
+                _ => api_msg.unwrap_or_else(|| format!("HTTP {code}")),
+            };
+            if code == 429 {
+                return Err(anyhow::Error::new(RateLimited(msg)));
+            }
+            anyhow::bail!("{msg}");
+        }
+        Err(e) => anyhow::bail!("{e}"),
+    };
+
+    let json: serde_json::Value = resp.into_json()?;
+    if let Some(msg) = json["message"].as_str() {
+        // Converse error bodies are `{ "message": … }`.
+        if json["output"].is_null() {
+            anyhow::bail!("{msg}");
+        }
+    }
+    let text = json["output"]["message"]["content"]
+        .as_array()
+        .map(|blocks| blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""))
+        .unwrap_or_default();
+    let pt = json["usage"]["inputTokens"].as_u64().unwrap_or(0);
+    let ct = json["usage"]["outputTokens"].as_u64().unwrap_or(0);
     Ok((text, pt, ct))
 }

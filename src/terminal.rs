@@ -19,10 +19,14 @@ pub enum TermEvent {
 pub struct Term {
     /// The shell has exited; the pane shows a notice until the user closes it.
     pub exited: bool,
+    /// Where the shell was spawned (the work journal's cwd). The shell may
+    /// `cd` later — a PTY can't see that without shell integration, so this
+    /// is honest spawn-time truth, not a live value.
+    pub spawn_cwd: Option<std::path::PathBuf>,
     parser: Arc<Mutex<vt100::Parser>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    _child: Box<dyn Child + Send + Sync>,
+    child: Box<dyn Child + Send + Sync>,
     rows: u16,
     cols: u16,
     /// How far back the view is scrolled (0 = live). Mirrors the vt100 state.
@@ -55,7 +59,8 @@ pub fn spawn(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let mut cmd = CommandBuilder::new(shell);
-    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+    let spawn_cwd = cwd.filter(|d| d.is_dir());
+    if let Some(dir) = &spawn_cwd {
         cmd.cwd(dir);
     }
     // Mark the shell as living inside this Mars session, so a nested `mars <file>`
@@ -93,10 +98,11 @@ pub fn spawn(
 
     Ok(Term {
         exited: false,
+        spawn_cwd,
         parser,
         writer,
         master: pair.master,
-        _child: child,
+        child,
         rows,
         cols,
         view_offset: 0,
@@ -108,7 +114,7 @@ pub fn spawn(
 /// the child process tree with the pane, never leave it running invisibly.
 impl Drop for Term {
     fn drop(&mut self) {
-        let _ = self._child.kill();
+        let _ = self.child.kill();
     }
 }
 
@@ -116,6 +122,12 @@ impl Term {
     pub fn send_bytes(&mut self, bytes: &[u8]) {
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
+    }
+
+    /// The shell's exit code, if it has exited and the OS reported one —
+    /// available once the reader thread has seen EOF (watch-on-exit time).
+    pub fn exit_code(&mut self) -> Option<i32> {
+        self.child.try_wait().ok().flatten().map(|s| s.exit_code() as i32)
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {

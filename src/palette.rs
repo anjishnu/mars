@@ -77,6 +77,10 @@ pub enum Action {
     ClearCommandMemory,
     /// Open the prompt-redaction denylist in the editor.
     OpenDenylist,
+    /// Open tuning.json — every behavioral knob, self-describing — in the editor.
+    OpenTuning,
+    /// Open the assistant's voice file (~/.mars/persona.md) in the editor.
+    OpenPersona,
     /// Detach when in a session (nothing is lost); actually exits standalone.
     Quit,
     /// End the session for good — the deleting verb (confirm-gated).
@@ -149,6 +153,8 @@ impl Action {
             Action::OpenCommandMemory  => "open command memory",
             Action::ClearCommandMemory => "forget all commands",
             Action::OpenDenylist       => "open redaction denylist",
+            Action::OpenTuning         => "open tuning knobs",
+            Action::OpenPersona        => "open persona (voice)",
             Action::Quit               => "quit (detach)",
             Action::KillSession        => "kill session",
         }
@@ -238,6 +244,8 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Open command memory", Action::OpenCommandMemory, "See and edit everything the agent remembers (delete lines to forget)"),
         MenuItem::run_desc("Forget all commands", Action::ClearCommandMemory, "Erase the agent's remembered commands (asks first)"),
         MenuItem::run_desc("Open redaction denylist", Action::OpenDenylist, "Edit the strings always redacted from LLM prompts"),
+        MenuItem::run_desc("Open tuning knobs", Action::OpenTuning, "Edit every behavioral knob (tuning.json) — each explains itself"),
+        MenuItem::run_desc("Open persona", Action::OpenPersona, "Edit the voice the assistant replies in — style only, never behavior"),
         MenuItem::run_desc("Detach session", Action::Detach,      "Disconnect; the session keeps running (reattach: mars attach)"),
         MenuItem::run_desc("Rename session", Action::RenameSession, "Rename this session (also: mars rename <old> <new>)"),
         MenuItem::run_desc("Refresh file index", Action::RefreshIndex, "Re-scan the project for the file tree/picker"),

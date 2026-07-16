@@ -22,3 +22,7 @@ pub const DOCS_CONTEXT_PREAMBLE: &str = include_str!("prompts/docs_context_pream
 pub const CURSOR_INSERT: &str = include_str!("prompts/cursor_insert.md");
 pub const EXPLAIN_THIS: &str = include_str!("prompts/explain_this.md");
 pub const EXPLAIN_FAILURE: &str = include_str!("prompts/explain_failure.md");
+pub const PERSONA_PREAMBLE: &str = include_str!("prompts/persona_preamble.md");
+pub const PERSONA_DEFAULT: &str = include_str!("prompts/persona_default.md");
+pub const SHIFT_BRIEF: &str = include_str!("prompts/shift_brief.md");
+pub const CAPTURE_GOALS: &str = include_str!("prompts/capture_goals.md");

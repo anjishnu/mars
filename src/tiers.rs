@@ -47,6 +47,11 @@ impl Default for Tiers {
                 ("name_session", "low"),
                 ("mission", "low"),
                 ("watch", "mid"),
+                // The reattach situation briefing: a short plain-English summary
+                // — cheap tier is plenty, it's reading deterministic evidence.
+                ("shift_brief", "low"),
+                // Goal capture at detach: a tiny "name what's in flight" call.
+                ("capture_goals", "low"),
                 ("translate", "mid"),
                 ("ask", "high"),
             ]),
@@ -71,6 +76,15 @@ impl Default for Tiers {
                     ("low", "gemini-3.1-flash-lite"),
                     ("mid", "gemini-3.1-flash-lite"),
                     ("high", "gemini-3.1-flash"),
+                ])),
+                // Bedrock cross-region inference profiles (modelIds are stable,
+                // so a real ladder works). Azure has no default block: its
+                // "models" are user-named deployments, so it falls through to the
+                // single configured deployment unless the user adds tiers.json.
+                ("bedrock", m(&[
+                    ("low", "us.anthropic.claude-3-5-haiku-20241022-v1:0"),
+                    ("mid", "us.anthropic.claude-sonnet-4-20250514-v1:0"),
+                    ("high", "us.anthropic.claude-opus-4-20250514-v1:0"),
                 ])),
             ]
             .into_iter()

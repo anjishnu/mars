@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.4.0
+
+The mission-aware release: reattaching becomes a save-state restore narrated by
+mission control, the assistant gains a configurable voice, and the work journal
+starts carrying outcomes, not just verdicts.
+
+### Added
+- **Mission Briefing**: reattach to a session where things happened and the
+  screen boots up like a console coming online — the MARS wordmark, a mission
+  clock (`T+ HH:MM:SS`) and a status ribbon (`✗2 ⏸1 ✓3`), then a plain-English
+  situation report in the mission-control voice that types itself in behind a
+  cursor ("Welcome back, captain. The trainer went down at epoch 3 — CUDA OOM,
+  needs a smaller batch before you relaunch. The build came home green."),
+  then a systems-board manifest of every workstream (failures first, then
+  blocked ⏸, done, running) with a left severity stripe and a "why" line
+  (cwd · exit · error) under anything that failed. A long run that finished
+  clean earns a ★ and renders in teal; the briefing closes with a one-line
+  sign-off. Each briefing is logged, so the next return reports progress
+  against the last ("the OOM you were chasing is still red"). The prose is one
+  low-tier call that streams into an already-on-screen frame — zero perceived
+  latency — and any key resumes exactly where you left off. Shows only when
+  something happened. Knobs: `mission_briefing` (2 = full screen [default],
+  1 = one-line notice, 0 = off), `mission_briefing_animate` (boot-up vs.
+  instant, for thin SSH / reduced motion), `mission_briefing_type_ms`
+  (typewriter speed).
+- **Goal tracking**: when you detach, the agent captures what you were working
+  toward (from the live panes + recent journal), so the reattach briefing
+  reports progress against it — "you were trying to get the auth test green;
+  it's still failing." Knob `goal_tracking` (default on).
+- **Verdict triage ladder**: watch verdicts now escalate one way — free
+  deterministic heuristics (exit codes, error/blocked/progress tail shapes),
+  then ONE batched low-tier model call for ambiguous rows only. A mars with no
+  API key at all now produces deterministic verdicts instead of silence, and
+  the report renders instantly with model text streaming in afterwards
+  ("telemetry coming in").
+- **Auto-watch**: panes that stay busy past `watch_min_active_secs` (10s) are
+  watched automatically — the fleet reaches verdicts without arming anything.
+  The pane you're looking at is never summarized. A long run that finishes
+  clean now surfaces as a win (teal ★), not just failures. Knob `auto_watch`.
+- **Blocked verdicts**: a pane waiting on your input is its own class (⏸),
+  sorted right after failures in notices and the report.
+- **Persona**: the assistant speaks in a configurable voice
+  (`~/.mars/persona.md`, "Open persona" in the command bar) — default: mission
+  control addressing the ship's captain, in plain sentence case. Style only: it
+  structurally cannot change what the agent does. Empty file turns it off.
+- **Outcome-carrying work journal**: watch records now include cwd, the
+  command mars ran, the exit code, and a redacted error excerpt on failure —
+  the substrate for failure→fix recall. Journal self-compacts
+  (`worklog_max_lines`).
+- **AWS Bedrock + Azure OpenAI/Foundry**: MARS now speaks to enterprise model
+  gateways. Set `AWS_BEARER_TOKEN_BEDROCK` (+ `AWS_REGION`) to use any Bedrock
+  model through the Converse API, or `AZURE_OPENAI_API_KEY` +
+  `AZURE_OPENAI_ENDPOINT` (+ `MARS_AZURE_DEPLOYMENT`) for Azure. Bearer/api-key
+  auth only — no AWS SigV4, so the single static binary stays dependency-light.
+  Both slot into the provider cascade (rotation + tiering) and work over the ssh
+  broker with the key never leaving home. (Bedrock is non-streaming for now.)
+- **Open tuning knobs** joins the command bar.
+
+### Fixed
+- **`mars ls` summaries were often blank, stale, or rambling**: the column read
+  files only a fire-and-forget LLM call writes, so a skipped or failed call left
+  it empty — and a days-old, verbose model verdict could show as if it were
+  current state. Now every headline tier is age-gated (a stale line ages out),
+  rambling verdicts are trimmed to their first clause, and a deterministic floor
+  (`dir · command · ago`) keeps a live session's column from ever going blank —
+  no LLM call required. While a fresh summary is being generated at detach, the
+  column shows `…summarizing…` until it lands. The detach-time capture also no
+  longer loses to a concurrent watch summary.
+- **The reattach briefing never appeared after a normal detach**: the intended
+  `C-x C-c` quit-detaches path didn't snapshot session state, so the save-state
+  restore had nothing to diff against. Only an accidental disconnect armed it.
+  Now both do.
+- **Auto-watch flooded the journal with "user quit"**: a clean shell exit is the
+  user leaving, not work — it's now silent, so the briefing and `mars ls` stop
+  narrating lifecycle noise.
+- Two panes concluding while detached no longer lose one verdict (the pending
+  trigger queue was a single slot).
+- Translate calls now actually route through their intended model tier (the
+  task tag said "shell", the tier map said "translate" — nobody won).
+
 ## 0.3.3
 
 ### Added
@@ -66,64 +146,37 @@ instead of failing on them.
 
 ## 0.3.0
 
-The agent grows a memory and a spine: provider cascade with tiered routing,
-always-on prompt redaction, streaming replies, a work journal that infers what
-you're working on — and quality-of-life across the board: quit now detaches,
-the command bar fires the top match as you type, and Claude Code scrolls
-correctly inside a pane.
-
-> **Beta:** the AI/agent features and the SSH/remote path remain beta. The core
-> editor, multiplexer, and sessions are stable.
+Agent quality-of-life batch: streaming, a work journal, and a memory subsystem you
+can rip out.
 
 ### Added
-- **Provider cascade**: on a 429 the call rotates across every configured
-  provider (paid-first) and escalates one model tier when a self-check fails —
-  pinned models (`MARS_LLM_MODEL`/`MARS_LLM_URL`) opt out. A **model-tier ring**
-  routes each task (naming, missions, translate, ask) to the right size model.
-- **Streaming replies**: `?` answers render token-by-token in a live `mars ›`
-  turn (all direct providers; reasoning `<think>` blocks are held back, never
-  retracted).
-- **Memory hygiene**: an always-on redaction pass strips credentials
-  (`sk-…`, `ghp_…`, `AKIA…`, JWTs, `Bearer` values, URL passwords) from every
-  prompt; `~/.mars/denylist` adds your own strings; retrieval ranking now
-  weights recency and working directory. New command-bar rows: *Open command
-  memory*, *Forget all commands* (confirm-gated), *Open redaction denylist* —
-  the stores are plain files you can read and edit.
-- **Memory-free build**: `cargo build --no-default-features` produces a
-  terminal with the whole retrieval subsystem compiled out (same selfcheck).
-- **Work journal + missions**: watch verdicts persist to `~/.mars/worklog.jsonl`;
-  a background inference distills them into a one-line mission shown by
-  `mars ls` in a dedicated, wrapped SUMMARY column. Reattaching greets you with
-  a deterministic "Where you left off" briefing; *Show all notices* expands the
-  pending notice queue into one digest.
-- **Unified `mars ls`**: local sessions and remote fleet hosts in one numbered
-  table — shared resolver (ordinal/name/prefix), live status pushed home by
-  remote agents.
-- **Command bar**: in-bar quick keys (`!` `?` `@`) taught as chips and a legend;
-  typing pre-selects the top match so Enter fires it immediately; no match
-  falls through to natural language (shell-translate in terminals, a grounded
-  ask elsewhere). With a selection, "translate this to french" proposes a
-  replacement; with just a cursor, "write a limerick about potatoes" inserts at
-  point — both confirm-gated, both one undo step.
-- **Ask panel**: capped to the bottom ~30% of the workspace
-  (`ask_panel_max_pct`), scrollable through past turns with Up/Down or the
-  mouse wheel.
-- **Quit = detach**: `C-x C-c` leaves the session running; *Kill session*
-  (confirm-gated) and `mars kill` end it. **`mars killall`** ends every session
-  and starts fresh (refuses to run from inside a session).
-- **Prompts as Markdown**: every model instruction ships as an editable
-  `src/prompts/*.md`, embedded at compile time.
+- **Streaming replies**: agent answers render token-by-token in the ask panel
+  (SSE for OpenAI-compatible and Anthropic providers), with reasoning-model
+  `<think>` blocks stripped incrementally so they never flash on screen.
+- **Work journal + mission**: watch-mode frame summaries are logged as work
+  snapshots (`~/.mars/worklog.jsonl`); a low-tier model periodically infers the
+  session's mission, which `mars ls` shows as the summary column and reattach
+  opens with a "Where you left off" briefing.
+- **Unified `mars ls`**: local sessions and fleet hosts in one numbered table with
+  a shared open prompt; remote agent calls self-report host + session so status
+  stays fresh.
+- **Model cascade, completed**: rotation across keyed providers on rate limits and
+  one-step escalation to a stronger tier on low-confidence answers.
+- **Memory hygiene**: secret redaction (credential prefixes, `password=`-style
+  values, URL credentials, a user-editable `~/.mars/denylist`) on every line
+  bound for a prompt; recency/cwd-weighted retrieval; in-editor actions to open,
+  inspect, and clear the command memory.
+- **Deletion-proof memory seam**: the whole retrieval subsystem sits behind a
+  default-on `memory` cargo feature; `cargo build --no-default-features` yields a
+  fully working memory-free terminal.
+- **Prompts as Markdown**: every model-facing instruction lives in
+  `src/prompts/*.md`, embedded at compile time — editable without touching code.
+- **Command bar overhaul**; `quit` now detaches (with `killall` for a hard stop).
 
-### Changed / fixed
-- **Terminal wheel dispatch** (tmux parity): scrolling works inside Claude
-  Code, `less`, and vim — alternate-screen apps get arrow keys, mouse-protocol
-  apps get encoded wheel events, everything else scrolls Mars scrollback.
-- The cursor-anchored composer overlay yields to the command-bar dropdown when
-  the two would overlap.
-- `mars llm-stats` profiles the LLM debug log per task×model to right-size
-  models per call.
-- Latent task-tag mismatch fixed: auto-name/session-name calls now actually
-  route through their intended (cheaper) model tier.
+### Fixed
+- Mouse-wheel scrollback now reaches full-screen terminal apps (Claude Code, less,
+  vim): wheel events are forwarded in the app's own mouse protocol, or translated
+  to DECCKM-aware arrow keys on the alternate screen.
 
 ## 0.2.0
 

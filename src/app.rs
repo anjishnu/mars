@@ -96,6 +96,20 @@ pub struct WatchState {
     /// `frame_tick` when the current run's output first began (0 = idle) — for the
     /// away-digest duration ("build took 4m12s").
     pub run_started_tick: u64,
+    /// Armed by auto-watch (not an explicit C-x w). Auto-watched panes stay
+    /// SILENT on the boring lifecycle of an interactive shell — idle at a
+    /// prompt, or a clean user-initiated exit — and only produce a verdict when
+    /// something is noteworthy (a failure, a blocked prompt, a real exit).
+    /// Manual watches summarize everything, as the user explicitly asked.
+    pub auto: bool,
+    /// The last command mars itself sent to this pane (composer / TYPE:) —
+    /// the work journal's `command` field. Raw-typed commands are opaque
+    /// PTY bytes; this is what mars honestly knows.
+    pub last_command: Option<String>,
+    /// Stashed at watch-fire time for the journal: the deterministic evidence
+    /// under the LLM verdict (redacted tail excerpt) and the PTY exit code.
+    pub fired_excerpt: Option<String>,
+    pub fired_exit: Option<i32>,
 }
 
 /// Why a watch fired.
@@ -158,7 +172,7 @@ pub struct Notice {
 }
 
 #[derive(PartialEq, PartialOrd, Eq, Ord)]
-pub enum NoticeKind { Failure, Info }
+pub enum NoticeKind { Failure, Blocked, Info }
 
 /// A cheap counts-and-flags snapshot taken at detach; diffed at reattach (W7).
 /// Deterministic — the facts (what exited, what changed) are the value; no LLM.
@@ -281,13 +295,28 @@ pub struct App {
     /// Proactive notices the renderer reads (failures first). The agent can only append.
     pub notices: Vec<Notice>,
     /// An exit trigger queued from the term_rx drain, fired next tick.
-    pending_watch: Option<(TermId, WatchReason)>,
+    /// Exit triggers queued from the term_rx drain, fired one per tick. A Vec,
+    /// not an Option: in a fleet, several panes can conclude while detached —
+    /// a single slot silently dropped all but the last (the fleet bug).
+    pending_watch: Vec<(TermId, WatchReason)>,
+    /// The save-state restore: built at reattach when things happened while
+    /// away, rendered as a full-panel overlay, dismissed by any key.
+    pub shift_report: Option<crate::briefing::ShiftReport>,
+    /// Whether a client is looking at this session right now (set by the
+    /// session server via on_attach/on_detach; standalone is always attached).
+    /// Gates the focused-pane LLM skip: never summarize what's being watched.
+    client_attached: bool,
     /// State captured at detach; diffed on reattach for the "where was I?" briefing (W7).
     detach_snapshot: Option<Snapshot>,
     /// Append-only ring of notable events (bounded) — the Away Digest source.
     pub away_log: Vec<AwayEvent>,
     /// `frame_tick` at the last detach — the start of the "while away" window.
     detach_tick: Option<u64>,
+    /// `frame_tick` of the last actual work keystroke (typing into an editor or
+    /// terminal — NOT navigation or the detach chord). The shift report's window
+    /// starts here: "since your keyboard went silent," not since a formal detach,
+    /// so a job that ran while you sat idle is still summarized.
+    last_input_tick: u64,
     /// Window start for a re-summonable digest ("away digest" action).
     pub digest_from_tick: Option<u64>,
     /// The conversation: ("user"/"assistant", text). Survives bar close; C-l clears.
@@ -408,10 +437,13 @@ impl App {
             need_depth: 0,
             watches: HashMap::new(),
             notices: Vec::new(),
-            pending_watch: None,
+            pending_watch: Vec::new(),
+            shift_report: None,
+            client_attached: true,
             detach_snapshot: None,
             away_log: Vec::new(),
             detach_tick: None,
+            last_input_tick: 0,
             digest_from_tick: None,
             agent_history: Vec::new(),
             ask_scroll: 0,
@@ -446,6 +478,7 @@ impl App {
         let pane_id = app.alloc_pane(buf_id);
         let tab = Tab::new(app.alloc_tab_id(), "1".into(), pane_id);
         app.tabs.push(tab);
+        crate::worklog::compact(app.tuning.worklog_max_lines as usize);
         Ok(app)
     }
 
@@ -666,6 +699,7 @@ impl App {
     // ── Text editing ─────────────────────────────────────────────────────────
 
     fn insert_char_at_cursor(&mut self, c: char) {
+        self.last_input_tick = self.frame_tick; // active work — anchors the away window
         let pane = self.focused_pane();
         let buf_id = match pane.content { PaneContent::Editor(id) => id, _ => return };
         let (row, col) = (pane.cursor_row, pane.cursor_col);
@@ -1792,6 +1826,28 @@ impl App {
     // ── Key handlers ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // The shift report: any key resumes exactly where you were (the key is
+        // swallowed — it must never leak into a buffer). Enter with a suggestion
+        // on screen prefills the shell composer instead, still confirm-gated.
+        if let Some(rep) = self.shift_report.take() {
+            crate::llm_log::event("shift_report_dismissed", serde_json::json!({
+                "after_ms": rep.shown_at.elapsed().as_millis() as u64,
+                "suggestion_shown": rep.suggestion.is_some(),
+                "suggestion_typed":
+                    rep.suggestion.is_some() && key.code == KeyCode::Enter,
+            }));
+            self.needs_redraw = true;
+            if key.code == KeyCode::Enter {
+                if let Some(cmd) = rep.suggestion {
+                    self.open_bar(BarMode::Shell);
+                    if let Some(p) = self.palette.as_mut() {
+                        p.query = cmd;
+                    }
+                    self.shell_ready = true; // next Enter runs it — one confirm, as ever
+                }
+            }
+            return Ok(());
+        }
         self.show_splash = false; // any keypress dismisses the banner
         // One gesture rules everything (doctrine §2): the bar opens from any
         // mode. Edit/Terminal/Bar handle bar-open themselves (prefix-aware /
@@ -3162,6 +3218,9 @@ impl App {
             if let Some(t) = self.terms.get_mut(&tid) {
                 t.send_bytes(cmd.as_bytes());
                 t.send_bytes(b"\n");
+                // The work journal's `command`: the last thing mars itself ran
+                // in this pane (composer + TYPE: both funnel through here).
+                self.watches.entry(tid).or_default().last_command = Some(cmd.to_string());
             }
         }
     }
@@ -3552,6 +3611,8 @@ impl App {
             Action::OpenCommandMemory  => self.open_command_memory(),
             Action::ClearCommandMemory => self.clear_command_memory(),
             Action::OpenDenylist       => self.open_denylist(),
+            Action::OpenTuning         => self.open_tuning(),
+            Action::OpenPersona        => self.open_persona(),
             // Quit = detach (2026-07 ruling): leaving mars never ends a
             // session — kill is the deleting verb (KillSession here, `mars
             // kill`/`mars killall` outside). Standalone has nothing to keep
@@ -3623,6 +3684,35 @@ impl App {
         let path = p.to_string_lossy().into_owned();
         if let Err(e) = self.open_file(&path) {
             self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        }
+    }
+
+    fn open_persona(&mut self) {
+        let Some(p) = crate::persona::seed_if_missing() else {
+            self.status_msg = Some("no HOME — can't locate ~/.mars/persona.md".into());
+            return;
+        };
+        let path = p.to_string_lossy().into_owned();
+        if let Err(e) = self.open_file(&path) {
+            self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        } else {
+            self.status_msg = Some("style only — empty file turns the voice off".into());
+        }
+    }
+
+    fn open_tuning(&mut self) {
+        let Some(p) = crate::tuning::tuning_path() else {
+            self.status_msg = Some("no config dir — can't locate tuning.json".into());
+            return;
+        };
+        if !p.exists() {
+            let _ = crate::tuning::load(); // seeds the annotated defaults file
+        }
+        let path = p.to_string_lossy().into_owned();
+        if let Err(e) = self.open_file(&path) {
+            self.status_msg = Some(format!("couldn't open {path}: {e}"));
+        } else {
+            self.status_msg = Some("edits apply on next start (or new session)".into());
         }
     }
 
@@ -3775,6 +3865,7 @@ impl App {
 
         let bytes = key_to_bytes(&key);
         if !bytes.is_empty() {
+            self.last_input_tick = self.frame_tick; // active work — anchors the away window
             if let Some(t) = self.terms.get_mut(&term_id) {
                 t.scroll_to_live(); // typing snaps out of scrollback
                 t.send_bytes(&bytes);
@@ -3818,7 +3909,16 @@ impl App {
             self.needs_redraw = true; // terminal content moved → repaint
             match ev {
                 TermEvent::Output(id) => {
-                    if let Some(w) = self.watches.get_mut(&id) {
+                    let auto = self.tuning.auto_watch == 1;
+                    let min_ticks = (self.tuning.watch_min_active_secs * 1000
+                        / self.tuning.poll_interval_ms.max(1))
+                        .max(1);
+                    let w = if auto {
+                        Some(self.watches.entry(id).or_default())
+                    } else {
+                        self.watches.get_mut(&id)
+                    };
+                    if let Some(w) = w {
                         // A fresh run begins when output resumes after a quiet/fired
                         // gap (or on the very first output) — stamp its start.
                         if w.triggered || w.run_started_tick == 0 {
@@ -3826,6 +3926,13 @@ impl App {
                         }
                         w.last_output_tick = now;
                         w.triggered = false;
+                        // Auto-watch: sustained output = a real run, not an `ls` —
+                        // arm a verdict without the user reaching for C-x w. Marked
+                        // `auto` so it stays silent on idle-shell noise.
+                        if auto && !w.watched && now.saturating_sub(w.run_started_tick) >= min_ticks {
+                            w.watched = true;
+                            w.auto = true;
+                        }
                     }
                 }
                 TermEvent::Exited(id) => {
@@ -3834,10 +3941,12 @@ impl App {
                     }
                     let watched = self.watches.get(&id).map(|w| w.watched && !w.triggered).unwrap_or(false);
                     if watched {
-                        self.pending_watch = Some((id, WatchReason::Exit)); // gets an LLM verdict
+                        if !self.pending_watch.iter().any(|(qid, _)| *qid == id) {
+                            self.pending_watch.push((id, WatchReason::Exit)); // gets an LLM verdict
+                        }
                     } else {
-                        // An unwatched shell ending is a deterministic away-event.
-                        self.push_away(AwayKind::Done, "shell exited".into(), None);
+                        // An unwatched shell ending is context, not an accomplishment.
+                        self.push_away(AwayKind::Context, "shell exited".into(), None);
                     }
                 }
             }
@@ -3939,9 +4048,13 @@ impl App {
                     self.bg_busy = false;
                 }
                 AgentEvent::WatchSummary { term_id, verdict } => {
-                    self.bg_busy = false;
-                    let failed = verdict.to_lowercase().contains("fail")
-                        || verdict.to_lowercase().contains("error");
+                    // NOT bg-done: a batched shift call emits several of these
+                    // before its own BgDone; individual watch calls send BgDone
+                    // separately. Never clear the gate from here.
+                    let blocked = verdict.to_lowercase().starts_with("blocked");
+                    let failed = !blocked
+                        && (verdict.to_lowercase().contains("fail")
+                            || verdict.to_lowercase().contains("error"));
                     let tab = self.tab_label_of_term(term_id);
                     let dur = self.watches.get(&term_id).and_then(|w| {
                         (w.run_started_tick > 0).then(|| now.saturating_sub(w.run_started_tick))
@@ -3949,15 +4062,37 @@ impl App {
                     if let Some(w) = self.watches.get_mut(&term_id) {
                         w.verdict = Some(verdict.clone());
                     }
-                    self.notices.push(Notice {
-                        text: format!("{verdict}{tab}"),
-                        kind: if failed { NoticeKind::Failure } else { NoticeKind::Info },
-                    });
-                    // Failures surface first.
-                    self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
+                    // Telemetry coming in: an on-screen report row absorbs the
+                    // verdict directly and subsumes the notice.
+                    let mut on_report = false;
+                    if let Some(rep) = self.shift_report.as_mut() {
+                        if let Some(row) =
+                            rep.rows.iter_mut().find(|r| r.term_id == Some(term_id))
+                        {
+                            row.verdict = crate::briefing::classify(&verdict, row.verdict);
+                            row.text = verdict.clone();
+                            row.settling = false;
+                            rep.sort_rows();
+                            on_report = true;
+                        }
+                    }
+                    if !on_report {
+                        self.notices.push(Notice {
+                            text: format!("{verdict}{tab}"),
+                            kind: if failed {
+                                NoticeKind::Failure
+                            } else if blocked {
+                                NoticeKind::Blocked
+                            } else {
+                                NoticeKind::Info
+                            },
+                        });
+                        // Failures surface first.
+                        self.notices.sort_by(|a, b| a.kind.cmp(&b.kind));
+                    }
                     // Also record it for the Away Digest (with the run's duration).
                     self.push_away(
-                        if failed { AwayKind::NeedsYou } else { AwayKind::Done },
+                        if failed || blocked { AwayKind::NeedsYou } else { AwayKind::Done },
                         format!("{verdict}{tab}"),
                         dur,
                     );
@@ -3967,6 +4102,17 @@ impl App {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
+                    let cwd = self
+                        .terms
+                        .get(&term_id)
+                        .and_then(|t| t.spawn_cwd.as_ref())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let (command, exit, error_excerpt) = self
+                        .watches
+                        .get_mut(&term_id)
+                        .map(|w| (w.last_command.clone(), w.fired_exit.take(), w.fired_excerpt.take()))
+                        .unwrap_or_default();
                     crate::worklog::record(&crate::worklog::WorkEntry {
                         ts,
                         session: self.session_label(),
@@ -3974,6 +4120,12 @@ impl App {
                         verdict: verdict.clone(),
                         failed,
                         dur_secs: dur.map(|t| t * self.tuning.poll_interval_ms / 1000),
+                        cwd,
+                        command,
+                        exit,
+                        // The excerpt is evidence for failures; successes keep
+                        // the journal lean (verdict alone).
+                        error_excerpt: failed.then_some(error_excerpt).flatten(),
                     });
                     self.maybe_infer_mission(ts);
                 }
@@ -3984,6 +4136,55 @@ impl App {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     crate::worklog::save_mission(&self.session_label(), &text, ts);
+                }
+                AgentEvent::ShiftDelta { text } => {
+                    // The persona-voiced briefing streaming in. The first delta
+                    // replaces the deterministic template; the rest append —
+                    // typewriter-in for free (stateless render diffs each frame).
+                    if let Some(rep) = self.shift_report.as_mut() {
+                        if !rep.narrative_from_model {
+                            rep.narrative.clear();
+                            rep.narrative_from_model = true;
+                            // Anchor the typewriter clock to the first token, so the
+                            // prose reveals at a steady pace no matter how bursty the
+                            // network delivery is.
+                            rep.stream_started_at = Some(std::time::Instant::now());
+                        }
+                        rep.narrative.push_str(&text);
+                    }
+                }
+                AgentEvent::ShiftDone => {
+                    // The briefing call finished. If the model produced nothing —
+                    // it errored, timed out, or the tunnel was down — dismiss the
+                    // overlay entirely rather than show a bare deterministic stub.
+                    // (Keyless sessions never fire the call, so ShiftDone never
+                    // arrives for them and their deterministic briefing stands.)
+                    if let Some(rep) = self.shift_report.as_ref() {
+                        if !rep.narrative_from_model {
+                            self.shift_report = None;
+                        } else {
+                            // Log the finalized briefing for continuity (the next
+                            // return reports progress against it).
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            crate::worklog::log_briefing(
+                                &self.session_label(), &rep.narrative, &rep.facts, rep.away_secs, ts,
+                            );
+                            if let Some(rep) = self.shift_report.as_mut() {
+                                rep.narrative_streaming = false;
+                            }
+                        }
+                    }
+                }
+                AgentEvent::Goals { goals } => {
+                    self.bg_busy = false;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::save_goals(&self.session_label(), &goals, ts);
                 }
             }
         }
@@ -3999,10 +4200,28 @@ impl App {
         if self.agent_pending || !self.pending_prefix.is_empty() {
             self.needs_redraw = true;
         }
+        // The Mission Briefing boots up on reattach: redraw while its ~0.5s
+        // reveal animation is running (or while its narrative streams). Both are
+        // self-terminating — once revealed and the stream is done, this goes
+        // quiet and no idle frames are sent.
+        if let Some(rep) = &self.shift_report {
+            let animate = self.tuning.mission_briefing_animate == 1;
+            let booting = animate && rep.shown_at.elapsed().as_millis() < crate::briefing::BOOT_TOTAL_MS;
+            // The typewriter can still be catching up to the received text after the
+            // stream itself has closed — keep redrawing until it lands the last char.
+            let ms = self.tuning.mission_briefing_type_ms.max(1) as u128;
+            let typing = animate
+                && rep.stream_started_at
+                    .map(|s| s.elapsed().as_millis() / ms < rep.narrative.chars().count() as u128)
+                    .unwrap_or(false);
+            if booting || typing || rep.narrative_streaming {
+                self.needs_redraw = true;
+            }
+        }
     }
 
     /// Append an event to the bounded away-log ring (the Away Digest source).
-    fn push_away(&mut self, kind: AwayKind, text: String, dur_ticks: Option<u64>) {
+    pub fn push_away(&mut self, kind: AwayKind, text: String, dur_ticks: Option<u64>) {
         self.away_log.push(AwayEvent {
             tick: self.frame_tick,
             kind,
@@ -4037,6 +4256,7 @@ impl App {
         let now = self.frame_tick;
         let w = self.watches.entry(id).or_default();
         w.watched = !w.watched;
+        w.auto = false; // an explicit watch summarizes everything, idle included
         w.last_output_tick = now;
         w.triggered = false;
         let watching = w.watched;
@@ -4054,10 +4274,327 @@ impl App {
     /// Capture a cheap snapshot when the last client detaches; the away_log carries
     /// events, the snapshot only what isn't event-shaped (which buffers were dirty).
     pub fn on_detach(&mut self) {
+        self.client_attached = false;
         self.detach_tick = Some(self.frame_tick);
         self.detach_snapshot = Some(Snapshot {
             dirty: self.buffers.values().filter(|b| b.modified).map(|b| b.name.clone()).collect(),
         });
+        // Capture what the user was working toward, so the reattach briefing can
+        // report progress against it. One low-tier call over the live panes +
+        // recent journal; best-effort (a remote detach may find the tunnel gone).
+        // Fire even if another background call is in flight — detach is the
+        // one-shot moment we most need to capture, and a concurrent watch summary
+        // must never cancel it. The daemon keeps ticking headless after the client
+        // leaves (session.rs), so the call completes and its Goals event is
+        // processed; the deterministic summary floor covers us if it still fails.
+        if self.tuning.goal_tracking == 1 {
+            let cfg = agent::AgentConfig::from_env();
+            if cfg.is_configured() {
+                let evidence = self.goal_evidence();
+                if !evidence.trim().is_empty() {
+                    // Mark the summary in flight so `mars ls` shows "…summarizing…"
+                    // instead of a stale line until the fresh goals land.
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    crate::worklog::mark_summarizing(&self.session_label(), ts);
+                    self.bg_busy = true;
+                    agent::capture_goals(cfg, evidence, self.agent_tx.clone());
+                }
+            }
+        }
+    }
+
+    /// What happened in EVERY pane while away — the raw material for the
+    /// briefing. Not just watched panes: every terminal's recent tail (labeled
+    /// by tab, redacted) plus each editor pane's file, so the narrative can
+    /// summarize the whole workspace and surface anything that needs a decision.
+    /// `active` panes (output moved since the away window opened) are marked so
+    /// the model leads with them.
+    fn all_pane_activity(&self, from: u64) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for tab in &self.tabs {
+            for pid in tab.layout.pane_ids() {
+                match self.panes.get(&pid).map(|p| &p.content) {
+                    Some(&PaneContent::Terminal(tid)) => {
+                        let tail = self.terminal_tail(tid, 40);
+                        if tail.trim().is_empty() {
+                            continue;
+                        }
+                        let moved = self
+                            .watches
+                            .get(&tid)
+                            .map(|w| w.last_output_tick >= from)
+                            .unwrap_or(false);
+                        let mark = if moved { " (active while you were away)" } else { "" };
+                        parts.push(format!(
+                            "PANE [{}]{mark}:\n{}",
+                            tab.name,
+                            crate::retrieval::redact(&tail)
+                        ));
+                    }
+                    Some(&PaneContent::Editor(bid)) => {
+                        if let Some(b) = self.buffers.get(&bid) {
+                            let dirty = if b.modified { " (unsaved edits)" } else { "" };
+                            parts.push(format!("EDITOR [{}]{dirty}", b.name));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        parts.join("\n\n")
+    }
+
+    /// Evidence for goal capture: the tail of each live terminal pane plus the
+    /// last few work-journal verdicts — what's in flight right now.
+    fn goal_evidence(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for tab in &self.tabs {
+            for pid in tab.layout.pane_ids() {
+                if let Some(&PaneContent::Terminal(tid)) = self.panes.get(&pid).map(|p| &p.content) {
+                    let tail = self.terminal_tail(tid, 24);
+                    if !tail.trim().is_empty() {
+                        parts.push(format!("[{}]\n{}", tab.name, crate::retrieval::redact(&tail)));
+                    }
+                }
+            }
+        }
+        let recent = crate::worklog::recent(&self.session_label(), 5);
+        if !recent.is_empty() {
+            let lines: Vec<String> = recent.iter().map(|e| format!("- {}", e.verdict)).collect();
+            parts.push(format!("recent:\n{}", lines.join("\n")));
+        }
+        parts.join("\n\n")
+    }
+
+    /// Build the shift report (the save-state restore). Returns true when there
+    /// is something to show. Deterministic tier-0 rows render immediately;
+    /// ambiguous rows are marked settling and covered by ONE batched low-tier
+    /// call — the overlay frame is never blocked on a model.
+    fn build_shift_report(&mut self, from: u64) -> bool {
+        use crate::briefing::{self, ReportRow, Verdict};
+        let now = self.frame_tick;
+        let ms = self.tuning.poll_interval_ms.max(1);
+        let t2s = |ticks: u64| ticks * ms / 1000;
+        let mut rows: Vec<ReportRow> = Vec::new();
+        // 1. Verdicts and context that already landed while away (precomputed at
+        //    event time — the zero-latency path for keyed/local sessions).
+        for e in self.away_log.iter().filter(|e| e.tick >= from) {
+            let default = match e.kind {
+                AwayKind::NeedsYou => Verdict::Failed,
+                AwayKind::Done => Verdict::Done,
+                AwayKind::Context => Verdict::Context,
+            };
+            rows.push(ReportRow {
+                verdict: briefing::classify(&e.text, default),
+                tab: String::new(), // away text already carries its tab suffix
+                text: e.text.clone(),
+                ago_secs: Some(t2s(now.saturating_sub(e.tick))),
+                dur_secs: e.dur_ticks.map(t2s),
+                term_id: None,
+                cwd: None,
+                exit: None,
+                error_excerpt: None,
+                settling: false,
+            });
+        }
+        // 2. Watched panes with no verdict yet (held triggers, quiet panes,
+        //    still-running work): tier-0 triage — deterministic, no per-pane LLM.
+        let candidates: Vec<TermId> = self
+            .watches
+            .iter()
+            .filter(|(_, w)| w.watched && !w.triggered)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in candidates {
+            let Some(exited) = self.terms.get(&id).map(|t| t.exited) else { continue };
+            let running = !exited;
+            let exit = self.terms.get_mut(&id).and_then(|t| t.exited.then(|| t.exit_code()).flatten());
+            let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+            let tri = briefing::triage(&tail, exit, running);
+            let (started, last_out) = self
+                .watches
+                .get(&id)
+                .map(|w| (w.run_started_tick, w.last_output_tick))
+                .unwrap_or((0, 0));
+            let dur_secs = (started > 0).then(|| t2s(last_out.saturating_sub(started)));
+            // An auto-watched pane that's just an idle shell (or a clean quit) isn't
+            // a workstream — keep it off the report. BUT a genuine WIN earns its
+            // place: a pane that ran real work past the good-news duration and
+            // concluded without failing gets its teal row even though it exited
+            // clean. This is the only way an auto-watched success reaches the board
+            // (is_noteworthy passes only failures/blocks); the short-run threshold
+            // keeps a bare `exit` from an idle shell out.
+            let auto = self.watches.get(&id).map(|w| w.auto).unwrap_or(false);
+            let notable_win = !running
+                && tri.verdict == Verdict::Done
+                && dur_secs.map(|d| d >= briefing::GOODNEWS_SECS).unwrap_or(false);
+            if auto && !briefing::is_noteworthy(&tail, exit) && !notable_win {
+                continue;
+            }
+            let tab = self.tab_label_of_term(id).trim_start_matches(" · ").trim().to_string();
+            let cwd = self
+                .terms
+                .get(&id)
+                .and_then(|t| t.spawn_cwd.as_ref())
+                .map(|p| p.display().to_string());
+            let excerpt: Option<String> = if matches!(tri.verdict, Verdict::Failed | Verdict::Blocked) {
+                let e: String = tail
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(crate::retrieval::redact)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!e.trim().is_empty()).then_some(e)
+            } else {
+                None
+            };
+            rows.push(ReportRow {
+                verdict: tri.verdict,
+                tab: tab.clone(),
+                text: tri.text.clone(),
+                ago_secs: (!running).then(|| t2s(now.saturating_sub(last_out))),
+                dur_secs,
+                term_id: Some(id),
+                cwd: cwd.clone(),
+                exit,
+                error_excerpt: excerpt.clone(),
+                settling: false,
+            });
+            if !running {
+                // The pane concluded: consume its trigger and journal the
+                // deterministic verdict (no per-pane LLM — the narrative call
+                // below does the prose in one shot).
+                self.pending_watch.retain(|(qid, _)| *qid != id);
+                if let Some(w) = self.watches.get_mut(&id) {
+                    w.triggered = true;
+                }
+                let command = self.watches.get(&id).and_then(|w| w.last_command.clone());
+                let failed = tri.verdict == Verdict::Failed;
+                let prefix = if failed { "failed" } else { "done" };
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                crate::worklog::record(&crate::worklog::WorkEntry {
+                    ts,
+                    session: self.session_label(),
+                    tab,
+                    verdict: format!("{prefix}: {}", tri.text),
+                    failed,
+                    dur_secs: rows.last().and_then(|r| r.dur_secs),
+                    cwd: cwd.unwrap_or_default(),
+                    command,
+                    exit,
+                    error_excerpt: failed.then_some(excerpt).flatten(),
+                });
+            }
+        }
+        // ITERATION MODE: always greet on return, even a quiet one — so the
+        // briefing quality can be tuned. The eventful-only gate (the calm
+        // "absence is the feature" default) is the scale-down lever for later:
+        //   if rows.is_empty() && crate::worklog::load_goals(&self.session_label()).is_empty() {
+        //       return false;
+        //   }
+        // The report subsumes notices queued while detached.
+        self.notices.retain(|n| !rows.iter().any(|r| n.text.contains(r.text.as_str())));
+        self.digest_from_tick = Some(from);
+        let mission = crate::worklog::load_mission(&self.session_label()).map(|(m, _)| m);
+        let mut report = briefing::ShiftReport {
+            away_secs: t2s(now.saturating_sub(from)),
+            mission: mission.clone(),
+            rows,
+            suggestion: None,
+            narrative: String::new(),
+            narrative_streaming: false,
+            narrative_from_model: false,
+            facts: String::new(),
+            stream_started_at: None,
+            shown_at: std::time::Instant::now(),
+        };
+        report.sort_rows();
+        // A compact manifest distillation, logged when the briefing finalizes so
+        // the NEXT return can report progress against it (the continuity spine).
+        report.facts = report
+            .rows
+            .iter()
+            .map(|r| {
+                let w = match r.verdict {
+                    Verdict::Failed => "failed",
+                    Verdict::Blocked => "blocked",
+                    Verdict::Done => "done",
+                    Verdict::Running => "running",
+                    Verdict::Context => "·",
+                };
+                format!("{w}: {}", r.text)
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        // The plain-English briefing: start with the deterministic one-liner
+        // (instant, keyless-safe), then let the persona-voiced version stream in
+        // and replace it. Evidence is the sorted rows' facts.
+        report.narrative = report.deterministic_narrative();
+        // The evidence the narrative summarizes: the deterministic verdicts (what
+        // concluded / needs you) AND the raw activity in every pane (so nothing
+        // that happened in an unwatched pane is missed — the "all quiet" bug).
+        let verdicts = report.rows.iter().map(|r| r.evidence()).collect::<Vec<_>>().join("\n");
+        let pane_activity = self.all_pane_activity(from);
+        let mut evidence = String::new();
+        if !verdicts.trim().is_empty() {
+            evidence.push_str(&format!("Verdicts (what concluded or needs you):\n{verdicts}\n\n"));
+        }
+        if !pane_activity.trim().is_empty() {
+            evidence.push_str(&format!("Everything on the panes right now:\n{pane_activity}\n\n"));
+        }
+        // The goals captured at detach: the briefing reports progress against
+        // them by comparing to what actually happened on the panes above.
+        let goals = crate::worklog::load_goals(&self.session_label());
+        if !goals.is_empty() {
+            let g = goals.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n");
+            evidence = format!("What they were working toward:\n{g}\n\n{evidence}");
+        }
+        crate::llm_log::event(
+            "shift_report_shown",
+            serde_json::json!({
+                "rows": report.rows.len(),
+                "failures": report.rows.iter().filter(|r| r.verdict == Verdict::Failed).count(),
+                "away_secs": report.away_secs,
+            }),
+        );
+        let away = crate::briefing::fmt_secs(report.away_secs);
+        // Continuity: what the LAST briefing said, so this one can note progress.
+        let prev = crate::worklog::load_last_briefing(&self.session_label())
+            .map(|p| format!("{}: {}", crate::broker::ago(p.ts), p.facts))
+            .unwrap_or_default();
+        // Captured for the keyless log path (no ShiftDone will fire without a key).
+        let (det_narrative, facts, away_secs) =
+            (report.narrative.clone(), report.facts.clone(), report.away_secs);
+        self.shift_report = Some(report);
+        // Fire the narrative AFTER the overlay exists, so the prose streams into
+        // a screen already on display — the frame is never blocked on the model.
+        let cfg = agent::AgentConfig::from_env();
+        if cfg.is_configured() {
+            self.bg_busy = true;
+            if let Some(rep) = self.shift_report.as_mut() {
+                rep.narrative_streaming = true; // template stays until the first delta
+            }
+            agent::shift_brief(cfg, away, mission.unwrap_or_default(), prev, evidence, self.agent_tx.clone());
+        } else {
+            // Keyless: log the deterministic briefing now, so continuity still
+            // threads across returns even without a model.
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            crate::worklog::log_briefing(&self.session_label(), &det_narrative, &facts, away_secs, ts);
+        }
+        true
     }
 
     /// W7 → Away Digest: on reattach, summarize everything logged since detach as
@@ -4066,6 +4603,7 @@ impl App {
     /// produced earlier through the normal `watch_summary` seam (broker-proxied in
     /// the future); a keyless box still gets the full digest. Quiet when idle.
     pub fn on_attach(&mut self) {
+        self.client_attached = true;
         let Some(snap) = self.detach_snapshot.take() else { return };
         let from = self.detach_tick.take().unwrap_or(0);
         // Fold file changes since detach into the log as Context events, so the
@@ -4107,6 +4645,26 @@ impl App {
                 ));
             }
             self.agent_history.push(("assistant".into(), brief));
+        }
+        // The save-state restore: full overlay (2, default), classic notice (1),
+        // or nothing (0). The overlay path owns dedupe/digest bookkeeping.
+        match self.tuning.mission_briefing {
+            2 => {
+                // Window from when the keyboard last went silent for work, not the
+                // formal detach — so a job that ran while you sat idle is covered.
+                let window = if self.last_input_tick > 0 {
+                    self.last_input_tick.min(from)
+                } else {
+                    from
+                };
+                self.build_shift_report(window);
+                return;
+            }
+            0 => {
+                self.digest_from_tick = Some(from);
+                return;
+            }
+            _ => {} // 1 → the classic one-line notice below
         }
         // Headline items from the away window: failures lead, then the rest.
         let events: Vec<&AwayEvent> = self.away_log.iter().filter(|e| e.tick >= from).collect();
@@ -4188,7 +4746,7 @@ impl App {
         self.open_bar(BarMode::Ask);
     }
 
-    fn session_label(&self) -> String {
+    pub fn session_label(&self) -> String {
         self.session_name.clone().unwrap_or_else(|| "standalone".to_string())
     }
 
@@ -4264,11 +4822,22 @@ impl App {
         let quiet_ticks =
             self.tuning.watch_quiet_secs * 1000 / self.tuning.poll_interval_ms.max(1);
         let now = self.frame_tick;
+        // The pane the user is looking at right now never earns a quiet-fire
+        // LLM verdict — they ARE the verdict. (Exit fires still do: rare,
+        // high-value, and the pane may die unnoticed behind a split.)
+        let focused_term = match self.focused_pane().content {
+            PaneContent::Terminal(id) if self.client_attached => Some(id),
+            _ => None,
+        };
+        let quiet_ready = |id: &TermId, w: &WatchState| {
+            w.watched
+                && !w.triggered
+                && now.saturating_sub(w.last_output_tick) > quiet_ticks
+                && Some(*id) != focused_term
+        };
         // Peek: is anything ready to fire? (don't consume the trigger yet.)
-        let candidate = self.pending_watch.is_some()
-            || self.watches.values().any(|w| {
-                w.watched && !w.triggered && now.saturating_sub(w.last_output_tick) > quiet_ticks
-            });
+        let candidate = !self.pending_watch.is_empty()
+            || self.watches.iter().any(|(id, w)| quiet_ready(id, w));
         if !candidate {
             return;
         }
@@ -4278,23 +4847,79 @@ impl App {
         if cfg.provider == "broker" && !cfg.is_configured() {
             return;
         }
-        // An exit trigger queued from term_rx wins; else the first quiet watched pane.
-        let fire = self.pending_watch.take().or_else(|| {
+        // The oldest queued exit trigger wins; else the first quiet watched pane.
+        let fire = if self.pending_watch.is_empty() {
             self.watches
                 .iter()
-                .find(|(_, w)| {
-                    w.watched && !w.triggered && now.saturating_sub(w.last_output_tick) > quiet_ticks
-                })
+                .find(|(id, w)| quiet_ready(id, w))
                 .map(|(id, _)| (*id, WatchReason::Quiet))
-        });
+        } else {
+            Some(self.pending_watch.remove(0))
+        };
         let Some((id, reason)) = fire else { return };
         if let Some(w) = self.watches.get_mut(&id) {
             w.triggered = true;
         }
+        // Auto-watch stays silent on the boring shell lifecycle (idle prompt, a
+        // clean user-initiated exit) — those aren't work, and summarizing them
+        // fills the journal (hence the mission) with "user quit" noise. Consume
+        // the trigger, spend no tokens, journal nothing. Manual watches always
+        // summarize. The pane can re-fire once real output resumes.
+        if self.watches.get(&id).map(|w| w.auto).unwrap_or(false) {
+            let exit = self.terms.get_mut(&id).and_then(|t| t.exited.then(|| t.exit_code()).flatten());
+            let tail = self.terminal_tail(id, 12);
+            if !crate::briefing::is_noteworthy(&tail, exit) {
+                return;
+            }
+        }
         if !cfg.is_configured() {
-            return; // no key at all (not broker) — consumed, so we don't spin
+            // No key at all (not broker): the trigger is consumed, but tier-0
+            // triage still owes the user a deterministic verdict — a keyless
+            // mars watches with exit codes and heuristics instead of a model.
+            let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+            let (exited, exit) = self
+                .terms
+                .get_mut(&id)
+                .map(|t| (t.exited, t.exited.then(|| t.exit_code()).flatten()))
+                .unwrap_or((true, None));
+            let tri = crate::briefing::triage(&tail, exit, !exited);
+            let prefix = match tri.verdict {
+                crate::briefing::Verdict::Failed => "failed",
+                crate::briefing::Verdict::Blocked => "blocked",
+                _ => "done",
+            };
+            if let Some(w) = self.watches.get_mut(&id) {
+                w.fired_exit = exit;
+            }
+            let _ = self.agent_tx.send(agent::AgentEvent::WatchSummary {
+                term_id: id,
+                verdict: format!("{prefix}: {}", tri.text),
+            });
+            return;
         }
         let tail = self.terminal_tail(id, self.tuning.agent_scrollback_context);
+        // Stash the deterministic outcome evidence for the journal now, while
+        // the pane state is in hand: the redacted last lines of the tail and,
+        // on exit, the shell's exit code (the verdict arrives async later).
+        let excerpt: String = tail
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(crate::retrieval::redact)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let excerpt = excerpt.chars().take(400).collect::<String>();
+        let exit = match reason {
+            WatchReason::Exit => self.terms.get_mut(&id).and_then(|t| t.exit_code()),
+            WatchReason::Quiet => None,
+        };
+        if let Some(w) = self.watches.get_mut(&id) {
+            w.fired_excerpt = (!excerpt.trim().is_empty()).then_some(excerpt);
+            w.fired_exit = exit;
+        }
         self.bg_busy = true;
         agent::watch_summary(cfg, id, reason, tail, self.agent_tx.clone());
     }

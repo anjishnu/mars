@@ -335,8 +335,19 @@ relitigate silently):
   the first agent-editable config surface (a Context-Bus precursor): an agent can read
   what a knob does and adjust it on request.
 - **Agent providers by env precedence**: `MARS_LLM_*` (any OpenAI-compatible endpoint,
-  e.g. local Ollama; legacy `ARES_*` honored) → `GROQ_API_KEY` →
+  e.g. local Ollama; legacy `ARES_*` honored) → enterprise (Bedrock/Azure) →
+  `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GROQ_API_KEY` →
   `GEMINI_API_KEY`/`GOOGLE_API_KEY` (Gemini's OpenAI-compatible endpoint).
+- **AWS Bedrock + Azure OpenAI (2026-07): bearer/api-key only, no SigV4.** Ruled:
+  MARS supports Bedrock via **Bedrock API keys** (`AWS_BEARER_TOKEN_BEDROCK`, a plain
+  bearer) over the **Converse API** — provider-neutral so any Bedrock model works —
+  and Azure via its OpenAI-compatible surface (`api-key` header + deployment URL).
+  IAM/SigV4 is deferred because a HMAC signer would add crypto deps to a
+  deliberately dependency-light single binary; Bedrock API keys fit the existing
+  "one key string" model exactly. Bedrock is non-streaming for now (converse-stream
+  is AWS binary event-stream framing, not SSE). No broker protocol change: the home
+  daemon re-derives the provider from env, so an enterprise key at home works on
+  every ssh'd box unchanged.
 - **Mars rebrand + palette (2026-07):** the project is Mars — "mission control for
   your terminal." Palette anchored on Claude Code's terracotta **#D97757**
   (`theme_accent`) for all chrome, light sand **#E9A178** on teaching surfaces, rust
@@ -357,6 +368,21 @@ relitigate silently):
   as a **cursor-anchored overlay** (no eye-jump). `agentic_inline.md` is the product
   brief; `workflows_design.md` is the build spec. Ruled: `OPEN:` directive is
   line-only; watch/brief use passive one-liners (no bell) in v1.
+- **Persona = VOICE tasks only (2026-07):** a user style file (`~/.mars/persona.md`)
+  rides into ask/watch as the FINAL system message under a precedence preamble —
+  style can color prose, never rules. FORMAT tasks (translate, naming, mission,
+  shift-batch) never see it: machine-parsed output, and mission text is re-ingested
+  into prompts (a persona there would feed back into itself). Default voice: mission
+  control addressing the ship's captain; empty file = off.
+- **Shift report + verdict triage ladder (2026-07):** reattach shows a full-screen
+  save-state restore by default (`shift_report` knob: full/notice/off) — shown only
+  when something happened. Verdicts escalate ONE WAY: deterministic tier-0
+  (exit codes, tail heuristics — free, also what a keyless mars uses) → one batched
+  low-tier call for ambiguous rows → `model_above` only on self-check failure.
+  Ruled: the overlay frame is never blocked on a model — LLM output only ever
+  replaces a defensible deterministic placeholder, and the streaming replacement is
+  diegetic ("telemetry coming in"). Auto-watch ON by default, gated by a
+  min-active-seconds floor and a focused-pane skip.
 - Dropped after evaluation: n-gram scoring below ~200 actions; onboarding starter-sets
   (a small fixed root menu *is* the starter set); literal `Shift+</>`-style movement
   chords (shifted punctuation is indistinguishable from typing in a non-modal editor —
