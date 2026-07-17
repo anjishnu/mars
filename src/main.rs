@@ -2,12 +2,13 @@ mod agent;
 mod app;
 mod banner;
 mod briefing;
-// The ssh/keyd broker is the deferred Unix-only capability (WINDOWS_PORT.md):
-// without a Unix host and the `ssh` feature it is replaced by an inert stub,
-// the same seam retrieval uses below — callers never learn it's missing.
-#[cfg(all(unix, feature = "ssh"))]
+// The ssh/keyd broker is optional as one unit. Without the feature it is replaced
+// by an inert stub, so callers never learn the capability is missing.
+#[cfg(feature = "ssh")]
 mod broker;
-#[cfg(not(all(unix, feature = "ssh")))]
+#[cfg(feature = "ssh")]
+mod ssh;
+#[cfg(not(feature = "ssh"))]
 #[path = "broker_stub.rs"]
 mod broker;
 mod buffer;
@@ -76,7 +77,7 @@ SESSIONS  (work survives closed windows and disconnects)
   mars rename <old> <new>        rename a running session
   mars kill <name>               end + delete a session (autosaves first)
   mars killall                   the reset button: end every session (autosaved)
-                                 and mars process, shut down ssh masters + the
+                                 and mars process, shut down ssh tunnel state + the
                                  key broker, sweep stale sockets. Memory files
                                  are kept; no new session is started.
                                  (alias: --killall)
@@ -114,6 +115,8 @@ REMOTE  (BETA — the agent works on every box; the key never leaves home)
                                  home, no key on the box. Detach returns here.
                                  Auto-starts the key broker; plain `ssh` still
                                  gives a bare shell.
+                                 Windows-home → Unix-remote is supported; install
+                                 mars on the remote first. Windows remotes pending.
   mars keyd                      (optional) start the broker explicitly, in a
                                  shell where your API key is set
 
@@ -181,6 +184,15 @@ fn main() -> Result<()> {
             banner::print_banner();
             println!("\n  mars {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
+        }
+        Some("--broker-handoff-version") => {
+            #[cfg(feature = "ssh")]
+            {
+                println!("{}", broker::BROKER_HANDOFF_PROTOCOL);
+                return Ok(());
+            }
+            #[cfg(not(feature = "ssh"))]
+            anyhow::bail!("this Mars build has no SSH broker support");
         }
         // Headless self-check (no TTY needed) — render, bar, PTY, and sessions.
         Some("--selfcheck") => return selfcheck(),
@@ -924,7 +936,7 @@ fn selfcheck() -> Result<()> {
 
     // 15. A real terminal PTY spawns and echoes.
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, tx)?;
+    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, None, tx)?;
     sh.send_bytes(b"echo ares_pty_ok\r");
     assert!(
         wait_until(|| sh.screen().contents().contains("ares_pty_ok")),
@@ -1915,12 +1927,22 @@ fn selfcheck() -> Result<()> {
         }
         impl TestClient {
             fn connect(path: &std::path::Path, version: &str) -> Result<Self> {
+                Self::connect_with_broker(path, version, None, None)
+            }
+            fn connect_with_broker(
+                path: &std::path::Path,
+                version: &str,
+                broker_sock: Option<&str>,
+                broker_capability: Option<&str>,
+            ) -> Result<Self> {
                 use anyhow::Context as _;
                 let stream = crate::sys::control::connect(path).context("testclient: connect")?;
                 let reader = BufReader::new(stream.try_clone().context("testclient: clone")?);
                 let mut me = TestClient { writer: stream, reader, screen: vt100::Parser::new(30, 100, 0) };
                 session::write_frame(&mut me.writer, &session::ClientFrame::Hello {
                     cols: 100, rows: 30, version: version.to_string(),
+                    broker_sock: broker_sock.map(str::to_string),
+                    broker_capability: broker_capability.map(str::to_string),
                 })
                 .context("testclient: hello")?;
                 Ok(me)
@@ -1962,6 +1984,7 @@ fn selfcheck() -> Result<()> {
                                 return Ok((self.screen.screen().contents().contains(needle), Some(message)));
                             }
                             Ok(session::ServerFrame::Status { .. }) => {}
+                            Ok(session::ServerFrame::BrokerRoute { .. }) => {}
                             Err(_) => {}
                         },
                         Err(_) => {} // timeout tick — keep waiting until deadline
@@ -1972,7 +1995,7 @@ fn selfcheck() -> Result<()> {
         }
 
         // c1 attaches, types a marker, sees it rendered.
-        let mut c1 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c1 = TestClient::connect(&spath, session::SESSION_PROTOCOL_VERSION)?;
         c1.text("sessionmarker")?;
         let (found, _) = c1.read_until("sessionmarker", 5)?;
         assert!(found, "marker not rendered to first client");
@@ -1984,14 +2007,46 @@ fn selfcheck() -> Result<()> {
             exit.map(|m| m.contains("version mismatch")).unwrap_or(false),
             "version mismatch not refused"
         );
+        let mut c_old = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let (_, exit) = c_old.read_until("\u{0}never\u{0}", 3)?;
+        assert!(
+            exit.map(|m| m.contains("version mismatch")).unwrap_or(false),
+            "pre-handoff session protocol was not refused"
+        );
 
         // Takeover + reattach: c2 attaches → c1 is dropped, c2 gets a full
         // redraw that still contains the marker (state survived).
-        let mut c2 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c2 = TestClient::connect_with_broker(
+            &spath,
+            session::SESSION_PROTOCOL_VERSION,
+            Some("/tmp/mars-auth-cap-route-one.sock"),
+            Some("11111111111111111111111111111111"),
+        )?;
         let (_, c1_exit) = c1.read_until("\u{0}never\u{0}", 3)?;
         assert!(c1_exit.is_some(), "old client not notified on takeover");
         let (found2, _) = c2.read_until("sessionmarker", 5)?;
         assert!(found2, "state lost across reattach");
+        c1.text("stale_writer")?;
+        c2.text("fresh_writer")?;
+        let (fresh, _) = c2.read_until("fresh_writer", 5)?;
+        assert!(fresh, "active client input was not applied after takeover");
+        assert!(
+            !c2.screen.screen().contents().contains("stale_writer"),
+            "detached client injected input after takeover"
+        );
+        #[cfg(feature = "ssh")]
+        {
+            assert_eq!(
+                broker::detect_broker_sock().as_deref(),
+                Some("/tmp/mars-auth-cap-route-one.sock"),
+                "session daemon did not accept the attached client's broker route"
+            );
+            assert_eq!(
+                broker::broker_capability_for("/tmp/mars-auth-cap-route-one.sock").as_deref(),
+                Some("11111111111111111111111111111111"),
+                "session daemon lost the attached client's broker capability"
+            );
+        }
 
         // Shell pane survives a hard disconnect: start one, run a command,
         // drop the client entirely, reconnect, and find the output.
@@ -2003,12 +2058,43 @@ fn selfcheck() -> Result<()> {
         assert!(pty_ok, "shell output not rendered in session");
         drop(c2); // hard disconnect — no Detach, just gone
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let mut c3 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c3 = TestClient::connect_with_broker(
+            &spath,
+            session::SESSION_PROTOCOL_VERSION,
+            Some("/tmp/mars-auth-cap-route-two.sock"),
+            Some("22222222222222222222222222222222"),
+        )?;
         // Reattach now always greets with the briefing overlay (iteration mode) —
         // dismiss it like a real user before reading the workspace underneath.
         c3.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
         let (pty_survived, _) = c3.read_until("daemon_pty_ok", 5)?;
         assert!(pty_survived, "PTY did not survive the disconnect");
+        #[cfg(feature = "ssh")]
+        let session_instance_id = {
+            assert_eq!(
+                broker::detect_broker_sock().as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "reattach did not replace the stale broker route"
+            );
+            assert_eq!(
+                broker::broker_capability_for("/tmp/mars-auth-cap-route-two.sock").as_deref(),
+                Some("22222222222222222222222222222222"),
+                "reattach did not replace the stale broker capability"
+            );
+            let (nested_sock, nested_capability, nested_instance_id) =
+                session::query_broker_route(&sname, None)?;
+            assert_eq!(
+                nested_sock.as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "persistent PTYs cannot query the reattached broker route"
+            );
+            assert_eq!(
+                nested_capability.as_deref(),
+                Some("22222222222222222222222222222222"),
+                "persistent PTYs cannot query the reattached broker capability"
+            );
+            nested_instance_id
+        };
 
         // `mars ls` sees it, including the attached state (c3 is attached).
         assert!(
@@ -2036,6 +2122,22 @@ fn selfcheck() -> Result<()> {
             session::list_sessions()?.iter().any(|(n, alive, _)| n == &renamed && *alive),
             "renamed session missing from ls"
         );
+        #[cfg(feature = "ssh")]
+        {
+            let (nested_sock, nested_capability, renamed_instance_id) =
+                session::query_broker_route(&sname, Some(&session_instance_id))?;
+            assert_eq!(renamed_instance_id, session_instance_id);
+            assert_eq!(
+                nested_sock.as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "renamed PTY lost the current broker route"
+            );
+            assert_eq!(
+                nested_capability.as_deref(),
+                Some("22222222222222222222222222222222"),
+                "renamed PTY lost the current broker capability"
+            );
+        }
         // c3 (attached before the rename) still drives the session.
         c3.text("post-rename")?;
         let (still_alive, _) = c3.read_until("post-rename", 5)?;
@@ -2123,6 +2225,48 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] quit=detach + killall ..... PASS");
     }
 
+    #[cfg(windows)]
+    {
+        use std::io::{BufRead as _, Write as _};
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir()
+            .join(format!("mars-control-auth-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let addr = dir.join("impostor.sock");
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let port = listener.local_addr()?.port();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::fs::write(&addr, format!("2 {port} {token}\n"))?;
+        let impostor = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("impostor accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("impostor timeout");
+                let mut nonce = String::new();
+                std::io::BufReader::new(stream.try_clone().expect("impostor clone"))
+                    .read_line(&mut nonce)
+                    .expect("impostor nonce");
+                assert_eq!(nonce.trim_end().len(), 32);
+                assert_ne!(nonce.trim_end(), token, "client disclosed the shared token");
+                writeln!(stream, "{}", "0".repeat(64)).expect("impostor proof");
+            }
+        });
+        assert!(
+            crate::sys::control::connect(&addr).is_err(),
+            "client accepted a server that could not prove the rendezvous token"
+        );
+        assert_eq!(
+            crate::sys::control::probe(&addr),
+            crate::sys::control::Probe::Dead,
+            "authentication failure was not distinguished from an OS permission error"
+        );
+        impostor.join().expect("impostor thread");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[selfcheck] control mutual auth ........ PASS");
+    }
+
     // 27c. Auto session name is a lowest-free number; session AI-name applies
     //      only while numeric (explicit names win).
     assert!(
@@ -2168,6 +2312,21 @@ fn selfcheck() -> Result<()> {
         session::socket_path("runtime-probe")?.starts_with(cfg_dir.join("runtime")),
         "selfcheck session runtime escaped its isolated root"
     );
+    let mut daemon_env = std::process::Command::new(std::env::current_exe()?);
+    session::isolate_session_daemon_env(&mut daemon_env);
+    for name in [
+        "MARS_SESSION",
+        "MARS_SESSION_ID",
+        "MARS_AUTH_SOCK",
+        "MARS_BROKER_CAPABILITY",
+    ] {
+        assert!(
+            daemon_env
+                .get_envs()
+                .any(|(candidate, value)| candidate == std::ffi::OsStr::new(name) && value.is_none()),
+            "nested session daemon still inherits parent route variable {name}"
+        );
+    }
     println!("[selfcheck] portable session names .... PASS");
 
     // 28. Config migration: a pre-rename ~/.config/ares is copied to mars/.
@@ -2791,7 +2950,7 @@ fn selfcheck() -> Result<()> {
     }
 
     // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
-    #[cfg(all(unix, feature = "ssh"))]
+    #[cfg(feature = "ssh")]
     {
         use std::io::{BufRead, BufReader};
         for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -2851,10 +3010,93 @@ fn selfcheck() -> Result<()> {
         let _ = std::fs::remove_file(&sock);
         println!("[selfcheck] ssh broker (proxy/detect) . PASS");
     }
+    // 30b. Windows-home tunnels authenticate before exposing broker frames.
+    #[cfg(feature = "ssh")]
+    {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir()
+            .join(format!("mars-broker-cap-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let addr = dir.join("auth.sock");
+        let _ = std::fs::remove_file(&addr);
+        let listener = crate::sys::control::bind(&addr)?;
+        let expected = "0123456789abcdef0123456789abcdef";
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().expect("capability server accept");
+            let mut reader = std::io::BufReader::new(
+                stream.try_clone().expect("capability stream clone")
+            );
+            let mut capability = String::new();
+            reader.read_line(&mut capability).expect("capability preamble");
+            assert_eq!(capability.trim_end(), expected);
+            let mut request = String::new();
+            reader.read_line(&mut request).expect("broker request");
+            assert!(
+                serde_json::from_str::<broker::BrokerRequest>(request.trim()).is_ok(),
+                "capability was not followed by a broker request"
+            );
+            session::write_frame(
+                &mut stream,
+                &broker::BrokerResponse::Chat { text: "capability-ok".into() },
+            )
+            .expect("capability response");
+        });
+        std::env::set_var(broker::BROKER_CAPABILITY_ENV, expected);
+        let cfg = agent::AgentConfig {
+            url: String::new(), key: String::new(), model: String::new(),
+            provider: "broker", max_tokens: 512, temperature: 0.3,
+            broker_sock: Some(addr.to_string_lossy().into_owned()),
+        };
+        assert_eq!(
+            broker::chat_via_broker(
+                cfg.broker_sock.as_deref().unwrap(), &cfg, Vec::new()
+            )?,
+            "capability-ok"
+        );
+        std::env::remove_var(broker::BROKER_CAPABILITY_ENV);
+        server.join().expect("capability server thread");
+
+        let relay_home = dir.join("relay-home.sock");
+        let home_listener = crate::sys::control::bind(&relay_home)?;
+        let home = std::thread::spawn(move || {
+            let mut stream = home_listener.accept().expect("relay home accept");
+            let mut reader =
+                std::io::BufReader::new(stream.try_clone().expect("home clone"));
+            let mut request = String::new();
+            reader.read_line(&mut request).expect("relayed request");
+            assert_eq!(request, "{\"probe\":true}\n");
+            stream.write_all(b"{\"relayed\":true}\n").expect("relayed response");
+            stream.flush().expect("relayed response flush");
+        });
+        let relay = ssh::BrokerRelay::start(&relay_home, expected)?;
+
+        let mut wrong = std::net::TcpStream::connect(relay.addr())?;
+        wrong.set_read_timeout(Some(Duration::from_secs(1)))?;
+        wrong.write_all(b"wrong\n{\"probe\":true}\n")?;
+        let mut byte = [0u8; 1];
+        assert!(
+            !matches!(wrong.read(&mut byte), Ok(n) if n > 0),
+            "relay returned broker bytes to an unauthenticated client"
+        );
+
+        let mut tunneled = std::net::TcpStream::connect(relay.addr())?;
+        tunneled.write_all(expected.as_bytes())?;
+        tunneled.write_all(b"\n{\"probe\":true}\n")?;
+        tunneled.flush()?;
+        let mut response = String::new();
+        std::io::BufReader::new(tunneled).read_line(&mut response)?;
+        assert_eq!(response, "{\"relayed\":true}\n");
+        drop(relay);
+        home.join().expect("relay home thread");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[selfcheck] ssh broker capability ..... PASS");
+    }
     // 30-stub. Without the capability the stub must be inert and honest: no
     // broker is ever detected (even with the env var set), and the ssh/keyd
     // entry points explain themselves instead of half-working.
-    #[cfg(not(all(unix, feature = "ssh")))]
+    #[cfg(not(feature = "ssh"))]
     {
         std::env::set_var("MARS_AUTH_SOCK", "/tmp/mars-stub-sc.sock");
         assert!(broker::detect_broker_sock().is_none(), "stub must never detect a broker");
@@ -2935,7 +3177,7 @@ fn selfcheck() -> Result<()> {
     println!("[selfcheck] fleet cache + ls resolver . PASS");
 
     // 32. The embedded installer (pushed to remotes by `mars ssh`) is intact.
-    #[cfg(all(unix, feature = "ssh"))]
+    #[cfg(feature = "ssh")]
     {
         assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
         assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
@@ -2949,7 +3191,7 @@ fn selfcheck() -> Result<()> {
     //      bind over a leftover; client-side StreamLocalBindUnlink only covers
     //      local forwards), and the install check must probe the real install
     //      destinations, not just sshd's bare non-login PATH.
-    #[cfg(all(unix, feature = "ssh"))]
+    #[cfg(feature = "ssh")]
     {
     let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true);
     let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
@@ -2971,6 +3213,35 @@ fn selfcheck() -> Result<()> {
     }
     assert!(broker::remote_session_cmd("/x.sock", false).contains("sh.rustup.rs"),
         "no-installer nudge lost the manual install steps");
+    let secured = broker::remote_session_cmd_with_capability(
+        "/tmp/mars-auth-secure.sock", false, Some("0123456789abcdef")
+    );
+    assert!(secured.contains("export MARS_BROKER_CAPABILITY=0123456789abcdef"),
+        "Windows-home command lost the tunnel capability");
+    assert!(
+        secured.contains("--broker-handoff-version")
+            && secured.contains(broker::BROKER_HANDOFF_PROTOCOL)
+            && secured.contains("remote Mars is outdated"),
+        "Windows-home command lost the remote broker protocol gate"
+    );
+    let scrubbed = ssh::ssh_command();
+    for name in agent::PROVIDER_CREDENTIAL_ENV_VARS {
+        assert!(
+            scrubbed
+                .get_envs()
+                .any(|(candidate, value)| candidate == std::ffi::OsStr::new(name) && value.is_none()),
+            "ssh child still inherits provider credential {name}"
+        );
+    }
+    let protocol = std::process::Command::new(std::env::current_exe()?)
+        .arg("--broker-handoff-version")
+        .output()?;
+    assert!(
+        protocol.status.success()
+            && String::from_utf8_lossy(&protocol.stdout).trim()
+                == broker::BROKER_HANDOFF_PROTOCOL,
+        "remote broker protocol probe returned the wrong marker"
+    );
     println!("[selfcheck] ssh remote commands ....... PASS");
 
     // 32c. Dead-socket self-heal: a leftover auth socket with no listener must
@@ -2980,13 +3251,68 @@ fn selfcheck() -> Result<()> {
     std::fs::create_dir_all(&tmp)?;
     assert!(!broker::probe_and_sweep(&tmp.join("none.sock")), "nonexistent socket read as live");
     let dead = tmp.join("dead.sock");
+    #[cfg(unix)]
     std::fs::write(&dead, b"")?;
+    #[cfg(windows)]
+    {
+        let unused = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let port = unused.local_addr()?.port();
+        drop(unused);
+        std::fs::write(
+            &dead,
+            format!("2 {port} 0123456789abcdef0123456789abcdef\n"),
+        )?;
+    }
     assert!(!broker::probe_and_sweep(&dead), "dead socket file read as live");
     assert!(!dead.exists(), "dead socket was not swept");
+    #[cfg(windows)]
+    {
+        let legacy = tmp.join("legacy.sock");
+        let legacy_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        std::fs::write(
+            &legacy,
+            format!(
+                "{} 0123456789abcdef0123456789abcdef\n",
+                legacy_listener.local_addr()?.port()
+            ),
+        )?;
+        assert!(!broker::probe_and_sweep(&legacy));
+        assert!(legacy.exists(), "legacy live descriptor was destructively swept");
+        drop(legacy_listener);
+
+        let busy = tmp.join("busy.sock");
+        let busy_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        std::fs::write(
+            &busy,
+            format!(
+                "2 {} 0123456789abcdef0123456789abcdef\n",
+                busy_listener.local_addr()?.port()
+            ),
+        )?;
+        let busy_peer = std::thread::spawn(move || {
+            let _ = busy_listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        });
+        assert!(!broker::probe_and_sweep(&busy));
+        assert!(busy.exists(), "timed-out live descriptor was destructively swept");
+        busy_peer.join().expect("busy control peer");
+    }
     let live = tmp.join("live.sock");
-    let _listener = crate::sys::control::bind(&live)?;
+    let listener = crate::sys::control::bind(&live)?;
+    #[cfg(windows)]
+    let live_accept = std::thread::spawn(move || {
+        listener.accept().expect("live socket probe accept")
+    });
+    #[cfg(unix)]
+    let _listener = listener;
     assert!(broker::probe_and_sweep(&live), "bound socket read as dead");
+    #[cfg(windows)]
+    drop(live_accept.join().expect("live socket probe thread"));
     assert!(live.exists(), "live socket must not be swept");
+    #[cfg(unix)]
+    {
     // The glob fallback: the socket name carries the HOME uid, so the remote
     // must find any live mars-auth-*.sock, not just its own uid's — while
     // still preferring an own-uid socket when one is live.
@@ -3003,6 +3329,7 @@ fn selfcheck() -> Result<()> {
     let _own = crate::sys::control::bind(&own)?;
     assert_eq!(broker::find_live_auth_sock(&tmp).as_deref(), own.to_str(),
         "own-uid socket must win over a foreign live one");
+    }
     let _ = std::fs::remove_dir_all(&tmp);
     println!("[selfcheck] auth-socket liveness ...... PASS");
     }

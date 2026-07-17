@@ -265,6 +265,8 @@ pub struct App {
     // ── Session (daemon) state ──
     /// Set when running inside a session daemon (`mars --session <name>`).
     pub session_name: Option<String>,
+    /// Immutable daemon identity used by PTY children across display-name changes.
+    pub session_instance_id: Option<String>,
     /// Action::Detach sets this; the session server consumes it.
     pub detach_requested: bool,
     /// Action::RenameSession sets this; the session server consumes it.
@@ -423,6 +425,7 @@ impl App {
             tree_open: false,
             tree_rows: Vec::new(),
             session_name: None,
+            session_instance_id: None,
             detach_requested: false,
             rename_session_to: None,
             agent_tx,
@@ -3734,7 +3737,16 @@ impl App {
         // The first opened file's dir if any, else where `mars` was launched —
         // never portable-pty's default (which lands the shell at /).
         let cwd = self.startup_cwd.clone().or_else(|| self.run_cwd.clone());
-        match terminal::spawn(id, rows, cols, scrollback, cwd, self.session_name.as_deref(), self.term_tx.clone()) {
+        match terminal::spawn(
+            id,
+            rows,
+            cols,
+            scrollback,
+            cwd,
+            self.session_name.as_deref(),
+            self.session_instance_id.as_deref(),
+            self.term_tx.clone(),
+        ) {
             Ok(term) => {
                 self.terms.insert(id, term);
                 let pid = self.focused_pane_id();

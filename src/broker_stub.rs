@@ -1,5 +1,5 @@
 //! Inert stand-in for `broker.rs` — compiled when the ssh broker capability is
-//! absent (a non-Unix build, or `--no-default-features`). Same seam pattern as
+//! absent (`--no-default-features`). Same seam pattern as
 //! `retrieval_stub.rs`: the callers never learn the capability is missing at
 //! compile time; at runtime the agent simply never detects a broker socket and
 //! `mars ssh` / `mars keyd` explain themselves. The portable pieces the app
@@ -9,11 +9,27 @@ use crate::agent::AgentConfig;
 use anyhow::Result;
 use std::path::PathBuf;
 
-const UNAVAILABLE: &str = "the ssh broker isn't in this build — it needs the `ssh` cargo feature \
-     and a Unix host (Windows ssh/keyd support is pending; see WINDOWS_PORT.md)";
+const UNAVAILABLE: &str = "the ssh broker isn't in this build — it needs the `ssh` cargo feature";
+
+pub fn set_session_broker(
+    _sock: Option<String>,
+    _capability: Option<String>,
+) -> Result<()> {
+    Ok(())
+}
+
+pub fn reset_session_broker() {}
+
+pub(crate) fn current_session_broker_route() -> Result<(Option<String>, Option<String>)> {
+    Ok((None, None))
+}
 
 /// No broker socket can exist without the capability.
 pub fn detect_broker_sock() -> Option<String> {
+    None
+}
+
+pub(crate) fn broker_capability_for(_sock: &str) -> Option<String> {
     None
 }
 

@@ -488,6 +488,37 @@
 - Windows key events (2026-07, crossterm 0.28): `KeyEvent.kind` is always populated
   and includes `Release`. Filter releases once in `App::apply_input`; otherwise
   every typed character/action runs twice. Preserve `Repeat` for held keys.
+- Windows OpenSSH (2026-07): stock 9.5p2 parses `ControlMaster`/`ControlPersist`
+  but Microsoft's project scope excludes client multiplexing/background mode.
+  Verified live against Ubuntu sshd: `-R remote-unix-socket:local-tcp` works from
+  Windows. Windows-home `mars ssh` uses that shape plus a per-invocation token
+  relay; no muxing.
+- Persistent remote broker route (2026-07): a remote session daemon outlives its
+  SSH invocation, so a nonce socket/capability captured only in its spawn env dies
+  after first detach. Carry the current route in `ClientFrame::Hello` and replace
+  the daemon's in-memory route on every attach; never log the capability. PTY
+  shells retain their spawn environment, so nested Mars processes must query the
+  daemon with `ClientFrame::BrokerRoute` via `MARS_SESSION` + an immutable
+  `MARS_SESSION_ID`, not trust inherited `MARS_AUTH_SOCK`; the ID survives rename.
+- Windows control authentication (2026-07): a one-way token leaks the token to a
+  process that rebinds a stale recorded TCP port. The control PAL now uses a fresh
+  client nonce plus role-separated HMAC-SHA256 proofs in both directions; keep the
+  500 ms deadline absolute across the whole handshake.
+- Control liveness (2026-07): authentication timeout, permission, and legacy
+  rendezvous parse failures are not proof a daemon is dead. `control::Probe`
+  distinguishes Live/Dead/Indeterminate; only definitive dead endpoints may be
+  unlinked, otherwise surface an upgrade/restart path.
+- SSH credential boundary (2026-07): system OpenSSH can export inherited variables
+  through user `SendEnv` rules. Build every ssh command through `ssh::ssh_command`,
+  which removes all supported provider-key variables after keyd has inherited them.
+- Nested sessions (2026-07): when `mars new` runs inside a PTY, remove parent
+  `MARS_SESSION`, `MARS_SESSION_ID`, `MARS_AUTH_SOCK`, and broker capability from
+  the spawned daemon; its attaching client hands over the current route.
+- Windows process containment (portable-pty 0.8.1): `Child::as_raw_handle()` is
+  available, but the ConPTY backend neither creates a Job Object nor starts the
+  child suspended. Assign the Mars server itself to a kill-on-close Job Object
+  before it creates `App` to contain future PTY descendants without a post-spawn
+  race. Per-pane descendant containment needs a suspended-spawn hook.
 
 - Replacing the installed binary (`~/.cargo/bin/mars`) with `cp` over the existing
   file gets the new binary SIGKILLed on launch (exit 137) — macOS AMFI caches the

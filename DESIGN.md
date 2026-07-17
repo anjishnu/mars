@@ -78,9 +78,17 @@ terminal.rs  Term: a PTY (portable-pty) + vt100::Parser, pumped by a reader thre
              session-detach free).
 agent.rs     AgentConfig (provider detection: custom/Groq/Gemini via env), the
              OpenAI-compatible chat call, RUN: directive parsing.
-broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
-             `mars ssh` (wraps system ssh, forwards ~/.mars/auth.sock to
-             /tmp/mars-auth-<uid>.sock via -R) + chat_via_broker (remote side).
+broker.rs    Key-never-leaves-home protocol + portable `mars keyd` daemon +
+             chat_via_broker (remote side).
+ssh.rs       System-OpenSSH orchestration. Unix keeps its ControlMaster path;
+             Windows-home uses a per-invocation authenticated TCP relay and a
+             mixed `-R remote-unix-socket:local-tcp` forward to Unix remotes.
+             The remote binary and any persistent session daemon must pass
+             explicit handoff/session protocol checks before broker routing.
+             Mars subprocesses inside persistent PTYs query the daemon's live
+             route instead of trusting the shell's inherited, expired route.
+             Every ssh subprocess explicitly removes supported provider-key
+             variables, so user `SendEnv` rules cannot export home credentials.
              Stale sockets are swept from both ends — the ssh prelude `rm -f`s
              the remote path before the forward is requested, and the remote's
              detect probe unlinks a dead socket — because sshd refuses to bind
@@ -191,6 +199,10 @@ needing a decision before terminal features accreted), resolved as follows:
   agent threads, buffer state. `Action::Detach` (travel mode `D`, or the bar) ends the
   *connection*; `Action::Quit` (through the existing dirty-buffer guard) ends the
   *session* and removes the socket.
+- **Remote broker handoff:** `Hello` also carries an optional current auth socket
+  and tunnel capability. A persistent remote daemon replaces the dead route from
+  its prior SSH invocation on every attach, without mutating process-global
+  environment variables or restarting the workspace.
 - **Daemonization:** `mars --session <name>` spawns `mars --server <name>` as a
   detached child (`setsid` on Unix; detached process-group flags on Windows), redirects
   stdio, and waits for its control address before attaching. `mars --resume [name]`
@@ -263,7 +275,7 @@ check the *parsed screen contents*, not `bytes.contains(needle)`.
 
 Multiple simultaneous clients per session; cross-crash session save/restore (a
 separate feature from live detach); OSC-52 clipboard forwarding for remote/SSH
-attach; Windows `mars ssh`/key-broker parity; a Vim-grammar compatibility layer. See
+attach; Windows as an SSH remote; a Vim-grammar compatibility layer. See
 `key_design.md` §4 "Deliberately deferred" for the reasoning behind each.
 
 ## 12. Where to go next

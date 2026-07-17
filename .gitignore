@@ -33,8 +33,11 @@ coverage/
 # Environment
 .env
 .env.local
-# Private: forward-looking product strategy + vision docs — kept local, not published
-design_ideas/
+# Forward-looking product strategy stays private unless a reviewed handoff is
+# explicitly allow-listed here.
+design_ideas/*
+!design_ideas/README.md
+!design_ideas/windows-parity-handoff.md
 # Research artifacts (EMNLP paper + experiment harness/results) — they live on
 # the naacl-research branch and local disk, not in the product mainline
 paper/

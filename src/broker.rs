@@ -1,26 +1,145 @@
 //! The key-never-leaves-home broker (`mars keyd`) and the remote-side proxy call.
 //!
 //! `mars keyd` runs on your home machine, holds the LLM key, and answers `Chat`
-//! requests that arrive over a Unix socket. When you `mars ssh <host>`, that
-//! socket is remote-forwarded, so the agent on the remote box asks the broker
-//! instead of ever holding a key. Reuses `session.rs`'s JSON-lines frame style
-//! (`write_frame` + `read_line`) — no new transport.
+//! requests that arrive over the platform control channel. When you
+//! `mars ssh <host>`, that channel is remote-forwarded, so the agent on the
+//! remote box asks the broker instead of ever holding a key. Reuses
+//! `session.rs`'s JSON-lines frame style (`write_frame` + `read_line`).
 
 use crate::agent::{self, AgentConfig};
 use crate::session::write_frame;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 const BROKER_VERSION: &str = "1";
+pub const BROKER_CAPABILITY_ENV: &str = "MARS_BROKER_CAPABILITY";
+pub const BROKER_HANDOFF_PROTOCOL: &str = "capability-v1";
+pub use crate::ssh::{
+    remote_prelude_cmd, remote_session_cmd, remote_session_cmd_with_capability, INSTALL_SH,
+};
 
-/// The installer, embedded so `mars ssh` can drop it on any host it connects
-/// to — version-matched to this binary, no GitHub/crates availability needed
-/// for the script itself to arrive.
-pub const INSTALL_SH: &str = include_str!("../install.sh");
+#[derive(Clone)]
+struct SessionBrokerRoute {
+    sock: String,
+    capability: Option<String>,
+}
+
+enum SessionBrokerState {
+    Environment,
+    Session(Option<SessionBrokerRoute>),
+}
+
+static SESSION_BROKER: OnceLock<RwLock<SessionBrokerState>> = OnceLock::new();
+
+pub fn set_session_broker(
+    sock: Option<String>,
+    capability: Option<String>,
+) -> Result<()> {
+    let route = match sock.filter(|s| !s.is_empty()) {
+        Some(sock) => {
+            if sock.len() > 512 || sock.bytes().any(|b| matches!(b, 0 | b'\r' | b'\n')) {
+                anyhow::bail!("invalid broker socket in session handshake");
+            }
+            let capability = capability.filter(|s| !s.is_empty());
+            if let Some(cap) = &capability {
+                validate_capability(cap)?;
+            }
+            if requires_capability(&sock) && capability.is_none() {
+                anyhow::bail!("capability broker socket arrived without a capability");
+            }
+            Some(SessionBrokerRoute { sock, capability })
+        }
+        None => {
+            if capability.as_ref().is_some_and(|s| !s.is_empty()) {
+                anyhow::bail!("broker capability arrived without a socket");
+            }
+            None
+        }
+    };
+    let state =
+        SESSION_BROKER.get_or_init(|| RwLock::new(SessionBrokerState::Environment));
+    *state
+        .write()
+        .map_err(|_| anyhow::anyhow!("session broker state is poisoned"))? =
+        SessionBrokerState::Session(route);
+    Ok(())
+}
+
+pub fn reset_session_broker() {
+    if let Some(state) = SESSION_BROKER.get() {
+        if let Ok(mut state) = state.write() {
+            *state = SessionBrokerState::Environment;
+        }
+    }
+}
+
+pub(crate) fn current_session_broker_route() -> Result<(Option<String>, Option<String>)> {
+    if let Some(state) = SESSION_BROKER.get() {
+        let state = state
+            .read()
+            .map_err(|_| anyhow::anyhow!("session broker state is poisoned"))?;
+        if let SessionBrokerState::Session(route) = &*state {
+            return Ok(match route {
+                Some(route) => (Some(route.sock.clone()), route.capability.clone()),
+                None => (None, None),
+            });
+        }
+    }
+    let sock = std::env::var("MARS_AUTH_SOCK")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let capability = sock
+        .as_deref()
+        .and_then(broker_capability_for);
+    Ok((sock, capability))
+}
+
+fn validate_capability(capability: &str) -> Result<()> {
+    if capability.is_empty()
+        || capability.len() > 128
+        || capability.bytes().any(|b| matches!(b, b'\r' | b'\n'))
+    {
+        anyhow::bail!("invalid broker tunnel capability");
+    }
+    Ok(())
+}
+
+fn session_broker_sock() -> Option<Option<String>> {
+    let state = SESSION_BROKER.get()?.read().ok()?;
+    match &*state {
+        SessionBrokerState::Environment => None,
+        SessionBrokerState::Session(route) => {
+            Some(route.as_ref().map(|route| route.sock.clone()))
+        }
+    }
+}
+
+pub(crate) fn broker_capability_for(sock: &str) -> Option<String> {
+    if let Some(state) = SESSION_BROKER.get() {
+        if let Ok(state) = state.read() {
+            if let SessionBrokerState::Session(route) = &*state {
+                return route
+                    .as_ref()
+                    .filter(|route| route.sock == sock)
+                    .and_then(|route| route.capability.clone());
+            }
+        }
+    }
+    std::env::var(BROKER_CAPABILITY_ENV)
+        .ok()
+        .filter(|cap| validate_capability(cap).is_ok())
+}
+
+fn requires_capability(sock: &str) -> bool {
+    std::path::Path::new(sock)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("mars-auth-cap-"))
+}
 
 /// Remote → home. One request per connection lifetime is enough, but the
 /// connection is kept open for reuse across an agent session.
@@ -53,22 +172,12 @@ pub enum BrokerResponse {
 /// `$HOME/.mars/auth.sock`, under a `0700` dir — the home broker's socket, and
 /// the thing `ssh -R` forwards to the remote.
 pub fn broker_socket_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
-    let dir = PathBuf::from(home).join(".mars");
+    let home = crate::sys::paths::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the home directory"))?;
+    let dir = home.join(".mars");
     std::fs::create_dir_all(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::sys::fsperm::restrict_dir(&dir)?;
     Ok(dir.join("auth.sock"))
-}
-
-/// Well-known forwarded-socket path on the remote (per-uid), so a plain `ssh`
-/// with a `RemoteForward` line (from `mars ssh-setup`) works even when
-/// `MARS_AUTH_SOCK` isn't exported. The uid is the *local* one — two users who
-/// share a local uid (e.g. two single-user Macs, both 501) would collide on a
-/// shared remote; fixing that needs remote-home discovery (a protocol change).
-pub fn remote_socket_path() -> String {
-    let uid = unsafe { libc::getuid() };
-    format!("/tmp/mars-auth-{uid}.sock")
 }
 
 /// True if something is listening at `path`. A dead leftover socket file is
@@ -76,13 +185,16 @@ pub fn remote_socket_path() -> String {
 /// `StreamLocalBindUnlink` is off by default and the client-side flag only
 /// covers local forwards), so sweeping here lets the next connection bind.
 pub fn probe_and_sweep(path: &std::path::Path) -> bool {
-    if UnixStream::connect(path).is_ok() {
-        return true;
+    match crate::sys::control::probe(path) {
+        crate::sys::control::Probe::Live => true,
+        crate::sys::control::Probe::Dead => {
+            if path.exists() {
+                let _ = std::fs::remove_file(path);
+            }
+            false
+        }
+        crate::sys::control::Probe::Indeterminate => false,
     }
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
-    false
 }
 
 /// The socket the remote agent should proxy through, if any: an explicit
@@ -90,12 +202,40 @@ pub fn probe_and_sweep(path: &std::path::Path) -> bool {
 /// tunnel is gone) must fall through to the provider chain, not pin every
 /// call to an unreachable broker.
 pub fn detect_broker_sock() -> Option<String> {
+    if let Ok(session) = std::env::var("MARS_SESSION") {
+        if !session.is_empty() {
+            let instance_id = std::env::var("MARS_SESSION_ID")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let Ok((sock, capability, _)) =
+                crate::session::query_broker_route(&session, instance_id.as_deref())
+            else {
+                return None;
+            };
+            return set_session_broker(sock.clone(), capability)
+                .ok()
+                .and(sock);
+        }
+    }
+    if let Some(route) = session_broker_sock() {
+        return route;
+    }
     if let Ok(s) = std::env::var("MARS_AUTH_SOCK") {
         if !s.is_empty() {
+            if requires_capability(&s) && broker_capability_for(&s).is_none() {
+                return None;
+            }
             return Some(s);
         }
     }
-    find_live_auth_sock(std::path::Path::new("/tmp"))
+    #[cfg(unix)]
+    {
+        find_live_auth_sock(std::path::Path::new("/tmp"))
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
 }
 
 /// The forwarded socket's name carries the HOME machine's uid, which rarely
@@ -104,25 +244,37 @@ pub fn detect_broker_sock() -> Option<String> {
 /// same-uid case stays deterministic), then lexicographic. Dead leftovers
 /// are swept along the way, where permissions allow.
 pub fn find_live_auth_sock(dir: &std::path::Path) -> Option<String> {
-    let own = dir.join(format!("mars-auth-{}.sock", unsafe { libc::getuid() }));
-    if probe_and_sweep(&own) {
-        return Some(own.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        return None;
     }
-    let mut candidates: Vec<_> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("mars-auth-") && n.ends_with(".sock"))
-        })
-        .collect();
-    candidates.sort();
-    candidates
-        .into_iter()
-        .find(|p| probe_and_sweep(p))
-        .map(|p| p.to_string_lossy().into_owned())
+    #[cfg(unix)]
+    {
+        let own = dir.join(format!("mars-auth-{}.sock", crate::sys::proc::uid_tag()));
+        if probe_and_sweep(&own) {
+            return Some(own.to_string_lossy().into_owned());
+        }
+        let mut candidates: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| {
+                        n.starts_with("mars-auth-")
+                            && !n.starts_with("mars-auth-cap-")
+                            && n.ends_with(".sock")
+                    })
+            })
+            .collect();
+        candidates.sort();
+        candidates
+            .into_iter()
+            .find(|p| probe_and_sweep(p))
+            .map(|p| p.to_string_lossy().into_owned())
+    }
 }
 
 /// The home broker daemon. Loads the key once (from env today), binds the
@@ -138,13 +290,23 @@ pub fn keyd_main() -> Result<()> {
     }
     let path = broker_socket_path()?;
     // Clear a stale socket from a previous run (nothing listening).
-    if path.exists() && UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
+    if path.exists() {
+        match crate::sys::control::probe(&path) {
+            crate::sys::control::Probe::Dead => {
+                let _ = std::fs::remove_file(&path);
+            }
+            crate::sys::control::Probe::Indeterminate => {
+                anyhow::bail!(
+                    "mars keyd: existing endpoint cannot be authenticated; \
+                     stop the old keyd or run `mars killall`"
+                );
+            }
+            crate::sys::control::Probe::Live => {}
+        }
     }
-    let listener = UnixListener::bind(&path)
+    let listener = crate::sys::control::bind(&path)
         .map_err(|e| anyhow::anyhow!("mars keyd: cannot bind {}: {e}", path.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    crate::sys::fsperm::restrict_file(&path)?;
     println!(
         "mars keyd: broker listening (provider: {}) at {}",
         cfg.provider,
@@ -164,7 +326,7 @@ pub fn keyd_main() -> Result<()> {
     Ok(())
 }
 
-fn handle_conn(stream: UnixStream) -> Result<()> {
+fn handle_conn(stream: crate::sys::control::Stream) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut w = stream;
     let mut line = String::new();
@@ -175,10 +337,25 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
         }
         let req: BrokerRequest = match serde_json::from_str(line.trim()) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(e) => {
+                write_frame(
+                    &mut w,
+                    &BrokerResponse::Error {
+                        message: format!("malformed broker request: {e}"),
+                    },
+                )?;
+                continue;
+            }
         };
-        let BrokerRequest::Chat { version, model, messages, max_tokens, temperature, host, session } =
-            req;
+        let BrokerRequest::Chat {
+            version,
+            model,
+            messages,
+            max_tokens,
+            temperature,
+            host,
+            session,
+        } = req;
         // Status push: a brokered call is proof the remote's agent is alive —
         // refresh the fleet so `mars ls` shows it as current, not stale.
         if let Some(h) = &host {
@@ -186,7 +363,9 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
         }
         let resp = if version != BROKER_VERSION {
             BrokerResponse::Error {
-                message: format!("broker version mismatch (home {BROKER_VERSION}, remote {version})"),
+                message: format!(
+                    "broker version mismatch (home {BROKER_VERSION}, remote {version})"
+                ),
             }
         } else {
             // Fresh config each request → the key is read here, at home, and a
@@ -199,7 +378,9 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
             c.temperature = temperature;
             match agent::chat(&c, messages, "remote") {
                 Ok(text) => BrokerResponse::Chat { text },
-                Err(e) => BrokerResponse::Error { message: e.to_string() },
+                Err(e) => BrokerResponse::Error {
+                    message: e.to_string(),
+                },
             }
         };
         write_frame(&mut w, &resp)?;
@@ -214,13 +395,24 @@ pub fn chat_via_broker(
     cfg: &AgentConfig,
     messages: Vec<serde_json::Value>,
 ) -> Result<String> {
-    let stream = UnixStream::connect(sock)
-        .map_err(|e| anyhow::anyhow!("home broker unreachable ({e}); is `mars keyd` running + the tunnel up?"))?;
+    let stream = crate::sys::control::connect(sock).map_err(|e| {
+        anyhow::anyhow!("home broker unreachable ({e}); is `mars keyd` running + the tunnel up?")
+    })?;
     // A little longer than chat()'s own 30s, so the home call's timeout wins.
     stream.set_read_timeout(Some(Duration::from_secs(40)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut w = stream;
-    let model = if cfg.model.is_empty() { None } else { Some(cfg.model.clone()) };
+    if let Some(capability) = broker_capability_for(sock) {
+        use std::io::Write as _;
+        w.write_all(capability.as_bytes())?;
+        w.write_all(b"\n")?;
+        w.flush()?;
+    }
+    let model = if cfg.model.is_empty() {
+        None
+    } else {
+        Some(cfg.model.clone())
+    };
     write_frame(
         &mut w,
         &BrokerRequest::Chat {
@@ -229,7 +421,7 @@ pub fn chat_via_broker(
             messages,
             max_tokens: cfg.max_tokens,
             temperature: cfg.temperature,
-            host: hostname(),
+            host: crate::sys::proc::hostname(),
             session: std::env::var("MARS_SESSION").ok(),
         },
     )?;
@@ -243,26 +435,21 @@ pub fn chat_via_broker(
     }
 }
 
-/// This machine's hostname — what a remote self-reports over the broker.
-fn hostname() -> Option<String> {
-    let mut buf = [0u8; 256];
-    let ok =
-        unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
-    if !ok {
-        return None;
-    }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
-}
-
 /// Make sure the home broker is running, auto-starting it (detached) if not —
 /// so `mars ssh` is one command, not two. The spawned `mars keyd` inherits THIS
 /// shell's env, which is exactly where the API key lives. Best-effort: ssh
 /// proceeds either way (a keyless box just won't have an agent).
-fn ensure_keyd(home_sock: &std::path::Path) -> bool {
-    if UnixStream::connect(home_sock).is_ok() {
-        return true; // already up
+pub(crate) fn ensure_keyd(home_sock: &std::path::Path) -> bool {
+    match crate::sys::control::probe(home_sock) {
+        crate::sys::control::Probe::Live => return true,
+        crate::sys::control::Probe::Indeterminate => {
+            eprintln!(
+                "mars ssh: the home broker endpoint exists but cannot be authenticated; \
+                 stop the old keyd or run `mars killall`."
+            );
+            return false;
+        }
+        crate::sys::control::Probe::Dead => {}
     }
     // Starting the broker needs a key in this environment.
     if !AgentConfig::from_env().is_configured() {
@@ -281,36 +468,39 @@ fn ensure_keyd(home_sock: &std::path::Path) -> bool {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("keyd");
     cmd.env_remove("MARS_AUTH_SOCK"); // the broker must never run in proxy mode
+    cmd.env_remove(BROKER_CAPABILITY_ENV);
     // Log to ~/.mars/keyd.log; never spill the daemon's output onto this TTY.
     let log = home_sock.with_file_name("keyd.log");
-    match std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
         Ok(f) => {
             let f2 = f.try_clone().ok();
             cmd.stdout(f);
             match f2 {
-                Some(f2) => { cmd.stderr(f2); }
-                None => { cmd.stderr(std::process::Stdio::null()); }
+                Some(f2) => {
+                    cmd.stderr(f2);
+                }
+                None => {
+                    cmd.stderr(std::process::Stdio::null());
+                }
             }
         }
         Err(_) => {
-            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
         }
     }
     cmd.stdin(std::process::Stdio::null());
-    // Detach from this TTY so the broker outlives the ssh session (like ssh-agent).
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::sys::daemon::detach(&mut cmd);
     if cmd.spawn().is_err() {
         return false;
     }
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(50));
-        if UnixStream::connect(home_sock).is_ok() {
+        if crate::sys::control::probe(home_sock) == crate::sys::control::Probe::Live {
             eprintln!("mars ssh: started the home broker (mars keyd) automatically.");
             return true;
         }
@@ -319,165 +509,6 @@ fn ensure_keyd(home_sock: &std::path::Path) -> bool {
     false
 }
 
-/// The remote command for the prelude ssh (the connection that authenticates
-/// once and persists the ControlMaster): sweep a stale auth socket left by a
-/// dead session — it would make the interactive ssh's `-R` bind fail — then
-/// stage the embedded installer. The sweep is `;`-separated so it runs even if
-/// the installer write fails and the exit status stays that of the `&&` chain
-/// (which is what `pushed` reads). `sweep` must be false when a live
-/// ControlMaster is being reused: its previous `-R` forward survives on the
-/// master, still bound to the existing socket inode, so removing the file
-/// would orphan a working tunnel — and the re-requested forward is a mux
-/// no-op that never re-binds the path.
-pub fn remote_prelude_cmd(remote_sock: &str, sweep: bool) -> String {
-    let rm = if sweep {
-        format!("rm -f {remote_sock}; ")
-    } else {
-        String::new()
-    };
-    format!(
-        "{rm}mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh"
-    )
-}
-
-/// The interactive session's remote command: report the tunnel's actual state
-/// (a working `mars ssh` must not be indistinguishable from plain ssh), then
-/// land the user IN a remote mars session — attach to the most recent live one,
-/// else create "main" — with the auth socket exported so the daemon and its
-/// shells inherit it. Detaching ends the ssh, tmux-style. `command -v` sees
-/// only sshd's bare non-login PATH, so the real install destinations are
-/// probed too; if mars is missing, nudge and fall back to a plain login shell
-/// (plain `ssh` is the deliberate escape hatch for a bare shell).
-pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
-    let nudge = if pushed {
-        "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
-    } else {
-        "printf '[mars] not installed here. Install:\\n  \
-         curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
-         . \"$HOME/.cargo/env\" && cargo install mars-terminal --locked\\n'"
-    };
-    format!(
-        "if [ -S {remote_sock} ]; then \
-         printf '[mars] agent tunnel ready — your home key answers here\\n'; else \
-         printf '[mars] no agent tunnel (forward failed?) — the agent needs a key on this box\\n'; fi; \
-         M=\"$(command -v mars 2>/dev/null)\"; \
-         if [ -z \"$M\" ] && [ -x \"$HOME/.cargo/bin/mars\" ]; then M=\"$HOME/.cargo/bin/mars\"; fi; \
-         if [ -z \"$M\" ] && [ -x \"$HOME/.local/bin/mars\" ]; then M=\"$HOME/.local/bin/mars\"; fi; \
-         export MARS_AUTH_SOCK={remote_sock}; \
-         if [ -n \"$M\" ]; then \"$M\" attach 2>/dev/null || exec \"$M\" new main; else \
-         {nudge}; exec ${{SHELL:-/bin/sh}} -l; fi"
-    )
-}
-
-/// `mars ssh <host> [ssh args…]` — wraps system ssh so the auth socket is
-/// forwarded and `MARS_AUTH_SOCK` is set in the remote shell, with no reliance
-/// on server-side `AcceptEnv`.
 pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
-    let home_sock = broker_socket_path()?;
-    ensure_keyd(&home_sock); // auto-start the broker if it isn't already up
-
-    crate::fleet::fleet_record(&host, None); // remember this host for `mars ls`
-    let remote_sock = remote_socket_path();
-    let control = home_sock.with_file_name("cm-%r@%h:%p");
-    // A ControlMaster killed uncleanly (pkill, crash) leaves its socket file
-    // behind; ssh then warns "ControlSocket … already exists, disabling
-    // multiplexing" and drops connection-sharing. Sweep dead ones first:
-    // `ssh -O check` answers from the socket alone, so a dummy destination works.
-    if let Some(dir) = control.parent() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if !name.starts_with("cm-") {
-                    continue;
-                }
-                let alive = std::process::Command::new("ssh")
-                    .arg("-O").arg("check")
-                    .arg("-o").arg(format!("ControlPath={}", e.path().display()))
-                    .arg("stale-check")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !alive {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-    }
-
-    // Is a live master already serving this host? Then its previous -R forward
-    // is still up (mux forwards live as long as the master), so the sweep and
-    // the forward request must both be skipped: rm would delete the socket out
-    // from under the live listener, and the re-request is a mux no-op that
-    // would never re-bind the path it just lost.
-    let master_alive = std::process::Command::new("ssh")
-        .arg("-O").arg("check")
-        .arg("-o").arg(format!("ControlPath={}", control.display()))
-        .args(&extra)
-        .arg(&host)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    // Drop the embedded installer at ~/.mars/install.sh over the SAME connection,
-    // BEFORE the interactive session: this first ssh performs the (single)
-    // authentication and persists the ControlMaster, which the interactive ssh
-    // then reuses — one prompt total. Password prompts read /dev/tty, so piping
-    // the script through stdin is safe. Best-effort: never blocks the session.
-    let pushed = {
-        use std::io::Write as _;
-        let mut child = std::process::Command::new("ssh")
-            .arg("-o").arg("ControlMaster=auto")
-            .arg("-o").arg("ControlPersist=60s")
-            // A master whose TCP died (sleep, network change) still answers
-            // `-O check` over its local socket, then ambushes the next session
-            // with "Broken pipe". Keepalives make it notice and exit instead.
-            .arg("-o").arg("ServerAliveInterval=30")
-            .arg("-o").arg("ServerAliveCountMax=3")
-            .arg("-o").arg(format!("ControlPath={}", control.display()))
-            .args(&extra)
-            .arg(&host)
-            .arg(remote_prelude_cmd(&remote_sock, !master_alive))
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .ok();
-        match child.as_mut() {
-            Some(c) => {
-                let ok_write = c
-                    .stdin
-                    .take()
-                    .and_then(|mut s| s.write_all(INSTALL_SH.as_bytes()).ok())
-                    .is_some();
-                let ok_exit = c.wait().map(|s| s.success()).unwrap_or(false);
-                ok_write && ok_exit
-            }
-            None => false,
-        }
-    };
-    if !pushed {
-        eprintln!("mars ssh: note — couldn't drop the installer on the remote (continuing).");
-    }
-
-    let remote_cmd = remote_session_cmd(&remote_sock, pushed);
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-o").arg("StreamLocalBindUnlink=yes")
-        .arg("-o").arg("ControlMaster=auto")
-        .arg("-o").arg("ControlPersist=60s")
-        .arg("-o").arg("ServerAliveInterval=30")
-        .arg("-o").arg("ServerAliveCountMax=3")
-        .arg("-o").arg(format!("ControlPath={}", control.display()));
-    if !master_alive {
-        cmd.arg("-R").arg(format!("{remote_sock}:{}", home_sock.display()));
-    }
-    let status = cmd
-        .args(&extra)
-        .arg("-t")
-        .arg(&host)
-        .arg(&remote_cmd)
-        .status()
-        .map_err(|e| anyhow::anyhow!("mars ssh: could not launch ssh: {e}"))?;
-    std::process::exit(status.code().unwrap_or(1));
+    crate::ssh::ssh_main(host, extra)
 }

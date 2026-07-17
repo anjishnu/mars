@@ -1,7 +1,6 @@
 //! Unix adapter for the platform abstraction layer.
 //!
-//! Every `std::os::unix` / `libc` call the application makes lives here (plus the
-//! ssh broker, which is a separate, deferred capability — see `WINDOWS_PORT.md`).
+//! Every `std::os::unix` / `libc` call the application makes lives here.
 //! Each function wraps *exactly* the behavior the pre-abstraction code had, so the
 //! Unix build is byte-for-byte identical after the migration.
 
@@ -31,8 +30,25 @@ pub mod control {
     use std::io;
     use std::path::Path;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Probe {
+        Live,
+        Dead,
+        Indeterminate,
+    }
+
     pub type Stream = std::os::unix::net::UnixStream;
-    pub type Listener = std::os::unix::net::UnixListener;
+    pub struct Listener(std::os::unix::net::UnixListener);
+
+    impl Listener {
+        pub fn accept(&self) -> io::Result<Stream> {
+            self.0.accept().map(|(stream, _)| stream)
+        }
+
+        pub fn incoming(&self) -> impl Iterator<Item = io::Result<Stream>> + '_ {
+            std::iter::from_fn(move || Some(self.accept()))
+        }
+    }
 
     /// Connect to the channel at `addr` (a filesystem socket path on Unix).
     pub fn connect(addr: impl AsRef<Path>) -> io::Result<Stream> {
@@ -41,12 +57,23 @@ pub mod control {
 
     /// Bind a listener at `addr`.
     pub fn bind(addr: impl AsRef<Path>) -> io::Result<Listener> {
-        Listener::bind(addr.as_ref())
+        std::os::unix::net::UnixListener::bind(addr.as_ref()).map(Listener)
     }
 
-    /// Cheap liveness probe: is there a live listener at `addr`?
-    pub fn probe(addr: impl AsRef<Path>) -> bool {
-        Stream::connect(addr.as_ref()).is_ok()
+    /// Classify a rendezvous without deleting it on permission or timeout errors.
+    pub fn probe(addr: impl AsRef<Path>) -> Probe {
+        match Stream::connect(addr.as_ref()) {
+            Ok(_) => Probe::Live,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Probe::Dead
+            }
+            Err(_) => Probe::Indeterminate,
+        }
     }
 }
 
@@ -103,9 +130,24 @@ pub mod proc {
         unsafe { libc::getuid() }.to_string()
     }
 
+    /// This machine's hostname, for broker fleet status.
+    #[cfg(feature = "ssh")]
+    pub fn hostname() -> Option<String> {
+        let mut buf = [0u8; 256];
+        if unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) } != 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+
     /// Kill every process whose command line contains `needle`. Best-effort.
     pub fn kill_matching(needle: &str) {
-        let _ = std::process::Command::new("pkill").arg("-f").arg(needle).status();
+        let _ = std::process::Command::new("pkill")
+            .arg("-f")
+            .arg(needle)
+            .status();
     }
 }
 
@@ -118,6 +160,13 @@ pub mod fsperm {
     pub fn restrict_dir(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+
+    /// Restrict a file or Unix-domain socket to its owner (`0600`).
+    #[cfg(feature = "ssh")]
+    pub fn restrict_file(path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
     }
 }
 

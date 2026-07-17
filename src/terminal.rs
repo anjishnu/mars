@@ -48,6 +48,7 @@ pub fn spawn(
     scrollback: usize,
     cwd: Option<std::path::PathBuf>,
     session: Option<&str>,
+    session_instance_id: Option<&str>,
     tx: mpsc::Sender<TermEvent>,
 ) -> Result<Term> {
     let rows = rows.max(1);
@@ -71,6 +72,9 @@ pub fn spawn(
     // opens a tab in the running instance instead of launching a new one.
     if let Some(name) = session {
         cmd.env("MARS_SESSION", name);
+    }
+    if let Some(id) = session_instance_id {
+        cmd.env("MARS_SESSION_ID", id);
     }
     let mut child = pair.slave.spawn_command(cmd)?;
     let killer = child.clone_killer();
@@ -131,8 +135,8 @@ pub fn spawn(
     })
 }
 
-/// Removing a Term (closed pane/tab, app exit) must not orphan the shell: kill
-/// the child process tree with the pane, never leave it running invisibly.
+/// Removing a Term (closed pane/tab, app exit) must not orphan the shell process.
+/// Descendant containment is a separate platform lifecycle responsibility.
 impl Drop for Term {
     fn drop(&mut self) {
         self.notify_exit.store(false, Ordering::Release);

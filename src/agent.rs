@@ -6,6 +6,19 @@
 
 use std::sync::mpsc;
 
+#[cfg(feature = "ssh")]
+pub const PROVIDER_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "MARS_LLM_KEY",
+    "ARES_LLM_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AZURE_OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+];
+
 /// What the model asked the editor to do (always user-confirmed before firing).
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentDirective {
@@ -324,7 +337,10 @@ impl AgentConfig {
             return self
                 .broker_sock
                 .as_deref()
-                .map(|s| crate::sys::control::probe(std::path::Path::new(s)))
+                .map(|s| {
+                    crate::sys::control::probe(std::path::Path::new(s))
+                        == crate::sys::control::Probe::Live
+                })
                 .unwrap_or(false);
         }
         !self.key.is_empty()

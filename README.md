@@ -183,9 +183,9 @@ mars ask "how do I move a pane to the other side?"
 > remote installer) are new and still being hardened — as are the AI features they
 > carry (see [The agent](#the-agent)). The core editor, multiplexer, and sessions are
 > stable; the remote/tunnel path may have rough edges — please report anything you hit.
-> The SSH broker currently requires a Unix home host; native Windows builds support
-> the core editor, local agent, terminal panes, and persistent sessions, but reject
-> `mars ssh` / `mars keyd` explicitly.
+> Native Windows can be the home host when the remote is Unix. This path uses one
+> foreground stock-OpenSSH connection per invocation (no `ControlMaster`), and Mars
+> must already be installed on the remote. Windows as the remote host is pending.
 
 You set your key **once**, on your own machine, and the agent works on every host you
 SSH into — without the key ever landing on a remote box (not in its env, not in its
@@ -199,6 +199,10 @@ mars ssh gpubox           # ssh in — forwards the auth socket AND auto-starts 
 
 (The broker — `mars keyd` — starts on demand the first time you `mars ssh`; run it
 explicitly only if you want it in a specific shell.)
+
+On a Windows home host, each `mars ssh` invocation authenticates independently.
+The attached remote session receives the current tunnel route during its attach
+handshake, so detach and reattach preserve both the workspace and broker access.
 
 **Installing mars on a fresh host.** Mars needs a modern Rust toolchain (≥ 1.85) — a
 distro-packaged `cargo` (e.g. Ubuntu's 1.75) is too old and fails with a cryptic

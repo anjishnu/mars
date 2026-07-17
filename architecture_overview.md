@@ -291,15 +291,32 @@ directive** on the final line:
 `strip_reasoning` removes `<think>…</think>` blocks from reasoning models
 (Qwen3, DeepSeek-R1) on every response.
 
+### `broker.rs` + `ssh.rs` — key-never-leaves-home
+
+`broker.rs` owns the portable JSON request protocol, the `mars keyd` service, and
+the remote chat proxy. keyd listens through `sys::control`: a protected Unix
+socket on Unix or token-authenticated loopback TCP on Windows.
+
+`ssh.rs` owns system-OpenSSH lifecycle and remote POSIX command construction.
+Unix retains connection multiplexing. A Windows home uses a per-invocation
+capability relay and `-R remote-unix-socket:local-tcp`; the relay authenticates
+the remote bytes, then opens the protected local keyd channel. The current socket
+and capability travel in the session `Hello`, so reattaching a persistent remote
+daemon replaces its dead prior tunnel route. SSH child environments explicitly
+remove provider credentials before OpenSSH can apply user `SendEnv` rules.
+
 ### `session.rs` — persistence as a process split
 
 The tmux-style client/server implementation. The wire protocol is newline-delimited
 JSON over a platform-local control stream: a mode-0700 Unix-domain socket on Unix,
-or token-authenticated loopback TCP with a rendezvous file on Windows. Addresses
+or nonce/HMAC mutually-authenticated loopback TCP with a rendezvous file on Windows. Addresses
 normally live under the platform temp directory in `mars-<user-tag>`; the
 `MARS_RUNTIME_DIR` base override makes selfcheck isolation explicit.
-Client→server is `ClientFrame` — `Hello{cols,rows,version}` (strict version
-handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
+Control probes distinguish live, definitively dead, and indeterminate endpoints,
+so an upgrade or authentication timeout never unlinks a live daemon's address.
+Client→server is `ClientFrame` — `Hello{cols,rows,version,broker_*}` (strict
+protocol-qualified version handshake plus optional live SSH broker handoff),
+`Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
 `Status`/`Kill`/`Rename` used by `mars ls`/`kill`/`rename`. Server→client is
 `ServerFrame` — `Output{b64}` (one rendered frame's ANSI bytes), `Exit{message}`,
 `Status`.
@@ -313,7 +330,10 @@ handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
   autosave, and watch summaries alive while detached. Attach triggers
   `App::on_attach` (the W7 briefing diff); disconnect triggers `on_detach` +
   autosave. Generation counters on connections guard against a stale client's
-  disconnect tearing down its successor.
+  disconnect or input affecting its successor. The one-shot `BrokerRoute`
+  control frame lets Mars subprocesses in persistent PTYs resolve the current
+  attach's socket and capability rather than their inherited environment; an
+  immutable instance ID keeps that lookup valid across session renames.
 - **`client_main`**: owns the real TTY (raw mode, alt screen, mouse, bracketed
   paste, kitty flags), one thread pumping `Output` frames to stdout, one loop
   serializing input events to the socket. One client per session; a new attach
