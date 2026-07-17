@@ -452,12 +452,13 @@
   proves default-file writing for keys.json + tuning.json).
 - Session daemon (2026-07, src/session.rs): thin client, server renders — daemon runs
   the same App the selfcheck already proved works headless; input = deserialized
-  crossterm events over a unix socket (`$TMPDIR/ares-<uid>/<name>.sock`, mode 0700);
-  output = ratatui's own ANSI bytes captured by pointing CrosstermBackend at a
-  socket-backed Write sink (FrameWriter) instead of stdout. `ares --session <name>`
-  spawns `ares --server <name>` detached (setsid via libc::setsid in pre_exec) and
-  attaches; `--resume [name]` reattaches (most-recent socket mtime if unnamed);
-  `--list` pings each socket, prunes dead ones. One client per session; new attach
+  crossterm events over `sys::control` (Unix-domain socket on Unix; authenticated
+  loopback TCP + rendezvous file on Windows); output = ratatui's own ANSI bytes
+  captured by pointing CrosstermBackend at a stream-backed Write sink (FrameWriter)
+  instead of stdout. `mars new <name>` spawns `mars --server <name>` detached
+  (`setsid` on Unix; detached process flags on Windows) and attaches; `mars attach`
+  reattaches (most-recent address mtime if unnamed); `mars ls` pings each address,
+  prunes dead ones. One client per session; new attach
   sends the old one an Exit frame (takeover). Detach (C-t D / bar row) leaves the
   session running; C-x C-c ends it (dirty-guard still applies) and removes the socket.
   `App::run` was refactored to take an `InputEvent` receiver instead of reading
@@ -475,6 +476,18 @@
   `ARES_DEBUG_LOG=<path>` env var (session.rs `debug_log`) writes timestamped
   diagnostics for hello/parse/read errors — zero-cost when unset, useful for future
   daemon debugging since a detached daemon has no visible stderr.
+- Windows ConPTY lifecycle (2026-07, src/terminal.rs): the shell process can exit
+  while ConPTY keeps the output pipe open, so reader EOF never arrives. Move the
+  child into a thread blocked in `Child::wait`; keep `clone_killer()` in `Term` for
+  pane close/drop, cache the exit code, and suppress the natural-exit event on drop.
+- Windows control hardening (2026-07, src/sys/windows.rs): rendezvous tokens must
+  come from `getrandom`, not `RandomState` (successive `RandomState::new()` values
+  are related). The force-kill sweep matches `Win32_Process.Name == mars.exe` plus
+  the argument substring; embed `std::process::id()` because PowerShell's `$PID`
+  names the helper PowerShell process, not the calling Mars process.
+- Windows key events (2026-07, crossterm 0.28): `KeyEvent.kind` is always populated
+  and includes `Release`. Filter releases once in `App::apply_input`; otherwise
+  every typed character/action runs twice. Preserve `Repeat` for held keys.
 
 - Replacing the installed binary (`~/.cargo/bin/mars`) with `cp` over the existing
   file gets the new binary SIGKILLed on launch (exit 137) — macOS AMFI caches the

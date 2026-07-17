@@ -30,8 +30,12 @@ path = "src/main.rs"
 # `memory` is the whole retrieval subsystem (command memory, docs corpus,
 # redaction). Default-on; `cargo build --no-default-features` produces a
 # memory-free terminal that must also pass --selfcheck (retrieval_stub.rs).
-default = ["memory"]
+# `ssh` is the key broker + `mars ssh`/`mars keyd` (broker.rs). Default-on but
+# Unix-only: on Windows (or without the feature) broker_stub.rs takes its place
+# and the rest of the app is unchanged — see WINDOWS_PORT.md.
+default = ["memory", "ssh"]
 memory = []
+ssh = []
 
 [dependencies]
 ratatui = "0.29"
@@ -47,13 +51,13 @@ arboard = "3"
 base64 = "0.22"
 
 # Platform-specific: reached ONLY through `src/sys/` (the platform abstraction
-# layer). `libc` backs the Unix adapter; `interprocess` backs the Windows named-
-# pipe control channel. See WINDOWS_PORT.md.
+# layer). `libc` backs the Unix adapter; `getrandom` creates Windows control-channel
+# authentication tokens. See WINDOWS_PORT.md.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-interprocess = "2"
+getrandom = "0.2"
 
 # vt100 0.15 has a debug-only integer underflow when the scrollback view is
 # deeper than one screen (grid.rs visible_rows: `rows_len - scrollback_offset`).

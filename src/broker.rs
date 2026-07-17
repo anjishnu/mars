@@ -182,7 +182,7 @@ fn handle_conn(stream: UnixStream) -> Result<()> {
         // Status push: a brokered call is proof the remote's agent is alive —
         // refresh the fleet so `mars ls` shows it as current, not stale.
         if let Some(h) = &host {
-            fleet_status(h, session, "agent active");
+            crate::fleet::fleet_status(h, session, "agent active");
         }
         let resp = if version != BROKER_VERSION {
             BrokerResponse::Error {
@@ -243,99 +243,6 @@ pub fn chat_via_broker(
     }
 }
 
-// ── Fleet cache: which hosts you've been on, for `mars ls` ───────────────────
-
-/// One host you've connected to — the home machine's view of the fleet.
-/// `session` / `last_status` are refreshed by the status push in `handle_conn`
-/// (every brokered agent call self-reports host + session); `cwd` is recorded
-/// by `mars ssh`.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct FleetEntry {
-    pub host: String,
-    pub cwd: Option<String>,
-    pub session: Option<String>,
-    pub last_status: Option<String>,
-    /// Unix seconds of the last interaction.
-    pub as_of: u64,
-}
-
-fn fleet_path() -> Result<PathBuf> {
-    Ok(broker_socket_path()?.with_file_name("fleet.json"))
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Load the fleet, most-recent first. Empty on any error (the cache is best-effort).
-pub fn fleet_load() -> Vec<FleetEntry> {
-    let mut v: Vec<FleetEntry> = fleet_path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    v.sort_by(|a, b| b.as_of.cmp(&a.as_of));
-    v
-}
-
-/// Record (upsert) a host interaction. Best-effort; never fails a connection.
-pub fn fleet_record(host: &str, cwd: Option<String>) {
-    let mut v = fleet_load();
-    match v.iter_mut().find(|e| e.host == host) {
-        Some(e) => {
-            e.as_of = now_secs();
-            if cwd.is_some() {
-                e.cwd = cwd;
-            }
-        }
-        None => v.push(FleetEntry {
-            host: host.to_string(),
-            cwd,
-            session: None,
-            last_status: None,
-            as_of: now_secs(),
-        }),
-    }
-    fleet_save(v);
-}
-
-/// The status-push half of the fleet cache: every brokered agent call from a
-/// remote refreshes the home view of that host, so `mars ls` shows current
-/// activity instead of only "when you last ssh'd there".
-pub fn fleet_status(host: &str, session: Option<String>, status: &str) {
-    let mut v = fleet_load();
-    match v.iter_mut().find(|e| e.host == host) {
-        Some(e) => {
-            e.as_of = now_secs();
-            e.last_status = Some(status.to_string());
-            if session.is_some() {
-                e.session = session;
-            }
-        }
-        None => v.push(FleetEntry {
-            host: host.to_string(),
-            cwd: None,
-            session,
-            last_status: Some(status.to_string()),
-            as_of: now_secs(),
-        }),
-    }
-    fleet_save(v);
-}
-
-fn fleet_save(mut v: Vec<FleetEntry>) {
-    v.sort_by(|a, b| b.as_of.cmp(&a.as_of));
-    v.truncate(50);
-    if let Ok(p) = fleet_path() {
-        if let Ok(s) = serde_json::to_string_pretty(&v) {
-            let _ = std::fs::write(p, s);
-        }
-    }
-}
-
 /// This machine's hostname — what a remote self-reports over the broker.
 fn hostname() -> Option<String> {
     let mut buf = [0u8; 256];
@@ -347,41 +254,6 @@ fn hostname() -> Option<String> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
     if name.is_empty() { None } else { Some(name) }
-}
-
-/// A short "how long ago" for a unix timestamp: "just now" / "12m ago" / "3h ago" / "2d ago".
-pub fn ago(as_of: u64) -> String {
-    let secs = now_secs().saturating_sub(as_of);
-    if secs < 60 {
-        "just now".into()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86_400)
-    }
-}
-
-/// Resolve a `mars ls` follow-up (an ordinal like "2", or a host name / unique
-/// prefix) to a host from the numbered list. `None` = skip / no match.
-pub fn resolve_target(hosts: &[String], input: &str) -> Option<String> {
-    let t = input.trim();
-    if t.is_empty() || t == "q" {
-        return None;
-    }
-    if let Ok(n) = t.parse::<usize>() {
-        return hosts.get(n.checked_sub(1)?).cloned();
-    }
-    if let Some(h) = hosts.iter().find(|h| h.as_str() == t) {
-        return Some(h.clone());
-    }
-    let pre: Vec<&String> = hosts.iter().filter(|h| h.starts_with(t)).collect();
-    if pre.len() == 1 {
-        Some(pre[0].clone())
-    } else {
-        None
-    }
 }
 
 /// Make sure the home broker is running, auto-starting it (detached) if not —
@@ -504,7 +376,7 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     let home_sock = broker_socket_path()?;
     ensure_keyd(&home_sock); // auto-start the broker if it isn't already up
 
-    fleet_record(&host, None); // remember this host for `mars ls`
+    crate::fleet::fleet_record(&host, None); // remember this host for `mars ls`
     let remote_sock = remote_socket_path();
     let control = home_sock.with_file_name("cm-%r@%h:%p");
     // A ControlMaster killed uncleanly (pkill, crash) leaves its socket file

@@ -28,6 +28,28 @@ pub struct WorkEntry {
     pub error_excerpt: Option<String>,
 }
 
+/// Unix seconds now — the journal's clock.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A short "how long ago" for a unix timestamp: "just now" / "12m ago" / "3h ago" / "2d ago".
+pub fn ago(as_of: u64) -> String {
+    let secs = now_secs().saturating_sub(as_of);
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
 /// `~/.mars/worklog.jsonl`; `MARS_WORKLOG` overrides (tests, eval isolation).
 pub fn worklog_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARS_WORKLOG") {

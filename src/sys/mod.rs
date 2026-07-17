@@ -2,7 +2,7 @@
 //!
 //! The rest of the codebase reaches every platform-specific capability through
 //! `sys::<capability>`; no module outside `src/sys/` may name `std::os::unix`,
-//! `std::os::windows`, `libc`, `windows_sys`, or `interprocess` (enforced by
+//! `std::os::windows`, `libc`, `windows_sys`, or another OS API (enforced by
 //! `tools/check-platform-isolation.sh`). See `WINDOWS_PORT.md` for the design.
 //!
 //! The adapter is selected at compile time. Each adapter exposes the SAME set of
@@ -17,6 +17,7 @@
 //!   - `daemon`  — spawn a process detached from this terminal
 //!   - `proc`    — process identity + lifecycle (per-user tag, kill-by-pattern)
 //!   - `fsperm`  — restrict a path to its owning user
+//!   - `shell`   — which shell a new terminal pane runs
 
 #[cfg(unix)]
 mod unix;

@@ -2,9 +2,17 @@ mod agent;
 mod app;
 mod banner;
 mod briefing;
+// The ssh/keyd broker is the deferred Unix-only capability (WINDOWS_PORT.md):
+// without a Unix host and the `ssh` feature it is replaced by an inert stub,
+// the same seam retrieval uses below — callers never learn it's missing.
+#[cfg(all(unix, feature = "ssh"))]
+mod broker;
+#[cfg(not(all(unix, feature = "ssh")))]
+#[path = "broker_stub.rs"]
 mod broker;
 mod buffer;
 mod config;
+mod fleet;
 mod layout;
 mod llm_log;
 mod mode;
@@ -430,7 +438,7 @@ fn ask_cli(question: String) -> Result<()> {
 
 /// Headless verification of the core paths, runnable without a real terminal.
 fn selfcheck() -> Result<()> {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::backend::TestBackend;
 
     // Hermetic: an inherited agent key would flip no-key code paths (e.g. the
@@ -466,6 +474,25 @@ fn selfcheck() -> Result<()> {
     fn screen_text(term: &Terminal<TestBackend>) -> String {
         term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
+    // The PTY probes drive whatever real shell `sys::shell` picked; scripted
+    // commands must speak its dialect (PowerShell on Windows, POSIX elsewhere).
+    fn shell_is_powershell() -> bool {
+        let s = crate::sys::shell::default_shell().to_lowercase();
+        s.contains("pwsh") || s.contains("powershell")
+    }
+    // Poll a condition instead of napping a fixed interval — a cold shell
+    // (PowerShell especially) can take seconds to prompt; the deadline only
+    // bounds the failure case.
+    fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !cond() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        true
+    }
 
     // Never touch the user's real clipboard from tests (also makes the
     // C-c → C-v round-trip deterministic via the kill-ring fallback).
@@ -475,6 +502,7 @@ fn selfcheck() -> Result<()> {
     let cfg_dir = std::env::temp_dir().join(format!("mars-selfcheck-{}", std::process::id()));
     std::fs::create_dir_all(&cfg_dir)?;
     std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+    std::env::set_var(session::RUNTIME_DIR_ENV, cfg_dir.join("runtime"));
 
     let mut app = App::new(None)?;
     let mut term = Terminal::new(TestBackend::new(120, 40))?;
@@ -495,6 +523,29 @@ fn selfcheck() -> Result<()> {
     assert!(!t2.contains("control for your terminal"), "splash did not dismiss on keypress");
     assert!(app.mode == mode::Mode::Edit, "typing changed mode");
     println!("[selfcheck] non-modal insert ........... PASS");
+
+    let mut event_app = App::new(None)?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+    )))?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    )))?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('b'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    )))?;
+    assert_eq!(
+        event_app.focused_buf().rope.to_string(),
+        "ab",
+        "key release duplicated input or key repeat was dropped"
+    );
+    println!("[selfcheck] key press/release kinds .... PASS");
 
     // 2b. Idle-render gating (the SSH no-op-flush fix): after a draw, an idle
     //     tick must NOT request a redraw; a background agent event and an active
@@ -823,13 +874,12 @@ fn selfcheck() -> Result<()> {
     typ(&mut app, "echo ares_shell_ok")?;
     app.handle_key(k(KeyCode::Enter))?;
     assert!(app.mode == mode::Mode::Terminal, "shell command did not attach terminal");
-    std::thread::sleep(std::time::Duration::from_millis(900));
     let tid = match app.focused_pane().content {
         pane::PaneContent::Terminal(id) => id,
         _ => panic!("focused pane is not a terminal"),
     };
     assert!(
-        app.terms[&tid].screen().contents().contains("ares_shell_ok"),
+        wait_until(|| app.terms[&tid].screen().contents().contains("ares_shell_ok")),
         "shell command output not found in PTY"
     );
     println!("[selfcheck] bar `!` → shell ............ PASS");
@@ -875,29 +925,40 @@ fn selfcheck() -> Result<()> {
     // 15. A real terminal PTY spawns and echoes.
     let (tx, rx) = std::sync::mpsc::channel();
     let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, tx)?;
-    sh.send_bytes(b"echo ares_pty_ok\n");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    sh.send_bytes(b"echo ares_pty_ok\r");
+    assert!(
+        wait_until(|| sh.screen().contents().contains("ares_pty_ok")),
+        "terminal echo not found"
+    );
     while rx.try_recv().is_ok() {}
-    assert!(sh.screen().contents().contains("ares_pty_ok"), "terminal echo not found");
     println!("[selfcheck] terminal PTY echo .......... PASS");
 
     // 15a. Terminal mouse-copy: the selection extractor pulls the selected cells
     //      as text (the core of drag-to-copy in a terminal pane).
     {
-        sh.send_bytes(b"printf 'COPYME123\\n'\n");
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // Both dialects print the bare marker on its own row (the echoed command
+        // line never trim-equals it, so only real output can match below).
+        if shell_is_powershell() {
+            sh.send_bytes(b"echo COPYME123\r");
+        } else {
+            sh.send_bytes(b"printf 'COPYME123\\n'\r");
+        }
+        let row_of = |sh: &terminal::Term| -> Option<u16> {
+            let screen = sh.screen();
+            let (rows, cols) = screen.size();
+            (0..rows).find(|&r| {
+                let mut line = String::new();
+                for c in 0..cols {
+                    line.push_str(&screen.cell(r, c).map(|x| x.contents()).unwrap_or_default());
+                }
+                line.trim() == "COPYME123"
+            })
+        };
+        assert!(wait_until(|| row_of(&sh).is_some()), "marker output row not found on screen");
         while rx.try_recv().is_ok() {}
         let screen = sh.screen();
-        let (rows, cols) = screen.size();
-        let mut out_row = None;
-        for r in 0..rows {
-            let mut line = String::new();
-            for c in 0..cols {
-                line.push_str(&screen.cell(r, c).map(|x| x.contents()).unwrap_or_default());
-            }
-            if line.trim() == "COPYME123" { out_row = Some(r); break; }
-        }
-        let r = out_row.expect("printf output row not found on screen");
+        let (_, cols) = screen.size();
+        let r = row_of(&sh).expect("marker row vanished");
         let text = app::selection_text_from_screen(&screen, (r, 0), (r, 8), cols - 1);
         assert_eq!(text, "COPYME123", "terminal selection extraction wrong: {text:?}");
     }
@@ -925,8 +986,17 @@ fn selfcheck() -> Result<()> {
 
     // 15b. Scrollback: history survives past the viewport and the view can
     //      scroll back through it, then snap to live.
-    sh.send_bytes(b"seq 1 100\n");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    if shell_is_powershell() {
+        sh.send_bytes(b"1..100\r"); // pwsh's seq: a range prints one line each
+    } else {
+        sh.send_bytes(b"seq 1 100\r");
+    }
+    // "99" is proof the OUTPUT arrived — the echoed command line contains "100"
+    // in both dialects, so waiting on that could fire before the run.
+    assert!(
+        wait_until(|| sh.screen().contents().contains("99")),
+        "seq output missing"
+    );
     while rx.try_recv().is_ok() {}
     let live = sh.screen().contents();
     assert!(live.contains("100"), "seq output missing");
@@ -954,12 +1024,10 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Char('!')))?;
     typ(&mut app, "exit")?;
     app.handle_key(k(KeyCode::Enter))?; // attached; shell exits immediately
-    let mut dead = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    let dead = wait_until(|| {
         app.tick(); // drains TermEvent::Exited
-        if app.terms.values().any(|t| t.exited) { dead = true; break; }
-    }
+        app.terms.values().any(|t| t.exited)
+    });
     assert!(dead, "shell exit not detected");
     term.draw(|f| ui::render(f, &mut app))?;
     assert!(
@@ -1355,17 +1423,15 @@ fn selfcheck() -> Result<()> {
     app.agent_directive = Some(agent::AgentDirective::Type("echo mars_type_ok".into()));
     app.handle_key(k(KeyCode::Enter))?; // confirm-fire
     assert!(app.mode == mode::Mode::Terminal, "TYPE did not land in the terminal");
-    let mut typed = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    let typed = wait_until(|| {
         app.tick();
-        if let pane::PaneContent::Terminal(tid) = app.focused_pane().content {
-            if app.terms[&tid].screen().contents().contains("mars_type_ok") {
-                typed = true;
-                break;
+        match app.focused_pane().content {
+            pane::PaneContent::Terminal(tid) => {
+                app.terms[&tid].screen().contents().contains("mars_type_ok")
             }
+            _ => false,
         }
-    }
+    });
     assert!(typed, "TYPE'd command never reached the PTY");
     println!("[selfcheck] TYPE → terminal ............ PASS");
 
@@ -1651,19 +1717,13 @@ fn selfcheck() -> Result<()> {
             "quick-key legend missing from the empty-query bar line"
         );
         app.handle_key(kc(KeyCode::Char('g')))?; // back to the terminal
-        typ(&mut app, "seq 1 200")?;
+        typ(&mut app, if shell_is_powershell() { "1..200" } else { "seq 1 200" })?;
         app.handle_key(k(KeyCode::Enter))?;
-        for _ in 0..30 {
+        let pushed = wait_until(|| {
             app.tick();
-            if app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(
-            app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false),
-            "seq did not push the terminal cursor into the dropdown rows"
-        );
+            app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false)
+        });
+        assert!(pushed, "seq did not push the terminal cursor into the dropdown rows");
         app.handle_key(kc(KeyCode::Char(' ')))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
@@ -2023,7 +2083,7 @@ fn selfcheck() -> Result<()> {
         // 27b2. Quit = detach; kill is the deleting verb. In a session, Quit
         //       requests a detach and never ends the daemon; KillSession is the
         //       confirm-gated ender; `mars killall` sweeps every live daemon
-        //       (under an isolated TMPDIR so real sessions are untouchable).
+        //       (under the suite's isolated runtime dir, never the user's).
         {
             let mut app = App::new(None)?;
             app.session_name = Some("some-session".into());
@@ -2038,10 +2098,6 @@ fn selfcheck() -> Result<()> {
                 "KillSession must be confirm-gated for agent directives"
             );
 
-            let saved_tmp = std::env::var("TMPDIR").ok();
-            let iso = std::env::temp_dir().join(format!("mars-killall-{}", std::process::id()));
-            std::fs::create_dir_all(&iso)?;
-            std::env::set_var("TMPDIR", &iso);
             let names: Vec<String> =
                 (0..2).map(|i| format!("selfcheck-ka{i}-{}", std::process::id())).collect();
             let mut servers = Vec::new();
@@ -2062,10 +2118,6 @@ fn selfcheck() -> Result<()> {
             for s in servers { s.join().expect("killall-test server panicked")?; }
             for n in &names {
                 assert!(!session::socket_path(n)?.exists(), "killall left the socket for '{n}'");
-            }
-            match saved_tmp {
-                Some(v) => std::env::set_var("TMPDIR", v),
-                None => std::env::remove_var("TMPDIR"),
             }
         }
         println!("[selfcheck] quit=detach + killall ..... PASS");
@@ -2088,8 +2140,35 @@ fn selfcheck() -> Result<()> {
         app.agent_tx.send(agent::AgentEvent::SessionName { name: "auto".into() })?;
         app.tick();
         assert!(app.rename_session_to.is_none(), "explicit session name overridden by AI");
+        let mut app = App::new(None)?;
+        app.session_name = Some("0".into());
+        app.agent_tx.send(agent::AgentEvent::SessionName { name: "CON".into() })?;
+        app.tick();
+        assert!(app.rename_session_to.is_none(), "reserved generated session name accepted");
+        assert!(
+            app.status_msg.as_deref().unwrap_or_default().contains("reserved by Windows"),
+            "invalid generated session name was not surfaced"
+        );
     }
     println!("[selfcheck] session auto-naming ....... PASS");
+
+    for name in ["0", "mars-dev", "release 0.4", "alpha.beta"] {
+        assert!(session::validate_session_name(name).is_ok(), "valid session name rejected: {name}");
+    }
+    for name in [
+        "", ".", "..", "../escape", r"folder\name", "C:drive", "bad?name",
+        "NUL", "con.txt", "COM1", "lpt9.log", "trail.", " padded",
+    ] {
+        assert!(
+            session::validate_session_name(name).is_err(),
+            "non-portable session name accepted: {name:?}"
+        );
+    }
+    assert!(
+        session::socket_path("runtime-probe")?.starts_with(cfg_dir.join("runtime")),
+        "selfcheck session runtime escaped its isolated root"
+    );
+    println!("[selfcheck] portable session names .... PASS");
 
     // 28. Config migration: a pre-rename ~/.config/ares is copied to mars/.
     {
@@ -2712,6 +2791,7 @@ fn selfcheck() -> Result<()> {
     }
 
     // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
+    #[cfg(all(unix, feature = "ssh"))]
     {
         use std::io::{BufRead, BufReader};
         for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -2769,32 +2849,51 @@ fn selfcheck() -> Result<()> {
 
         std::env::remove_var("MARS_AUTH_SOCK");
         let _ = std::fs::remove_file(&sock);
+        println!("[selfcheck] ssh broker (proxy/detect) . PASS");
     }
-    println!("[selfcheck] ssh broker (proxy/detect) . PASS");
+    // 30-stub. Without the capability the stub must be inert and honest: no
+    // broker is ever detected (even with the env var set), and the ssh/keyd
+    // entry points explain themselves instead of half-working.
+    #[cfg(not(all(unix, feature = "ssh")))]
+    {
+        std::env::set_var("MARS_AUTH_SOCK", "/tmp/mars-stub-sc.sock");
+        assert!(broker::detect_broker_sock().is_none(), "stub must never detect a broker");
+        assert_ne!(
+            agent::AgentConfig::from_env().provider, "broker",
+            "stub build selected the broker provider"
+        );
+        std::env::remove_var("MARS_AUTH_SOCK");
+        assert!(broker::keyd_main().is_err(), "stub keyd must refuse, not no-op");
+        assert!(broker::ssh_main("x".into(), Vec::new()).is_err(), "stub ssh must refuse, not no-op");
+        assert!(broker::broker_socket_path().is_err(), "stub socket path must be absent");
+        assert!(broker::find_live_auth_sock(std::path::Path::new("/tmp")).is_none());
+        println!("[selfcheck] ssh broker stub (no ssh) . PASS");
+    }
 
     // 31. Fleet cache + `mars ls` follow-up resolver (ordinal + name/prefix).
     {
         let hosts = vec!["gpubox".to_string(), "prod-7".to_string()];
-        assert_eq!(broker::resolve_target(&hosts, "2"), Some("prod-7".into()), "ordinal");
-        assert_eq!(broker::resolve_target(&hosts, "gpubox"), Some("gpubox".into()), "exact name");
-        assert_eq!(broker::resolve_target(&hosts, "prod"), Some("prod-7".into()), "unique prefix");
-        assert_eq!(broker::resolve_target(&hosts, ""), None, "empty skips");
-        assert_eq!(broker::resolve_target(&hosts, "9"), None, "out-of-range ordinal");
-        // Fleet round-trip under an isolated HOME (upsert dedupes, recency orders).
-        let saved = std::env::var("HOME").ok();
+        assert_eq!(fleet::resolve_target(&hosts, "2"), Some("prod-7".into()), "ordinal");
+        assert_eq!(fleet::resolve_target(&hosts, "gpubox"), Some("gpubox".into()), "exact name");
+        assert_eq!(fleet::resolve_target(&hosts, "prod"), Some("prod-7".into()), "unique prefix");
+        assert_eq!(fleet::resolve_target(&hosts, ""), None, "empty skips");
+        assert_eq!(fleet::resolve_target(&hosts, "9"), None, "out-of-range ordinal");
+        // Fleet round-trip under an isolated home dir (upsert dedupes, recency
+        // orders). sys::paths names the env var, so this redirects on any OS.
+        let saved = std::env::var(sys::paths::HOME_ENV).ok();
         let tmp = std::env::temp_dir().join(format!("mars-fleet-sc-{}", std::process::id()));
         std::fs::create_dir_all(&tmp)?;
-        std::env::set_var("HOME", &tmp);
-        broker::fleet_record("prod-7", None);
-        broker::fleet_record("gpubox", None); // touched last → most recent
-        broker::fleet_record("prod-7", None); // upsert, not a dup
-        let f = broker::fleet_load();
+        std::env::set_var(sys::paths::HOME_ENV, &tmp);
+        fleet::fleet_record("prod-7", None);
+        fleet::fleet_record("gpubox", None); // touched last → most recent
+        fleet::fleet_record("prod-7", None); // upsert, not a dup
+        let f = fleet::fleet_load();
         assert_eq!(f.len(), 2, "fleet upsert duplicated a host");
         assert_eq!(f[0].host, "prod-7", "fleet not ordered most-recent-first");
         // The status push (what a brokered agent call reports home) refreshes
         // session + last_status — the "latest status" mars ls renders.
-        broker::fleet_status("gpubox", Some("train".into()), "agent active");
-        let f = broker::fleet_load();
+        fleet::fleet_status("gpubox", Some("train".into()), "agent active");
+        let f = fleet::fleet_load();
         let g = f.iter().find(|e| e.host == "gpubox").expect("status push dropped the host");
         assert_eq!(g.last_status.as_deref(), Some("agent active"));
         assert_eq!(g.session.as_deref(), Some("train"));
@@ -2823,30 +2922,35 @@ fn selfcheck() -> Result<()> {
         );
         let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
         assert_eq!(
-            broker::resolve_target(&names, "gpub").as_deref(),
+            fleet::resolve_target(&names, "gpub").as_deref(),
             Some("gpubox"),
             "unified resolver lost prefix matching"
         );
         match saved {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+            Some(h) => std::env::set_var(sys::paths::HOME_ENV, h),
+            None => std::env::remove_var(sys::paths::HOME_ENV),
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
     println!("[selfcheck] fleet cache + ls resolver . PASS");
 
     // 32. The embedded installer (pushed to remotes by `mars ssh`) is intact.
-    assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
-    assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
-        "embedded install.sh missing its core steps");
-    assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
-    println!("[selfcheck] embedded installer ........ PASS");
+    #[cfg(all(unix, feature = "ssh"))]
+    {
+        assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
+        assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
+            "embedded install.sh missing its core steps");
+        assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
+        println!("[selfcheck] embedded installer ........ PASS");
+    }
 
     // 32b. The ssh remote-command builders. The prelude must sweep a stale auth
     //      socket BEFORE the interactive ssh requests the -R forward (sshd won't
     //      bind over a leftover; client-side StreamLocalBindUnlink only covers
     //      local forwards), and the install check must probe the real install
     //      destinations, not just sshd's bare non-login PATH.
+    #[cfg(all(unix, feature = "ssh"))]
+    {
     let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true);
     let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
         .expect("prelude lost the stale-socket sweep (or its ; separator)");
@@ -2901,6 +3005,7 @@ fn selfcheck() -> Result<()> {
         "own-uid socket must win over a foreign live one");
     let _ = std::fs::remove_dir_all(&tmp);
     println!("[selfcheck] auth-socket liveness ...... PASS");
+    }
 
     // 33. Closing a tab with a live terminal confirms, then reaps the PTY —
     //     never orphans the shell (P0.1). Decline keeps everything; confirm
@@ -3021,6 +3126,10 @@ fn selfcheck() -> Result<()> {
             false
         }
 
+        // (a)-(c) drive POSIX `printf`+`cat` and assert on the pty's raw echo of
+        // escape sequences — ConPTY translates those into key events instead of
+        // echoing them, so on a PowerShell host only (d) can run honestly.
+        if !shell_is_powershell() {
         // (a) Alternate screen, no mouse reporting → arrows, not a silent no-op.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h'; cat\n");
@@ -3050,11 +3159,17 @@ fn selfcheck() -> Result<()> {
         assert!(wait_for(&mut app, tid, "[<64;1;1M"), "SGR wheel-up not forwarded");
         app.handle_mouse(wheel(false));
         assert!(wait_for(&mut app, tid, "[<65;1;1M"), "SGR wheel-down not forwarded");
+        } else {
+            println!("[selfcheck] wheel → app modes ........ SKIP (POSIX tty-echo probe; PowerShell host)");
+        }
 
         // (d) Plain shell (no modes): the wheel still browses mars scrollback.
         let mut app = App::new(None)?;
-        let tid = term_with(&mut app, b"seq 1 100\n");
-        assert!(wait_for(&mut app, tid, "100"), "seq output never arrived");
+        let tid = term_with(
+            &mut app,
+            if shell_is_powershell() { &b"1..100\r"[..] } else { &b"seq 1 100\n"[..] },
+        );
+        assert!(wait_for(&mut app, tid, "99"), "seq output never arrived");
         app.handle_mouse(wheel(true));
         assert!(app.terms.get(&tid).unwrap().view_offset() > 0,
             "plain-shell wheel-up no longer scrolls mars scrollback");
@@ -3254,14 +3369,11 @@ fn selfcheck() -> Result<()> {
         app.on_detach();
         // Let the shell run and exit; drain events (queues the exit trigger,
         // keyless fire produces the deterministic tier-0 verdict).
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_until(|| {
             app.frame_tick += 3; // simulated time passes while detached
             app.tick();
-            if app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false) {
-                break;
-            }
-        }
+            app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false)
+        });
         assert!(
             app.watches.get(&fail_tid).and_then(|w| w.verdict.clone())
                 .map(|v| v.starts_with("failed"))

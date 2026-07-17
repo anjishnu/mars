@@ -73,8 +73,9 @@ layout.rs    PaneLayout: a binary tree of HSplit/VSplit/Single — split/close/
              next/prev pane navigation over the tree.
 tab.rs       Tab: a PaneLayout + focused pane + name.
 terminal.rs  Term: a PTY (portable-pty) + vt100::Parser, pumped by a reader thread,
-             signaling the main loop via mpsc — independent of whether anyone
-             is watching (the property that makes session-detach free).
+             with a separate child-process watcher for reliable ConPTY exits —
+             independent of whether anyone is watching (the property that makes
+             session-detach free).
 agent.rs     AgentConfig (provider detection: custom/Groq/Gemini via env), the
              OpenAI-compatible chat call, RUN: directive parsing.
 broker.rs    Key-never-leaves-home: `mars keyd` (the home broker daemon) +
@@ -106,9 +107,9 @@ retrieval.rs The whole memory subsystem behind a ten-symbol facade: command
              retrieval_stub.rs supplies the same facade with neutral values, so
              a memory-free build works unchanged (the deletion-proof seam —
              core never depends on memory, only agent prompt assembly does).
-session.rs   The client/server split: ClientFrame/ServerFrame protocol, FrameWriter
-             (ratatui output → socket), server_main/client_main, session lifecycle
-             CLI (session_main/resume_main/list_main).
+session.rs   The client/server split: ClientFrame/ServerFrame protocol over a
+             platform-local control channel, FrameWriter (ratatui output → stream),
+             server_main/client_main, session lifecycle CLI.
 ui.rs        ratatui rendering: layout, panes, status/control bars, dropdown,
              which-key panel, travel-mode panel, ask panel — all read live state
              (tuning, keymap) rather than baking in constants.
@@ -155,12 +156,12 @@ device, not a bypass around the editor's safety gates.
 
 ## 6. Terminal panes
 
-`terminal.rs` spawns `$SHELL` on a `portable-pty` PTY and pumps its output into a
-`vt100::Parser` on a dedicated reader thread, signaling the main loop via `mpsc` only
-to trigger a repaint — the parser (and the shell process) run independently of
-whether the pane is currently visible or focused. This single property is what makes
-"shell survives session detach" free: the session server doesn't need any special
-handling for terminal panes, because they never depended on anyone reading them.
+`terminal.rs` spawns the platform shell on a `portable-pty` PTY and pumps its output
+into a `vt100::Parser` on a dedicated reader thread, signaling the main loop via
+`mpsc` only to trigger a repaint. A second thread waits on the child process because
+ConPTY can keep its output pipe open after process exit. The parser and shell run
+independently of whether the pane is visible or focused. This property is what makes
+"shell survives session detach" free.
 
 Keyboard chrome (pane/tab navigation, splits) is intercepted the same way inside a
 terminal pane as in the editor (`App::is_chrome_action`), while editing chords
@@ -175,10 +176,10 @@ needing a decision before terminal features accreted), resolved as follows:
 
 - The **server** (`mars --server <name>`, spawned by `--session`) runs the entire
   `App` headless — exactly the configuration `--selfcheck` already proved works with
-  no real TTY. Input arrives as deserialized `crossterm` events over a Unix socket
+  no real TTY. Input arrives as deserialized `crossterm` events over a local control
+  stream (Unix-domain socket on Unix; token-authenticated loopback TCP on Windows)
   instead of `event::poll`; output is ratatui's own ANSI byte stream, captured by
-  pointing `CrosstermBackend` at a socket-backed `Write` sink (`FrameWriter`) instead
-  of stdout.
+  pointing `CrosstermBackend` at a stream-backed `Write` sink (`FrameWriter`).
 - The **client** (`mars --resume`) owns the real TTY — raw mode, alternate screen,
   mouse, bracketed paste, the kitty keyboard protocol where supported — and is a thin
   pump: serialize input events to the socket, write output frames verbatim to stdout.
@@ -191,10 +192,10 @@ needing a decision before terminal features accreted), resolved as follows:
   *connection*; `Action::Quit` (through the existing dirty-buffer guard) ends the
   *session* and removes the socket.
 - **Daemonization:** `mars --session <name>` spawns `mars --server <name>` as a
-  detached child (`setsid` via `libc`, stdio → `/dev/null`) and waits for its socket
-  before attaching. `mars --resume [name]` attaches an existing session (most
-  recently active, if unnamed); `mars --list` pings every session socket and prunes
-  dead ones.
+  detached child (`setsid` on Unix; detached process-group flags on Windows), redirects
+  stdio, and waits for its control address before attaching. `mars --resume [name]`
+  attaches an existing session (most recently active, if unnamed); `mars --list`
+  pings every session and prunes dead addresses.
 
 Because `terminal.rs`'s PTYs and `agent.rs`'s request threads never depended on the
 render loop, none of this required changes to editing, panes, or the command bar —
@@ -225,11 +226,11 @@ Frecency and bar-usage-nudge counters persist separately in
 The primary test suite is `mars --selfcheck` (`main.rs`) — a headless run against
 `ratatui::backend::TestBackend` that drives the real `App` through `handle_key`/
 `handle_mouse`/`paste_text` exactly as a live terminal would, with **no mocks**: it
-spawns real PTYs, runs a real session daemon over a real Unix socket, and (when
+spawns real PTYs, runs a real session daemon over the platform control channel, and (when
 `GEMINI_API_KEY` etc. is set) can hit a real LLM endpoint via `--ask`. As of this
 writing it covers ~90 areas end-to-end, including a fully headless test of session
 detach/reattach, PTY survival across disconnect, client takeover, and version
-handshake refusal.
+handshake refusal. CI runs it on both Ubuntu and Windows.
 
 **What headless testing cannot verify** (and why real-terminal passes remain
 mandatory for certain changes): raw terminal byte encodings (`M-<` arrives as
@@ -262,7 +263,7 @@ check the *parsed screen contents*, not `bytes.contains(needle)`.
 
 Multiple simultaneous clients per session; cross-crash session save/restore (a
 separate feature from live detach); OSC-52 clipboard forwarding for remote/SSH
-attach; Windows named-pipe support; a Vim-grammar compatibility layer. See
+attach; Windows `mars ssh`/key-broker parity; a Vim-grammar compatibility layer. See
 `key_design.md` §4 "Deliberately deferred" for the reasoning behind each.
 
 ## 12. Where to go next

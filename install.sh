@@ -8,8 +8,8 @@
 #   cargo install mars-terminal --locked
 #
 # Design points:
-#   - Windows is NOT supported natively (Mars's core is unix sockets + PTYs):
-#     detected up front with an informative error + WSL guidance.
+#   - This shell installer is Unix-only. Native Windows is supported, but uses
+#     rustup + the MSVC build tools from PowerShell (see README.md).
 #   - A distro-packaged cargo (e.g. Ubuntu's 1.75) is too old (needs >= 1.85 /
 #     edition2024): detected; rustup is installed instead. Never `apt install cargo`.
 #   - Minimal images lack a C linker; cargo fails mid-build with a confusing
@@ -28,10 +28,11 @@ die() { printf '\033[1;31m[mars-install]\033[0m %s\n' "$1" >&2; exit 1; }
 OS=$(uname -s 2>/dev/null || echo unknown)
 case "$OS" in
   MINGW*|MSYS*|CYGWIN*|Windows*)
-    die "native Windows isn't supported yet (Mars's core uses Unix sockets + PTYs).
-  Use WSL instead:
-    1. In PowerShell (admin):  wsl --install
-    2. Open the WSL/Ubuntu terminal and run this script there — it proceeds as Linux."
+    die "install.sh configures Unix hosts and is not the native Windows installer.
+  Mars supports Windows; from PowerShell, install rustup's MSVC toolchain and
+  Visual Studio Build Tools, then run:
+    cargo install mars-terminal --locked
+  See README.md for the Windows prerequisites."
     ;;
   Linux|Darwin) : ;;
   *) say "unrecognized OS '$OS' — proceeding as unix; expect the unexpected." ;;

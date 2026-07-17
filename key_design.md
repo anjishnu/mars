@@ -217,8 +217,9 @@ the substrates listed in §6.
   ~~session verbs inside the editor~~ (shipped: `RenameSession` + `C-t D` detach as
   actions; `mars new/attach/ls/kill/rename` CLI); `$MARS_SESSION` exported to spawned
   shells (prevents nesting); OSC-52 clipboard for SSH-remote attach.
-- *P2:* multi-client mirroring; layout restore across daemon crash; Windows named
-  pipes; status-line customization.
+- *P2:* multi-client mirroring; layout restore across daemon crash; ~~native Windows
+  sessions~~ (shipped 2026-07 via an authenticated loopback control channel);
+  status-line customization.
 
 ### H3 — The autonomy layer (subsumes: standalone agent CLIs)
 

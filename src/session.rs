@@ -2,7 +2,7 @@
 ///
 /// Architecture (recorded in key_design.md §H2): thin client, server renders.
 /// The server runs the entire `App` headless and streams ratatui's ANSI bytes
-/// over a unix socket as `Output` frames; the client owns the real TTY,
+/// over the platform control channel as `Output` frames; the client owns the real TTY,
 /// forwards serialized input events, and writes frames verbatim to stdout.
 /// One client per session; a new attach takes over. Disconnect leaves the
 /// session (buffers, panes, shells, agent threads) running.
@@ -29,6 +29,7 @@ use crate::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const RUNTIME_DIR_ENV: &str = "MARS_RUNTIME_DIR";
 
 // ── Protocol ─────────────────────────────────────────────────────────────────
 
@@ -105,16 +106,53 @@ pub fn install_panic_restore() {
 // ── Socket paths ─────────────────────────────────────────────────────────────
 
 fn socket_dir() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("mars-{}", crate::sys::proc::uid_tag()));
+    let base = std::env::var_os(RUNTIME_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("mars-{}", crate::sys::proc::uid_tag()));
     std::fs::create_dir_all(&dir)?;
     crate::sys::fsperm::restrict_dir(&dir)?;
     Ok(dir)
 }
 
-pub fn socket_path(name: &str) -> Result<PathBuf> {
-    if name.is_empty() || name.contains('/') {
-        return Err(anyhow!("invalid session name: {name:?}"));
+pub fn validate_session_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("session name cannot be empty"));
     }
+    if name != name.trim() {
+        return Err(anyhow!("session name cannot start or end with whitespace"));
+    }
+    if matches!(name, "." | "..") {
+        return Err(anyhow!("session name cannot be a path component"));
+    }
+    if name.ends_with('.') {
+        return Err(anyhow!("session name cannot end with '.'"));
+    }
+    if name.chars().any(|c| {
+        c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
+        return Err(anyhow!(
+            "session name contains a path separator or reserved character"
+        ));
+    }
+
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered_device = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered_device
+    {
+        return Err(anyhow!("session name is reserved by Windows"));
+    }
+    Ok(())
+}
+
+pub fn socket_path(name: &str) -> Result<PathBuf> {
+    validate_session_name(name)?;
     Ok(socket_dir()?.join(format!("{name}.sock")))
 }
 
@@ -777,7 +815,7 @@ pub fn session_summary(name: &str) -> String {
     if let Some(e) = meaningful {
         let low = e.verdict.to_lowercase();
         if fresh(e.ts) && (e.failed || low.starts_with("blocked") || low.contains("failed")) {
-            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::worklog::ago(e.ts));
         }
     }
     // 2. The goals captured at the last detach — the clearest "what is this session
@@ -797,7 +835,7 @@ pub fn session_summary(name: &str) -> String {
     // 4. The freshest real event (a completed run, etc.) — while fresh.
     if let Some(e) = meaningful {
         if fresh(e.ts) {
-            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::worklog::ago(e.ts));
         }
     }
     // 5. A fresh summary is being generated right now (the detach fired the LLM
@@ -812,9 +850,13 @@ pub fn session_summary(name: &str) -> String {
     //    says where and when: the working directory and how long ago. This is the
     //    deterministic guarantee — it does not depend on any LLM call landing.
     if let Some(e) = recent.last() {
-        let dir = e.cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("session");
+        let dir = std::path::Path::new(&e.cwd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("session");
         let what = e.command.as_deref().map(|c| clip(c, 48)).unwrap_or_else(|| "active".into());
-        return format!("{dir} · {what} · {}", crate::broker::ago(e.ts));
+        return format!("{dir} · {what} · {}", crate::worklog::ago(e.ts));
     }
     "active — nothing logged yet".to_string()
 }
@@ -868,7 +910,7 @@ pub fn all_sessions() -> Result<Vec<SessionEntry>> {
             as_of: None,
         });
     }
-    for e in crate::broker::fleet_load() {
+    for e in crate::fleet::fleet_load() {
         let mut status = e.last_status.clone().unwrap_or_else(|| "seen".to_string());
         if let Some(s) = &e.session {
             status = format!("{status} · session {s}");
@@ -904,7 +946,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
     for (i, e) in entries.iter().enumerate() {
         let seen = match e.as_of {
             None => "now".to_string(),
-            Some(t) => crate::broker::ago(t),
+            Some(t) => crate::worklog::ago(t),
         };
         let prefix = format!(
             "  {:<2} {:<18} {:<6} {:<18} {:<8} ",
@@ -944,7 +986,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_ok() {
             let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
-            if let Some(name) = crate::broker::resolve_target(&names, &line) {
+            if let Some(name) = crate::fleet::resolve_target(&names, &line) {
                 let e = entries.iter().find(|e| e.name == name).unwrap();
                 return if e.remote {
                     crate::broker::ssh_main(e.name.clone(), Vec::new())
@@ -1002,7 +1044,7 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
 /// the key broker, and sweep the stale sockets they leave behind. Agentic
 /// memory (cmd_memory, worklog, mission, denylist, fleet) is untouched, and
 /// no new session is started. `force: false` is for the selfcheck, whose
-/// TMPDIR isolation a process-wide pkill would not respect.
+/// runtime-dir isolation a process-wide kill sweep would not respect.
 pub fn killall_main(force: bool) -> Result<()> {
     let mut ended = 0;
     for (name, alive, _) in list_sessions()? {

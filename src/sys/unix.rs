@@ -9,10 +9,13 @@
 pub mod paths {
     use std::path::PathBuf;
 
+    /// The env var `home_dir` reads — for tests that redirect the home dir.
+    pub const HOME_ENV: &str = "HOME";
+
     /// The user's home directory (`$HOME`). All of `~/.mars`, `~/.config/mars`,
     /// and `~/.local/state/mars` are derived from this by the call sites.
     pub fn home_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(PathBuf::from)
+        std::env::var_os(HOME_ENV).map(PathBuf::from)
     }
 }
 
@@ -20,9 +23,10 @@ pub mod paths {
 ///
 /// The wire protocol (JSON-line `ClientFrame`/`ServerFrame`) is written once
 /// against `Stream: Read + Write` and never learns what's underneath. On Unix the
-/// channel is a Unix-domain socket; the Windows adapter uses a named pipe with the
-/// same method surface (`read`, `write`, `flush`, `try_clone`, `set_read_timeout`
-/// on `Stream`; `bind` + `incoming()`/`accept()` on `Listener`).
+/// channel is a Unix-domain socket; the Windows adapter uses authenticated
+/// loopback TCP with the same method surface (`read`, `write`, `flush`,
+/// `try_clone`, `set_read_timeout` on `Stream`; `bind` +
+/// `incoming()`/`accept()` on `Listener`).
 pub mod control {
     use std::io;
     use std::path::Path;
@@ -114,5 +118,14 @@ pub mod fsperm {
     pub fn restrict_dir(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+}
+
+/// Which shell a new terminal pane runs.
+pub mod shell {
+    /// `$SHELL`, falling back to `/bin/bash` — exactly the pre-abstraction
+    /// behavior of `terminal.rs`.
+    pub fn default_shell() -> String {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     }
 }

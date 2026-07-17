@@ -41,7 +41,7 @@ Three ideas shape everything:
    (standalone)        (sessions by default)             (headless CI)
         │                        │                            │
         │             ┌──────────┴──────────┐                 │
-        │             │ client   ⇄  daemon  │ Unix socket:    │
+        │             │ client   ⇄  daemon  │ local control:  │
         │             │ (TTY)      (App)    │ ClientFrame /   │
         │             └──────────┬──────────┘ ServerFrame     │
         ▼                        ▼                            ▼
@@ -68,7 +68,7 @@ Three ideas shape everything:
 | Rendering | `ui.rs` | 1,370 |
 | Data model | `buffer.rs`, `pane.rs`, `layout.rs`, `tab.rs`, `mode.rs` | 460 |
 | Command surface | `palette.rs`, `config.rs`, `tuning.rs` | 1,060 |
-| Subsystems | `terminal.rs`, `agent.rs`, `session.rs`, `project.rs`, `banner.rs` | 1,450 |
+| Subsystems | `terminal.rs`, `agent.rs`, `session.rs`, `sys/`, `project.rs`, `banner.rs` | 1,450 |
 | Memory (feature `memory`, default-on) | `retrieval.rs` (`retrieval_stub.rs` when off) | 700 |
 
 Dependencies point downward-ish: `main` → `session`/`app`; `session` → `app`;
@@ -256,11 +256,11 @@ Five small files, deliberately dumb:
 
 ### `terminal.rs` — PTY panes
 
-`spawn` runs `$SHELL` on a `portable-pty` PTY and pumps its output into a
-`vt100::Parser` on a dedicated reader thread, signaling the main loop via an
-mpsc `TermEvent::Output`/`Exited` only to trigger a repaint. **The parser and
-shell run whether or not anyone is watching** — this one property is what makes
-session detach free; the daemon needs no special handling for terminals.
+`spawn` runs the platform shell on a `portable-pty` PTY and pumps its output into
+a `vt100::Parser` on a dedicated reader thread. A separate process watcher blocks
+in `Child::wait` and emits `TermEvent::Exited`; this is required because ConPTY can
+keep its output pipe open after the child exits. **The parser and shell run whether
+or not anyone is watching** — this property is what makes session detach free.
 `Term` also owns scrollback view state (`scroll_view`, `scroll_to_live`) and
 `history_tail(lines)` — the method that pages back through vt100 scrollback
 (and restores the live view) to satisfy the agent's `NEED: scrollback` requests.
@@ -293,8 +293,11 @@ directive** on the final line:
 
 ### `session.rs` — persistence as a process split
 
-The tmux-style client/server implementation. Wire protocol: newline-delimited
-JSON frames over a Unix socket in `$TMPDIR/mars-<uid>/<name>.sock` (mode 0700).
+The tmux-style client/server implementation. The wire protocol is newline-delimited
+JSON over a platform-local control stream: a mode-0700 Unix-domain socket on Unix,
+or token-authenticated loopback TCP with a rendezvous file on Windows. Addresses
+normally live under the platform temp directory in `mars-<user-tag>`; the
+`MARS_RUNTIME_DIR` base override makes selfcheck isolation explicit.
 Client→server is `ClientFrame` — `Hello{cols,rows,version}` (strict version
 handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
 `Status`/`Kill`/`Rename` used by `mars ls`/`kill`/`rename`. Server→client is
@@ -316,9 +319,9 @@ handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
   serializing input events to the socket. One client per session; a new attach
   sends the old client a clean takeover `Exit`.
 - **`session_main`**: attach-if-alive, else spawn `mars --server <name>` fully
-  detached (`setsid`, stdio → `~/.local/state/mars/<name>.log` — the postmortem
-  file), wait for the socket, attach. Live rename moves the socket *file*; the
-  bound listener follows the inode, so attached clients keep working.
+  detached (`setsid` on Unix, detached process flags on Windows; stdio goes to the
+  per-session postmortem log), wait for the address, attach. Live rename moves the
+  address file without disturbing the already-bound listener or attached clients.
 - **TTY hygiene**: `sanitize_tty` (idempotent raw-mode repair) and a panic hook
   that restores the terminal before the panic message prints.
 

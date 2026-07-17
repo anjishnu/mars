@@ -15,12 +15,21 @@ tmux/zellij-style persistent sessions. One tool, one set of keys.
 
 ## Build & install
 
+Linux/macOS:
+
 ```bash
 source ~/.cargo/env            # if cargo isn't on your PATH
 cargo build --release
 # put it on your PATH:
 ln -s "$PWD/target/release/mars" ~/.local/bin/mars   # or copy it anywhere
 mars --selfcheck               # optional: run the built-in test suite
+```
+
+Windows PowerShell (Rust's MSVC toolchain and Visual Studio Build Tools required):
+
+```powershell
+cargo build --release
+.\target\release\mars.exe --selfcheck
 ```
 
 ## Quick start
@@ -174,6 +183,9 @@ mars ask "how do I move a pane to the other side?"
 > remote installer) are new and still being hardened — as are the AI features they
 > carry (see [The agent](#the-agent)). The core editor, multiplexer, and sessions are
 > stable; the remote/tunnel path may have rough edges — please report anything you hit.
+> The SSH broker currently requires a Unix home host; native Windows builds support
+> the core editor, local agent, terminal panes, and persistent sessions, but reject
+> `mars ssh` / `mars keyd` explicitly.
 
 You set your key **once**, on your own machine, and the agent works on every host you
 SSH into — without the key ever landing on a remote box (not in its env, not in its
