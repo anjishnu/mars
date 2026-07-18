@@ -679,6 +679,8 @@ fn client_connection(
         return;
     }
     let _ = stream.set_read_timeout(None);
+    // A Windows TcpStream clone retains the Hello deadline on its own handle.
+    let _ = reader.get_ref().set_read_timeout(None);
 
     let gen = gc.fetch_add(1, Ordering::SeqCst) + 1;
     let Ok(attach_stream) = stream.try_clone() else { return };

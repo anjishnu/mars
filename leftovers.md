@@ -1,12 +1,7 @@
 # Windows port leftovers
 
-## Known failing checks
+## Known failing check
 
-- **Windows session PTY startup:** the default Windows selfcheck reaches the
-  persistent-session shell test but does not see `echo daemon_pty_ok` execute.
-  The parsed screen contains only the PowerShell banner. This is likely in the
-  fresh-shell input readiness path and currently blocks a fully green Windows
-  selfcheck.
 - **Unix DECCKM wheel forwarding:** the Unix selfcheck enters application-cursor
   mode, but the expected `ESC O A` wheel-up sequence is not observed in the PTY
   echo. This may be a startup-buffer/test interaction, but remains unresolved

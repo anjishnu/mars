@@ -2059,6 +2059,8 @@ fn selfcheck() -> Result<()> {
         assert!(c1_exit.is_some(), "old client not notified on takeover");
         let (found2, _) = c2.read_until("sessionmarker", 5)?;
         assert!(found2, "state lost across reattach");
+        #[cfg(windows)]
+        std::thread::sleep(std::time::Duration::from_millis(2_100));
         c1.text("stale_writer")?;
         c2.text("fresh_writer")?;
         let (fresh, _) = c2.read_until("fresh_writer", 5)?;
