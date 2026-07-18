@@ -891,7 +891,10 @@ fn selfcheck() -> Result<()> {
         _ => panic!("focused pane is not a terminal"),
     };
     assert!(
-        wait_until(|| app.terms[&tid].screen().contents().contains("ares_shell_ok")),
+        wait_until(|| {
+            app.tick();
+            app.terms[&tid].screen().contents().contains("ares_shell_ok")
+        }),
         "shell command output not found in PTY"
     );
     println!("[selfcheck] bar `!` → shell ............ PASS");
@@ -936,11 +939,24 @@ fn selfcheck() -> Result<()> {
 
     // 15. A real terminal PTY spawns and echoes.
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, None, tx)?;
+    let startup_probe = std::time::Duration::from_millis(
+        tuning::Tuning::default().terminal_startup_probe_ms,
+    );
+    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, None, startup_probe, tx)?;
+    let screen_has_line = |sh: &terminal::Term, needle: &str| {
+        sh.screen()
+            .contents()
+            .lines()
+            .any(|line| line.trim() == needle)
+    };
     sh.send_bytes(b"echo ares_pty_ok\r");
     assert!(
-        wait_until(|| sh.screen().contents().contains("ares_pty_ok")),
-        "terminal echo not found"
+        wait_until(|| {
+            sh.flush_startup_input();
+            screen_has_line(&sh, "ares_pty_ok")
+        }),
+        "terminal output not found: {:?}",
+        sh.screen().contents()
     );
     while rx.try_recv().is_ok() {}
     println!("[selfcheck] terminal PTY echo .......... PASS");
@@ -1261,6 +1277,7 @@ fn selfcheck() -> Result<()> {
     let written = std::fs::read_to_string(&tuning_path)?;
     assert!(written.contains("description"), "tuning defaults lack descriptions");
     assert!(written.contains("which_key_delay_ms"), "tuning defaults missing knobs");
+    assert!(written.contains("terminal_startup_probe_ms"), "tuning defaults missing shell probe knob");
     std::fs::write(
         &tuning_path,
         r#"{ "max_panes": { "value": 2, "description": "test override" } }"#,
@@ -1960,6 +1977,20 @@ fn selfcheck() -> Result<()> {
             /// Read Output frames until `needle` appears in the interpreted
             /// screen contents (or an Exit arrives), within `secs`.
             fn read_until(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                self.read_until_matching(secs, |contents| contents.contains(needle))
+            }
+            fn read_until_line(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                self.read_until_matching(secs, |contents| {
+                    contents.lines().any(|line| {
+                        line.trim_matches(|c: char| c.is_whitespace() || c == '│') == needle
+                    })
+                })
+            }
+            fn read_until_matching(
+                &mut self,
+                secs: u64,
+                found: impl Fn(&str) -> bool,
+            ) -> Result<(bool, Option<String>)> {
                 use anyhow::Context as _;
                 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
                 self.reader
@@ -1976,12 +2007,12 @@ fn selfcheck() -> Result<()> {
                                 if let Ok(bytes) = B64.decode(b64) {
                                     self.screen.process(&bytes);
                                 }
-                                if self.screen.screen().contents().contains(needle) {
+                                if found(&self.screen.screen().contents()) {
                                     return Ok((true, None));
                                 }
                             }
                             Ok(session::ServerFrame::Exit { message }) => {
-                                return Ok((self.screen.screen().contents().contains(needle), Some(message)));
+                                return Ok((found(&self.screen.screen().contents()), Some(message)));
                             }
                             Ok(session::ServerFrame::Status { .. }) => {}
                             Ok(session::ServerFrame::BrokerRoute { .. }) => {}
@@ -1990,7 +2021,7 @@ fn selfcheck() -> Result<()> {
                         Err(_) => {} // timeout tick — keep waiting until deadline
                     }
                 }
-                Ok((self.screen.screen().contents().contains(needle), None))
+                Ok((found(&self.screen.screen().contents()), None))
             }
         }
 
@@ -2013,6 +2044,8 @@ fn selfcheck() -> Result<()> {
             exit.map(|m| m.contains("version mismatch")).unwrap_or(false),
             "pre-handoff session protocol was not refused"
         );
+        assert!(session::client_exit_is_error("version mismatch: old server"));
+        assert!(!session::client_exit_is_error("detached: another client attached"));
 
         // Takeover + reattach: c2 attaches → c1 is dropped, c2 gets a full
         // redraw that still contains the marker (state survived).
@@ -2054,8 +2087,14 @@ fn selfcheck() -> Result<()> {
         c2.key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))?;
         c2.text("echo daemon_pty_ok")?;
         c2.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-        let (pty_ok, _) = c2.read_until("daemon_pty_ok", 8)?;
-        assert!(pty_ok, "shell output not rendered in session");
+        let pty_started = std::time::Instant::now();
+        let (pty_ok, pty_exit) = c2.read_until_line("daemon_pty_ok", 15)?;
+        assert!(
+            pty_ok,
+            "shell output not rendered in session after {:?} (exit {pty_exit:?}): {:?}",
+            pty_started.elapsed(),
+            c2.screen.screen().contents()
+        );
         drop(c2); // hard disconnect — no Detach, just gone
         std::thread::sleep(std::time::Duration::from_millis(150));
         let mut c3 = TestClient::connect_with_broker(
@@ -2067,7 +2106,7 @@ fn selfcheck() -> Result<()> {
         // Reattach now always greets with the briefing overlay (iteration mode) —
         // dismiss it like a real user before reading the workspace underneath.
         c3.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-        let (pty_survived, _) = c3.read_until("daemon_pty_ok", 5)?;
+        let (pty_survived, _) = c3.read_until_line("daemon_pty_ok", 5)?;
         assert!(pty_survived, "PTY did not survive the disconnect");
         #[cfg(feature = "ssh")]
         let session_instance_id = {
@@ -2229,6 +2268,14 @@ fn selfcheck() -> Result<()> {
     {
         use std::io::{BufRead as _, Write as _};
         use std::time::Duration;
+
+        let force_sweep = crate::sys::proc::kill_all_mars_script(4242);
+        assert!(
+            force_sweep.contains("-Filter \"Name = 'mars.exe'\"")
+                && force_sweep.contains("ProcessId -ne 4242")
+                && !force_sweep.contains("CommandLine -like"),
+            "Windows killall must target every other mars.exe by exact executable name"
+        );
 
         let dir = std::env::temp_dir()
             .join(format!("mars-control-auth-sc-{}", std::process::id()));
@@ -3183,6 +3230,10 @@ fn selfcheck() -> Result<()> {
         assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
             "embedded install.sh missing its core steps");
         assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
+        assert!(
+            !ssh::installer_payload().contains('\r'),
+            "embedded installer payload must use Unix line endings"
+        );
         println!("[selfcheck] embedded installer ........ PASS");
     }
 
@@ -3193,20 +3244,40 @@ fn selfcheck() -> Result<()> {
     //      destinations, not just sshd's bare non-login PATH.
     #[cfg(feature = "ssh")]
     {
-    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true);
+    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true, false);
     let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
         .expect("prelude lost the stale-socket sweep (or its ; separator)");
     assert!(sweep < prelude.find("install.sh").expect("prelude lost the installer drop"),
         "sweep must precede the installer drop");
+    for needle in [
+        "NEED_INSTALL=1",
+        "sh \"$HOME/.mars/install.sh\"",
+        "automatic installer did not produce a usable mars binary",
+    ] {
+        assert!(prelude.contains(needle), "prelude lost automatic bootstrap step: {needle}");
+    }
+    assert!(!prelude.contains("--broker-handoff-version"),
+        "ordinary Unix bootstrap unexpectedly requires the capability protocol");
     // Reused ControlMaster ⇒ its old -R forward is still live on the existing
     // socket inode; sweeping would orphan a working tunnel.
-    let reuse = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", false);
+    let reuse = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", false, false);
     assert!(!reuse.contains("rm -f"), "master-reuse prelude must NOT sweep the live socket");
     assert!(reuse.contains("install.sh"), "master-reuse prelude lost the installer drop");
+    let windows_bootstrap = broker::remote_prelude_cmd(
+        "/tmp/mars-auth-cap-home-nonce.sock", true, true
+    );
+    assert!(
+        windows_bootstrap.contains("export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"")
+            && windows_bootstrap.contains("--broker-handoff-version")
+            && windows_bootstrap.contains(broker::BROKER_HANDOFF_PROTOCOL)
+            && windows_bootstrap.contains("NEED_INSTALL=1")
+            && windows_bootstrap.contains("still too old for broker handoff"),
+        "Windows-home bootstrap lost its protocol-aware upgrade path"
+    );
     let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
-    for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
+    for needle in ["command -v mars", "export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"",
                    "export MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
-                   "install.sh",
+                   "automatic bootstrap completed",
                    "[ -S /tmp/mars-auth-42.sock ]", "agent tunnel ready", "no agent tunnel",
                    "\"$M\" attach", "exec \"$M\" new main"] {
         assert!(sess.contains(needle), "session cmd missing: {needle}");

@@ -43,6 +43,7 @@ pub struct Tuning {
     pub terminal_default_rows: u16,
     pub terminal_default_cols: u16,
     pub terminal_scrollback_lines: usize,
+    pub terminal_startup_probe_ms: u64,
     pub autosave_secs: u64,
     pub project_index_max: usize,
     pub project_ignore: Vec<String>,
@@ -94,6 +95,7 @@ impl Default for Tuning {
             terminal_default_rows: 24,
             terminal_default_cols: 80,
             terminal_scrollback_lines: 10_000,
+            terminal_startup_probe_ms: 5000,
             autosave_secs: 30,
             project_index_max: 20_000,
             project_ignore: ["target", "node_modules", ".git", "dist", "build", ".venv"]
@@ -225,6 +227,10 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("terminal_scrollback_lines", knob(json!(d.terminal_scrollback_lines),
             "Scrollback history kept per terminal pane. Scroll with the wheel or \
              Shift+PageUp/PageDown; any keystroke snaps back to live.")),
+        ("terminal_startup_probe_ms", knob(json!(d.terminal_startup_probe_ms),
+            "Delay and retry interval for the readiness probe used when a fresh \
+             shell has an empty or unrecognized prompt. Commands and typing stay \
+             buffered until the shell accepts the probe.")),
         ("autosave_secs", knob(json!(d.autosave_secs),
             "Seconds between silent autosaves of modified buffers that have a file \
              path (also fires on session detach/disconnect). 0 disables.")),
@@ -383,6 +389,8 @@ pub fn load() -> Tuning {
         t.terminal_default_cols = get_u64(&map, "terminal_default_cols", t.terminal_default_cols as u64) as u16;
         t.terminal_scrollback_lines =
             get_u64(&map, "terminal_scrollback_lines", t.terminal_scrollback_lines as u64) as usize;
+        t.terminal_startup_probe_ms =
+            get_u64(&map, "terminal_startup_probe_ms", t.terminal_startup_probe_ms).max(1);
         t.autosave_secs = get_u64(&map, "autosave_secs", t.autosave_secs);
         t.project_index_max = get_u64(&map, "project_index_max", t.project_index_max as u64) as usize;
         t.tree_width = get_u64(&map, "tree_width", t.tree_width as u64) as u16;

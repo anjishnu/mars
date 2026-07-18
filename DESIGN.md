@@ -83,6 +83,8 @@ broker.rs    Key-never-leaves-home protocol + portable `mars keyd` daemon +
 ssh.rs       System-OpenSSH orchestration. Unix keeps its ControlMaster path;
              Windows-home uses a per-invocation authenticated TCP relay and a
              mixed `-R remote-unix-socket:local-tcp` forward to Unix remotes.
+             A separate prelude stages the embedded Unix installer and runs it
+             when Mars is missing or lacks the required handoff protocol.
              The remote binary and any persistent session daemon must pass
              explicit handoff/session protocol checks before broker routing.
              Mars subprocesses inside persistent PTYs query the daemon's live
@@ -166,10 +168,14 @@ device, not a bypass around the editor's safety gates.
 
 `terminal.rs` spawns the platform shell on a `portable-pty` PTY and pumps its output
 into a `vt100::Parser` on a dedicated reader thread, signaling the main loop via
-`mpsc` only to trigger a repaint. A second thread waits on the child process because
-ConPTY can keep its output pipe open after process exit. The parser and shell run
-independently of whether the pane is visible or focused. This property is what makes
-"shell survives session detach" free.
+`mpsc` only to trigger a repaint. A second thread owns and polls the child process
+because ConPTY can keep its output pipe open after process exit; pane-close kill
+requests go to that same handle-owning thread. The parser and shell run independently
+of whether the pane is visible or focused. This property is what makes "shell
+survives session detach" free. Every fresh terminal buffers input until the parser
+recognizes a prompt. Empty or unusual prompts fall back to an echoed readiness
+marker that is retried until the shell accepts it, so profile startup cannot discard
+shell-bar commands, typing, or paste.
 
 Keyboard chrome (pane/tab navigation, splits) is intercepted the same way inside a
 terminal pane as in the editor (`App::is_chrome_action`), while editing chords

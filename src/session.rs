@@ -723,6 +723,10 @@ fn client_connection(
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
+pub(crate) fn client_exit_is_error(message: &str) -> bool {
+    message.starts_with("version mismatch:") || message.starts_with("invalid broker handoff:")
+}
+
 /// Attach the real TTY to a running session.
 pub fn client_main(name: &str) -> Result<()> {
     use crossterm::{
@@ -770,7 +774,7 @@ pub fn client_main(name: &str) -> Result<()> {
     }
 
     // Server-frame pump: Output → stdout verbatim; Exit → done.
-    let (done_tx, done_rx) = mpsc::channel::<String>();
+    let (done_tx, done_rx) = mpsc::channel::<(String, bool)>();
     {
         let read_half = stream.try_clone()?;
         std::thread::spawn(move || {
@@ -779,7 +783,7 @@ pub fn client_main(name: &str) -> Result<()> {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => {
-                        let _ = done_tx.send("connection lost".into());
+                        let _ = done_tx.send(("connection lost".into(), true));
                         break;
                     }
                     Ok(_) => match serde_json::from_str::<ServerFrame>(line.trim()) {
@@ -791,7 +795,8 @@ pub fn client_main(name: &str) -> Result<()> {
                             }
                         }
                         Ok(ServerFrame::Exit { message }) => {
-                            let _ = done_tx.send(message);
+                            let failed = client_exit_is_error(&message);
+                            let _ = done_tx.send((message, failed));
                             break;
                         }
                         Ok(ServerFrame::Status { .. }) => {} // not expected mid-attach
@@ -804,10 +809,11 @@ pub fn client_main(name: &str) -> Result<()> {
     }
 
     // Input pump: TTY events → frames.
-    let exit_msg;
+    let (exit_msg, exit_error);
     loop {
-        if let Ok(msg) = done_rx.try_recv() {
+        if let Ok((msg, failed)) = done_rx.try_recv() {
             exit_msg = msg;
+            exit_error = failed;
             break;
         }
         if crossterm::event::poll(Duration::from_millis(50))? {
@@ -821,6 +827,7 @@ pub fn client_main(name: &str) -> Result<()> {
             if let Some(f) = frame {
                 if write_frame(&mut writer, &f).is_err() {
                     exit_msg = "connection lost".into();
+                    exit_error = true;
                     break;
                 }
             }
@@ -838,6 +845,9 @@ pub fn client_main(name: &str) -> Result<()> {
         DisableBracketedPaste,
         crossterm::cursor::Show
     );
+    if exit_error {
+        return Err(anyhow!(exit_msg));
+    }
     println!("[mars] {exit_msg}");
     Ok(())
 }
@@ -1282,24 +1292,22 @@ pub fn killall_main(force: bool) -> Result<()> {
         return Ok(());
     }
     // Anything still standing didn't answer its socket — put it down hard.
+    // Windows intentionally treats this reset command as permission to stop
+    // every other mars.exe; Unix retains its targeted daemon sweep.
+    crate::sys::proc::kill_all_mars();
     // The capability-marked reverse forward uniquely identifies a Windows
-    // handoff; ending ssh makes its waiting Mars parent drop the relay.
-    for pat in [
-        "mars --server",
-        "ssh -R /tmp/mars-auth-cap-",
-        "mars keyd",
-    ] {
-        crate::sys::proc::kill_matching(pat);
-    }
+    // handoff. Its ssh.exe child can outlive a force-killed Mars parent.
+    crate::sys::proc::kill_matching("ssh -R /tmp/mars-auth-cap-");
     // Shut down Unix ControlMasters cleanly, then sweep their socket files —
     // a leftover master ambushes the next `mars ssh` with a broken pipe.
+    #[cfg(feature = "ssh")]
     if let Some(dir) = crate::broker::broker_socket_path().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 if !e.file_name().to_string_lossy().starts_with("cm-") {
                     continue;
                 }
-                let _ = std::process::Command::new("ssh")
+                let _ = crate::ssh::ssh_command()
                     .arg("-O").arg("exit")
                     .arg("-o").arg(format!("ControlPath={}", e.path().display()))
                     .arg("killall-sweep")
@@ -1322,7 +1330,7 @@ pub fn killall_main(force: bool) -> Result<()> {
         }
     }
     println!(
-        "killall: {ended} session(s) ended gracefully; force-swept daemons, \
+        "killall: {ended} session(s) ended gracefully; force-swept Mars processes, \
          ssh masters, and stale sockets. Memory files untouched."
     );
     Ok(())

@@ -431,6 +431,25 @@ pub mod proc {
             .stderr(std::process::Stdio::null())
             .status();
     }
+
+    pub(crate) fn kill_all_mars_script(caller_pid: u32) -> String {
+        format!(
+            "Get-CimInstance Win32_Process -Filter \"Name = 'mars.exe'\" | \
+             Where-Object {{ $_.ProcessId -ne {caller_pid} }} | \
+             ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        )
+    }
+
+    /// Force-stop every other `mars.exe`. `killall` has already asked reachable
+    /// sessions to autosave, so this is the intentionally broad recovery path.
+    pub fn kill_all_mars() {
+        let script = kill_all_mars_script(std::process::id());
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// Make a path private to its owning user.

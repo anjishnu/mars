@@ -149,6 +149,13 @@ pub mod proc {
             .arg(needle)
             .status();
     }
+
+    /// Force-stop Mars daemons that survived their graceful control request.
+    pub fn kill_all_mars() {
+        for needle in ["mars --server", "mars keyd"] {
+            kill_matching(needle);
+        }
+    }
 }
 
 /// Make a path private to its owning user.

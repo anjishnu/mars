@@ -257,13 +257,16 @@ Five small files, deliberately dumb:
 ### `terminal.rs` — PTY panes
 
 `spawn` runs the platform shell on a `portable-pty` PTY and pumps its output into
-a `vt100::Parser` on a dedicated reader thread. A separate process watcher blocks
-in `Child::wait` and emits `TermEvent::Exited`; this is required because ConPTY can
-keep its output pipe open after the child exits. **The parser and shell run whether
-or not anyone is watching** — this property is what makes session detach free.
+a `vt100::Parser` on a dedicated reader thread. A separate process watcher owns and
+polls the child, handles pane-close kill requests, and emits `TermEvent::Exited`
+after a bounded final-output drain; this is required because ConPTY can keep its
+output pipe open after the child exits. **The parser and shell run whether or not
+anyone is watching** — this property is what makes session detach free.
 `Term` also owns scrollback view state (`scroll_view`, `scroll_to_live`) and
 `history_tail(lines)` — the method that pages back through vt100 scrollback
 (and restores the live view) to satisfy the agent's `NEED: scrollback` requests.
+Every fresh terminal buffers input until a recognized prompt or retryable
+shell-readiness marker proves that profile startup has completed.
 
 ### `agent.rs` — the LLM layer
 
@@ -303,7 +306,9 @@ capability relay and `-R remote-unix-socket:local-tcp`; the relay authenticates
 the remote bytes, then opens the protected local keyd channel. The current socket
 and capability travel in the session `Hello`, so reattaching a persistent remote
 daemon replaces its dead prior tunnel route. SSH child environments explicitly
-remove provider credentials before OpenSSH can apply user `SendEnv` rules.
+remove provider credentials before OpenSSH can apply user `SendEnv` rules. A
+separate prelude stages the embedded installer and runs it only for a missing or
+handoff-incompatible remote Mars; Windows may therefore authenticate twice.
 
 ### `session.rs` — persistence as a process split
 

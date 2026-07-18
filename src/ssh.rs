@@ -6,6 +6,7 @@
 //! the remote environment.
 
 use anyhow::Result;
+use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -22,9 +23,19 @@ const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 const RELAY_ACCEPT_IDLE: Duration = Duration::from_millis(20);
 const RELAY_CONNECTION_LIMIT: usize = 32;
 
-/// The installer is embedded so the Unix prelude can stage the exact script
-/// shipped with this binary without relying on GitHub being reachable.
+/// The installer is embedded so the prelude can stage the exact script shipped
+/// with this binary without relying on GitHub being reachable.
 pub const INSTALL_SH: &str = include_str!("../install.sh");
+
+pub(crate) fn installer_payload() -> Cow<'static, str> {
+    if INSTALL_SH.contains('\r') {
+        Cow::Owned(INSTALL_SH.replace("\r\n", "\n").replace('\r', ""))
+    } else {
+        Cow::Borrowed(INSTALL_SH)
+    }
+}
+
+const REMOTE_MARS_LOOKUP: &str = r#"export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; M="$(command -v mars 2>/dev/null || true)"; "#;
 
 pub(crate) struct BrokerRelay {
     addr: SocketAddr,
@@ -182,24 +193,47 @@ fn relay_connection(
     Ok(())
 }
 
-/// The remote command for the Unix prelude connection. A live multiplexed
-/// forward must not be swept, because unlinking it orphans the listener inode.
-pub fn remote_prelude_cmd(remote_sock: &str, sweep: bool) -> String {
+/// Stage the embedded installer and run it only when Mars is missing or, for a
+/// capability handoff, too old. A live multiplexed forward must not be swept,
+/// because unlinking it orphans the listener inode.
+pub fn remote_prelude_cmd(
+    remote_sock: &str,
+    sweep: bool,
+    require_handoff_protocol: bool,
+) -> String {
     let rm = if sweep {
         format!("rm -f {remote_sock}; ")
     } else {
         String::new()
     };
-    format!("{rm}mkdir -p ~/.mars && cat > ~/.mars/install.sh && chmod +x ~/.mars/install.sh")
+    let protocol_probe = if require_handoff_protocol {
+        format!(
+            r#"if [ -n "$M" ]; then MARS_BROKER_PROTOCOL="$("$M" --broker-handoff-version 2>/dev/null || true)"; if [ "$MARS_BROKER_PROTOCOL" != "{}" ]; then NEED_INSTALL=1; fi; fi; "#,
+            crate::broker::BROKER_HANDOFF_PROTOCOL
+        )
+    } else {
+        String::new()
+    };
+    let protocol_verify = if require_handoff_protocol {
+        format!(
+            r#"MARS_BROKER_PROTOCOL="$("$M" --broker-handoff-version 2>/dev/null || true)"; if [ "$MARS_BROKER_PROTOCOL" != "{}" ]; then printf '[mars] installed Mars is still too old for broker handoff\n' >&2; exit 2; fi; "#,
+            crate::broker::BROKER_HANDOFF_PROTOCOL
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"{rm}mkdir -p "$HOME/.mars" && cat > "$HOME/.mars/install.sh" && chmod +x "$HOME/.mars/install.sh" || {{ printf '[mars] could not stage the remote installer\n' >&2; exit 1; }}; {REMOTE_MARS_LOOKUP}NEED_INSTALL=0; if [ -z "$M" ]; then NEED_INSTALL=1; fi; {protocol_probe}if [ "$NEED_INSTALL" -eq 1 ]; then printf '[mars] installing or upgrading Mars on the remote...\n'; sh "$HOME/.mars/install.sh"; fi; {REMOTE_MARS_LOOKUP}if [ -z "$M" ]; then printf '[mars] automatic installer did not produce a usable mars binary\n' >&2; exit 1; fi; {protocol_verify}"#
+    )
 }
 
-pub fn remote_session_cmd(remote_sock: &str, pushed: bool) -> String {
-    remote_session_cmd_with_capability(remote_sock, pushed, None)
+pub fn remote_session_cmd(remote_sock: &str, bootstrapped: bool) -> String {
+    remote_session_cmd_with_capability(remote_sock, bootstrapped, None)
 }
 
 pub fn remote_session_cmd_with_capability(
     remote_sock: &str,
-    pushed: bool,
+    bootstrapped: bool,
     capability: Option<&str>,
 ) -> String {
     let capability_export = capability
@@ -215,25 +249,25 @@ pub fn remote_session_cmd_with_capability(
         .unwrap_or_default();
     remote_session_cmd_inner(
         Some(remote_sock),
-        pushed,
+        bootstrapped,
         &capability_export,
         &protocol_check,
     )
 }
 
 #[cfg(windows)]
-fn remote_session_cmd_without_tunnel(pushed: bool) -> String {
-    remote_session_cmd_inner(None, pushed, "", "")
+fn remote_session_cmd_without_tunnel(bootstrapped: bool) -> String {
+    remote_session_cmd_inner(None, bootstrapped, "", "")
 }
 
 fn remote_session_cmd_inner(
     remote_sock: Option<&str>,
-    pushed: bool,
+    bootstrapped: bool,
     capability_export: &str,
     protocol_check: &str,
 ) -> String {
-    let nudge = if pushed {
-        "printf '[mars] not installed here — installer is ready. Run:\\n  sh ~/.mars/install.sh\\n'"
+    let nudge = if bootstrapped {
+        "printf '[mars] automatic bootstrap completed, but mars is no longer available — reconnect and retry\\n'"
     } else {
         "printf '[mars] not installed here. Install:\\n  \
          curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain (>=1.85)\\n  \
@@ -255,9 +289,7 @@ fn remote_session_cmd_inner(
     };
     format!(
         "{tunnel_status}\
-         M=\"$(command -v mars 2>/dev/null)\"; \
-         if [ -z \"$M\" ] && [ -x \"$HOME/.cargo/bin/mars\" ]; then M=\"$HOME/.cargo/bin/mars\"; fi; \
-         if [ -z \"$M\" ] && [ -x \"$HOME/.local/bin/mars\" ]; then M=\"$HOME/.local/bin/mars\"; fi; \
+         {REMOTE_MARS_LOOKUP}\
          {exports}\
          if [ -n \"$M\" ]; then {protocol_check}\"$M\" attach 2>/dev/null || exec \"$M\" new main; else \
          {nudge}; exec ${{SHELL:-/bin/sh}} -l; fi"
@@ -299,29 +331,68 @@ pub(crate) fn ssh_command() -> std::process::Command {
     command
 }
 
+fn run_remote_prelude(command: &mut std::process::Command) -> Result<bool> {
+    let installer = installer_payload();
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("could not launch installer ssh: {e}"))?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("installer ssh did not provide stdin"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(installer.as_bytes())
+                .map_err(|e| anyhow::anyhow!("could not send install.sh: {e}"))
+        });
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("could not wait for installer ssh: {e}"))?;
+    write_result?;
+    Ok(status.success())
+}
+
 #[cfg(windows)]
 pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
     let home_addr = crate::broker::broker_socket_path()?;
     let keyd_ready = crate::broker::ensure_keyd(&home_addr);
     crate::fleet::fleet_record(&host, None);
 
+    let nonce = random_hex(12)?;
+    let home_tag: String = crate::sys::proc::uid_tag().chars().take(24).collect();
+    let remote_sock = format!("/tmp/mars-auth-cap-{home_tag}-{nonce}.sock");
+    eprintln!(
+        "mars ssh: checking the remote installation \
+         (Windows OpenSSH may authenticate again for the session)..."
+    );
+    let mut prelude = ssh_command();
+    prelude
+        .arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .args(&extra)
+        .arg(&host)
+        .arg(remote_prelude_cmd(&remote_sock, keyd_ready, keyd_ready));
+    if !run_remote_prelude(&mut prelude)? {
+        anyhow::bail!("mars ssh: remote installation check failed; fix the error above and retry");
+    }
+
     if !keyd_ready {
         let status = ssh_command()
             .args(&extra)
             .arg("-t")
             .arg(&host)
-            .arg(remote_session_cmd_without_tunnel(false))
+            .arg(remote_session_cmd_without_tunnel(true))
             .status()
             .map_err(|e| anyhow::anyhow!("mars ssh: could not launch ssh: {e}"))?;
         return ssh_status(status);
     }
 
     let capability = random_hex(16)?;
-    let nonce = random_hex(12)?;
-    let home_tag: String = crate::sys::proc::uid_tag().chars().take(24).collect();
-    let remote_sock = format!("/tmp/mars-auth-cap-{home_tag}-{nonce}.sock");
     let relay = BrokerRelay::start(&home_addr, &capability)?;
-    let remote_cmd = remote_session_cmd_with_capability(&remote_sock, false, Some(&capability));
+    let remote_cmd = remote_session_cmd_with_capability(&remote_sock, true, Some(&capability));
     let forward = format!("{remote_sock}:127.0.0.1:{}", relay.addr().port());
 
     let status = ssh_command()
@@ -389,8 +460,9 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    let pushed = {
-        let mut child = ssh_command()
+    let bootstrapped = {
+        let mut prelude = ssh_command();
+        prelude
             .arg("-o")
             .arg("ControlMaster=auto")
             .arg("-o")
@@ -403,28 +475,17 @@ pub fn ssh_main(host: String, extra: Vec<String>) -> Result<()> {
             .arg(format!("ControlPath={}", control.display()))
             .args(&extra)
             .arg(&host)
-            .arg(remote_prelude_cmd(&remote_sock, !master_alive))
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .ok();
-        match child.as_mut() {
-            Some(c) => {
-                let ok_write = c
-                    .stdin
-                    .take()
-                    .and_then(|mut s| s.write_all(INSTALL_SH.as_bytes()).ok())
-                    .is_some();
-                let ok_exit = c.wait().map(|s| s.success()).unwrap_or(false);
-                ok_write && ok_exit
-            }
-            None => false,
-        }
+            .arg(remote_prelude_cmd(&remote_sock, !master_alive, false));
+        run_remote_prelude(&mut prelude).unwrap_or_else(|e| {
+            eprintln!("mars ssh: note — remote bootstrap failed: {e}");
+            false
+        })
     };
-    if !pushed {
-        eprintln!("mars ssh: note — couldn't drop the installer on the remote (continuing).");
+    if !bootstrapped {
+        eprintln!("mars ssh: note — couldn't install Mars on the remote (continuing).");
     }
 
-    let remote_cmd = remote_session_cmd(&remote_sock, pushed);
+    let remote_cmd = remote_session_cmd(&remote_sock, bootstrapped);
     let mut cmd = ssh_command();
     cmd.arg("-o")
         .arg("StreamLocalBindUnlink=yes")

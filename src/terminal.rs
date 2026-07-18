@@ -3,12 +3,13 @@
 
 use std::io::{Read, Write};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 pub type TermId = usize;
 
@@ -16,6 +17,15 @@ pub type TermId = usize;
 pub enum TermEvent {
     Output(TermId),
     Exited(TermId),
+}
+
+static NEXT_STARTUP_PROBE: AtomicU64 = AtomicU64::new(1);
+
+struct StartupInput {
+    bytes: Vec<u8>,
+    marker: String,
+    probe_interval: Duration,
+    last_probe: Option<Instant>,
 }
 
 pub struct Term {
@@ -28,7 +38,8 @@ pub struct Term {
     parser: Arc<Mutex<vt100::Parser>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    kill_tx: mpsc::Sender<()>,
+    startup_input: Option<StartupInput>,
     exit_code: Arc<Mutex<Option<i32>>>,
     notify_exit: Arc<AtomicBool>,
     rows: u16,
@@ -49,6 +60,7 @@ pub fn spawn(
     cwd: Option<std::path::PathBuf>,
     session: Option<&str>,
     session_instance_id: Option<&str>,
+    startup_probe_interval: Duration,
     tx: mpsc::Sender<TermEvent>,
 ) -> Result<Term> {
     let rows = rows.max(1);
@@ -77,7 +89,6 @@ pub fn spawn(
         cmd.env("MARS_SESSION_ID", id);
     }
     let mut child = pair.slave.spawn_command(cmd)?;
-    let killer = child.clone_killer();
     // Drop our slave copy; child-process exit is tracked separately because
     // ConPTY can keep the master output pipe open after the child is gone.
     drop(pair.slave);
@@ -88,6 +99,7 @@ pub fn spawn(
     let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
     let reader_parser = parser.clone();
     let output_tx = tx.clone();
+    let (reader_done_tx, reader_done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -103,29 +115,59 @@ pub fn spawn(
                 }
             }
         }
+        let _ = reader_done_tx.send(());
     });
 
     let exit_code = Arc::new(Mutex::new(None));
     let wait_exit_code = exit_code.clone();
     let notify_exit = Arc::new(AtomicBool::new(true));
     let wait_notify_exit = notify_exit.clone();
+    let (kill_tx, kill_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let code = child.wait().ok().map(|status| status.exit_code() as i32);
+        let code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status.exit_code() as i32),
+                Err(_) => break None,
+                Ok(None) => {}
+            }
+            match kill_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) => {
+                    let _ = child.kill();
+                    break child.wait().ok().map(|status| status.exit_code() as i32);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    break child.wait().ok().map(|status| status.exit_code() as i32);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
         if let Ok(mut slot) = wait_exit_code.lock() {
             *slot = code;
         }
         if wait_notify_exit.swap(false, Ordering::AcqRel) {
+            let _ = reader_done_rx.recv_timeout(Duration::from_millis(100));
             let _ = tx.send(TermEvent::Exited(id));
         }
     });
 
+    let marker = format!(
+        "__MARS_READY_{:x}__",
+        NEXT_STARTUP_PROBE.fetch_add(1, Ordering::Relaxed)
+    );
     Ok(Term {
         exited: false,
         spawn_cwd,
         parser,
         writer,
         master: pair.master,
-        killer,
+        kill_tx,
+        startup_input: Some(StartupInput {
+            bytes: Vec::new(),
+            marker,
+            probe_interval: startup_probe_interval,
+            last_probe: None,
+        }),
         exit_code,
         notify_exit,
         rows,
@@ -140,12 +182,79 @@ pub fn spawn(
 impl Drop for Term {
     fn drop(&mut self) {
         self.notify_exit.store(false, Ordering::Release);
-        let _ = self.killer.kill();
+        let _ = self.kill_tx.send(());
     }
 }
 
 impl Term {
+    fn prompt_visible(&self) -> bool {
+        let Ok(parser) = self.parser.lock() else { return false };
+        let screen = parser.screen();
+        if screen.hide_cursor() {
+            return false;
+        }
+        let (row, _) = screen.cursor_position();
+        let (_, cols) = screen.size();
+        let line: String = (0..cols)
+            .filter_map(|col| screen.cell(row, col))
+            .map(|cell| cell.contents())
+            .collect();
+        matches!(
+            line.trim_end().chars().last(),
+            Some('$' | '#' | '%' | '>' | '❯' | '➜' | 'λ' | '»' | '›')
+        )
+    }
+
+    pub fn flush_startup_input(&mut self) {
+        if self.startup_input.is_none() {
+            return;
+        }
+        if self.prompt_visible() {
+            let bytes = self.startup_input.take().map(|startup| startup.bytes);
+            if let Some(bytes) = bytes {
+                self.write_input(&bytes);
+            }
+            return;
+        }
+        let marker_seen = self.startup_input.as_ref().is_some_and(|startup| {
+            let Ok(parser) = self.parser.lock() else { return false };
+            parser
+                .screen()
+                .contents()
+                .lines()
+                .any(|line| line.trim() == startup.marker)
+        });
+        if marker_seen {
+            let bytes = self.startup_input.take().map(|startup| startup.bytes);
+            if let Some(bytes) = bytes {
+                self.write_input(&bytes);
+            }
+            return;
+        }
+        let probe = self.startup_input.as_mut().and_then(|startup| {
+            let last_probe = startup.last_probe?;
+            if last_probe.elapsed() < startup.probe_interval {
+                return None;
+            }
+            startup.last_probe = Some(Instant::now());
+            Some(format!("echo {}\r", startup.marker))
+        });
+        if let Some(probe) = probe {
+            self.write_input(probe.as_bytes());
+        }
+    }
+
     pub fn send_bytes(&mut self, bytes: &[u8]) {
+        if let Some(startup) = self.startup_input.as_mut() {
+            startup.bytes.extend_from_slice(bytes);
+            startup.last_probe.get_or_insert_with(Instant::now);
+            self.flush_startup_input();
+            return;
+        }
+        self.write_input(bytes);
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) {
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }

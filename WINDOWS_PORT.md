@@ -19,11 +19,12 @@ design, while the cross-platform wheel dispatch check still runs.
 - Portable session names and an isolated runtime-directory override for tests.
 - The portable fleet registry and time-formatting helpers.
 - Windows-home `mars keyd` and `mars ssh` handoff to Unix remotes, including
-  detach/reattach of an existing remote Mars session.
+  automatic remote bootstrap and detach/reattach of an existing remote Mars
+  session.
 
-Windows as the SSH remote remains unsupported. The first Windows-home slice also
-requires Mars to be installed on the Unix remote; unlike the Unix-home path, it
-does not stage `install.sh` or use OpenSSH `ControlMaster`.
+Windows as the SSH remote remains unsupported. Windows-home stages the same
+embedded Unix `install.sh` as Unix-home in a separate bootstrap connection, but
+does not use OpenSSH `ControlMaster`.
 
 ## Platform boundary
 
@@ -37,7 +38,7 @@ that rule, including for the SSH broker.
 | Session control | Unix-domain socket | authenticated loopback TCP + rendezvous file |
 | TTY hygiene | termios repair | crossterm console restore |
 | Daemon detach | `setsid` | detached process-group creation flags |
-| Process sweep | `pkill -f` | PowerShell CIM sweep |
+| Process sweep | `pkill -f` | PowerShell CIM exact-name sweep of every other `mars.exe` |
 | Directory privacy | mode `0700` | inherited user-profile ACL |
 | Default shell | `$SHELL`, then `/bin/bash` | PowerShell 7, Windows PowerShell, then `%ComSpec%` |
 
@@ -99,13 +100,28 @@ This path deliberately does not use `ControlMaster` or `ControlPersist`, which
 stock Windows OpenSSH parses as configuration but does not implement as the Unix
 client does.
 
+Before opening the interactive connection, Windows starts a short-lived SSH
+prelude that writes the embedded `install.sh` to `~/.mars/install.sh`. It runs the
+script only when Mars is absent or does not support the required handoff protocol,
+then verifies the installed binary. Mars normalizes the embedded script to Unix
+line endings before sending it, even when the home binary was built from a Windows
+checkout. This keeps installer bytes separate from the interactive TTY, at the
+cost of a second password/2FA prompt where authentication is not cached.
+
+`mars killall` first asks every reachable session to autosave and exit. Its Windows
+recovery sweep then force-stops every other process whose executable name is
+exactly `mars.exe`, followed by capability-marked `ssh.exe` forwards. This broad
+reset behavior is intentional for the beta; the invoking `mars killall` process is
+excluded.
+
 ### ConPTY process lifecycle
 
 ConPTY can keep its output pipe open after the shell process has exited, so EOF is
 not a reliable lifecycle signal. `terminal.rs` moves the child handle to a watcher
-thread blocked in `Child::wait` and retains a cloned `ChildKiller` in `Term`.
-Natural exit records the code and emits one `TermEvent::Exited`; dropping a pane
-suppresses that event and kills the child.
+thread that polls for exit and accepts kill requests from `Term`. Natural exit
+records the code, allows a bounded final-output drain, and emits one
+`TermEvent::Exited`; dropping a pane suppresses that event and asks the
+handle-owning watcher to kill the child.
 
 ### Session paths and names
 
@@ -155,8 +171,8 @@ That document is a proposal; this file remains the description of shipped behavi
 
 1. Complete a manual Windows Terminal pass for physical key encodings, mouse,
    clipboard, window-close daemon survival, detach/reattach, and Mission Briefing.
-2. Add a per-session Job Object and replace the best-effort PowerShell process
-   sweep with native process enumeration.
+2. Add a per-session Job Object and eventually replace the accepted broad
+   PowerShell recovery sweep with native process enumeration.
 3. Protect credential-bearing runtime state with creation-time explicit DACLs.
 4. Expand the Windows-home SSH matrix beyond the proven Windows-OpenSSH to Ubuntu
    path (password/2FA, jump hosts, policy failures, and network loss), then design

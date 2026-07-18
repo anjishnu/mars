@@ -3220,10 +3220,11 @@ impl App {
         }
         if let PaneContent::Terminal(tid) = self.focused_pane().content {
             if let Some(t) = self.terms.get_mut(&tid) {
-                t.send_bytes(cmd.as_bytes());
+                let mut input = cmd.as_bytes().to_vec();
                 // What a keyboard Enter sends (key_to_bytes): every shell takes
                 // \r as accept-line; ConPTY apps do NOT take a bare \n.
-                t.send_bytes(b"\r");
+                input.push(b'\r');
+                t.send_bytes(&input);
                 // The work journal's `command`: the last thing mars itself ran
                 // in this pane (composer + TYPE: both funnel through here).
                 self.watches.entry(tid).or_default().last_command = Some(cmd.to_string());
@@ -3734,6 +3735,8 @@ impl App {
         self.next_term_id += 1;
         let (rows, cols) = (self.tuning.terminal_default_rows, self.tuning.terminal_default_cols);
         let scrollback = self.tuning.terminal_scrollback_lines;
+        let startup_probe =
+            std::time::Duration::from_millis(self.tuning.terminal_startup_probe_ms);
         // The first opened file's dir if any, else where `mars` was launched —
         // never portable-pty's default (which lands the shell at /).
         let cwd = self.startup_cwd.clone().or_else(|| self.run_cwd.clone());
@@ -3745,6 +3748,7 @@ impl App {
             cwd,
             self.session_name.as_deref(),
             self.session_instance_id.as_deref(),
+            startup_probe,
             self.term_tx.clone(),
         ) {
             Ok(term) => {
@@ -3916,6 +3920,10 @@ impl App {
     /// Called every loop iteration whether or not a client is attached.
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
+
+        for term in self.terms.values_mut() {
+            term.flush_startup_input();
+        }
 
         // Drain terminal signals (repaint next frame); mark dead shells and feed
         // the watch clock (W6: output resets quiet, exit queues a verdict).

@@ -17,8 +17,9 @@ nonce/HMAC mutual authentication with non-destructive upgrade-aware liveness
 classification. SSH child environments are scrubbed of provider keys. Stock
 Windows OpenSSH 9.5p2 completed the mixed-forward spike and
 created, detached from, and reattached an existing Mars session on an Ubuntu
-OpenSSH remote under WSL. Windows as the remote, installer staging from a Windows
-home, native lifecycle hardening, and distribution remain open.
+OpenSSH remote under WSL. Windows-home now also runs the embedded Unix installer
+through a separate protocol-aware bootstrap connection. Windows as the remote,
+native lifecycle hardening, and distribution remain open.
 
 ## 1. Outcome and recommended order
 
@@ -53,18 +54,19 @@ secure-creation spikes in section 11, not another broad broker refactor.
 |---|---|---|
 | Editor and input | Shared crossterm input boundary; release events filtered in `App::apply_input` | Real terminal encodings, IME/AltGr, paste, mouse, and resize need manual coverage |
 | Terminal panes | `portable-pty` / ConPTY; separate child waiter handles ConPTY's non-EOF exit behavior | Killing a shell handle does not guarantee descendant termination |
-| Persistent sessions | Shared JSON-line protocol; Windows uses nonce/HMAC mutually-authenticated loopback TCP and a rendezvous file | Force cleanup shells out to PowerShell and runtime ACLs are inherited |
+| Persistent sessions | Shared JSON-line protocol; Windows uses nonce/HMAC mutually-authenticated loopback TCP and a rendezvous file | Force cleanup intentionally kills every other exact-name `mars.exe`; runtime ACLs are inherited |
 | Daemon lifecycle | `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` | No Job Object contains the daemon's process tree |
 | Paths | Unix-shaped locations under `%USERPROFILE%` plus `%TEMP%` runtime addresses | No Known Folder layout or migration contract |
-| SSH broker | Portable keyd plus Windows authenticated relay to Unix remotes | Remote bootstrap, broader SSH matrix, and Windows-as-remote remain |
+| SSH broker | Portable keyd, automatic Unix bootstrap, and Windows authenticated relay to Unix remotes | Broader SSH matrix and Windows-as-remote remain |
 | Fleet | Portable `fleet.rs` registry with broker activity from Windows-home sessions | Windows-as-remote remains |
 | Packaging | Source build with Rust/MSVC; x64 Windows CI | No native ARM64 CI, release artifacts, installer, signing, or update path |
 
 The implementation removed the prior coupling: `broker.rs` now owns the portable
 protocol/keyd service, while `ssh.rs` owns OpenSSH lifecycle, remote POSIX commands,
 and the Windows relay. `broker_stub.rs` is used only when the Cargo feature is off.
-The Unix path retains its two-connection `ControlMaster` installer flow; Windows
-uses one foreground interactive connection and requires a preinstalled remote.
+The Unix path retains its two-connection `ControlMaster` installer flow. Windows
+uses a separate bootstrap connection plus one foreground interactive connection;
+without authentication caching this can prompt twice.
 
 ## 3. Why the remaining parity is difficult
 
@@ -251,14 +253,11 @@ Do not claim that installer staging and an interactive TTY can share stdin.
 The current prelude pipes embedded `install.sh` over stdin; the interactive
 connection needs stdin for the user.
 
-Stage 1 had two honest choices:
-
-1. **Implemented first slice:** require Mars to be installed on the Unix remote.
-   If it is absent, print the existing install instructions and fall back to the
-   login shell.
-2. **Follow-up:** retain a short-lived installer prelude as a separate SSH
-   invocation. Without multiplexing this may authenticate twice, especially for
-   password/2FA users, and the UI must say so.
+The accepted implementation retains a short-lived installer prelude as a separate
+SSH invocation. It stages the embedded `install.sh`, runs it only when Mars is
+missing or fails the capability-handoff probe, and verifies the resulting binary
+before the interactive connection starts. Without multiplexing this may
+authenticate twice, especially for password/2FA users, and the UI says so.
 
 Do not hide a network download inside the interactive command, and do not add a
 native SSH library merely to regain one-prompt bootstrap.
@@ -301,10 +300,15 @@ product decision.
 
 ### 5.2 Native process enumeration
 
-Replace the PowerShell `Get-CimInstance Win32_Process` sweep with native process
-enumeration using Toolhelp APIs. Validate executable identity, command line where
-available, PID, and process start time before termination; never kill by basename
-alone.
+The accepted beta recovery path uses PowerShell
+`Get-CimInstance Win32_Process -Filter "Name = 'mars.exe'"` and force-stops every
+other exact-name `mars.exe` after reachable sessions were given a graceful
+autosave request. This deliberately broad behavior favors a reliable reset and
+may stop an unrelated Mars build owned by the same user.
+
+A later hardening milestone can replace that sweep with native Toolhelp process
+enumeration. Validate executable identity, command line where available, PID, and
+process start time before termination.
 
 The Job Object is primary containment. Native enumeration is recovery for daemons
 created before Job Objects, corrupted rendezvous state, and upgrade transitions.
@@ -465,7 +469,7 @@ Windows-home milestone.
 | Forward silently fails | `ExitOnForwardFailure=yes`; no success-shaped fallback |
 | Remote command injection | Fixed-alphabet generated values and one tested POSIX-shell quoting helper |
 | Daemon dies but descendants survive | Per-session Job Object with kill-on-close |
-| Name-based force kill targets unrelated process | Native identity checks; Job Object is primary |
+| Name-based force kill targets unrelated process | Accepted beta reset tradeoff; invoking PID excluded; native identity checks remain future hardening |
 | Token leaks in logs | Never log descriptors/capabilities; redact command diagnostics |
 | Protocol downgrade/mismatched binaries | Explicit broker version error and compatibility tests |
 
@@ -597,18 +601,15 @@ state.
    SID may become mandatory.
 3. Should administrative recovery retain an ACE on Mars state, or should the DACL
    contain only user and `SYSTEM`?
-4. Is requiring preinstalled Mars on the first Windows-home SSH milestone
-   acceptable, or is a second authentication prompt for installer staging
-   preferable?
-5. Is pane-close descendant cleanup a release gate, or is session-level cleanup
+4. Is pane-close descendant cleanup a release gate, or is session-level cleanup
    sufficient for the first beta?
-6. Should any user preference roam through `%APPDATA%`, or should all Mars data
+5. Should any user preference roam through `%APPDATA%`, or should all Mars data
    stay machine-local?
-7. Which installer is the supported contract: MSI, winget, both, or a signed ZIP
+6. Which installer is the supported contract: MSI, winget, both, or a signed ZIP
    first?
-8. Is Windows-as-remote required for the same release as Windows-home, or can it
+7. Is Windows-as-remote required for the same release as Windows-home, or can it
    remain explicitly deferred?
-9. Should keyd enforce request concurrency/rate limits against a compromised
+8. Should keyd enforce request concurrency/rate limits against a compromised
    connected remote?
 10. Is Azure CLI/Entra token refresh in scope for Windows deployment, or will the
     first release document static provider credentials only?
