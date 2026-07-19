@@ -2817,6 +2817,24 @@ fn selfcheck() -> Result<()> {
         let legacy = all.iter().find(|e| e.verdict == "done: legacy").unwrap();
         assert!(legacy.cwd.is_empty() && legacy.command.is_none() && legacy.exit.is_none()
             && legacy.error_excerpt.is_none(), "legacy line grew phantom outcome fields");
+        // Phase A — the Notice-shaped ledger envelope: every record carries tier-0
+        // classification (kind/severity/headline) + provenance (origin/seq/principal)
+        // + a state_version, derived on write; pre-ledger lines get it re-derived on
+        // read. (design_ideas/movement-1-ledger-spec.md)
+        let led = worklog::records("train", 10);
+        let lf = led.iter().find(|r| r.kind == "failed").expect("no failed ledger record");
+        assert_eq!(lf.severity, "fail", "failed record must be severity=fail");
+        assert!(lf.headline.contains("cargo test") && lf.headline.contains("exit 101"),
+            "tier-0 headline should carry the deterministic facts: {}", lf.headline);
+        assert_eq!(lf.semantic_status, "done", "a record with a verdict reads semantically done");
+        assert!(!lf.origin.is_empty() && !lf.principal.is_empty(), "provenance (origin/principal) missing");
+        assert!(lf.seq >= 1, "monotonic seq not assigned: {}", lf.seq);
+        assert!(lf.state_version.starts_with("fnv1a:"), "state_version not bound: {}", lf.state_version);
+        // A pre-ledger line has its envelope RE-DERIVED — never blank, never misclassified.
+        let lg = led.iter().find(|r| r.verdict == "done: legacy").expect("legacy ledger record lost");
+        assert_eq!((lg.kind.as_str(), lg.severity.as_str()), ("done", "info"), "legacy envelope misderived");
+        assert_eq!(lg.headline, "done: legacy", "legacy headline should fall back to the verdict");
+        assert_eq!(lg.origin, "local", "legacy origin default");
         // compact(): past 2×max, the journal is rewritten to the newest max lines.
         worklog::compact(10_000); // way under threshold — must be a no-op
         assert_eq!(worklog::recent("train", 10).len(), 4, "compact under threshold rewrote the file");

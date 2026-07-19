@@ -89,6 +89,25 @@ pub fn record(e: &WorkEntry) {
     if let Some(x) = &e.error_excerpt {
         line["error_excerpt"] = serde_json::json!(x);
     }
+    // The Notice envelope (design_ideas/movement-1-ledger-spec.md): tier-0
+    // classification + provenance, derived here so no call site changes. Old-shape
+    // lines simply omit these and get them re-derived on read (see `records`).
+    let (kind, severity, headline) = tier0(e);
+    line["origin"] = serde_json::json!(origin());
+    line["seq"] = serde_json::json!(next_seq());
+    line["principal"] = serde_json::json!(principal());
+    line["kind"] = serde_json::json!(kind);
+    line["severity"] = serde_json::json!(severity);
+    line["headline"] = serde_json::json!(headline);
+    // The LLM verdict is the *semantic* enrichment atop the deterministic headline
+    // (GC I9): present ⇒ done, absent ⇒ pending (a raw tier-0 event awaiting a model).
+    line["semantic"] = serde_json::json!({
+        "status": if e.verdict.trim().is_empty() { "pending" } else { "done" },
+        "verdict": e.verdict,
+    });
+    line["state_version"] = serde_json::json!(state_version(&format!(
+        "{}|{}|{}|{}|{:?}", e.session, e.tab, kind, headline, e.exit
+    )));
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
@@ -114,6 +133,170 @@ pub fn recent(session: &str, limit: usize) -> Vec<WorkEntry> {
             command: j["command"].as_str().map(str::to_string),
             exit: j["exit"].as_i64().map(|x| x as i32),
             error_excerpt: j["error_excerpt"].as_str().map(str::to_string),
+        })
+        .collect();
+    let skip = out.len().saturating_sub(limit);
+    out.drain(..skip);
+    out
+}
+
+// ── The ledger envelope (Notice-shaped) ──────────────────────────────────────
+// The journal is the per-origin, append-only event log the workspace monitor and
+// (later) Ground Control both read. See design_ideas/movement-1-ledger-spec.md.
+
+/// The host that owns this record — a single origin in v1 (this machine). Ground
+/// Control keys the notice log by it. Best-effort label, never a hard dep.
+pub fn origin() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".into())
+}
+
+/// The acting principal. Single-valued in v1; the multi-principal hook (GC T9).
+pub fn principal() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "user".into())
+}
+
+fn seq_path() -> Option<PathBuf> {
+    worklog_path().map(|p| p.with_file_name("worklog.seq"))
+}
+
+/// The next monotonic sequence for this origin's log. Single-writer (the daemon),
+/// so read-increment-write is race-free enough; best-effort like `record`.
+fn next_seq() -> u64 {
+    let Some(path) = seq_path() else { return 0 };
+    let next = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, next.to_string());
+    next
+}
+
+/// A stable content hash for consent binding (GC §8.2 `state_version`). v1 uses a
+/// portable, dependency-free FNV-1a; Ground Control swaps in blake3 once records
+/// are signed and cross-host. The Blocked kind will additionally fold in the
+/// grid tail + prompt (Phase D), so an approve can never fire against stale state.
+fn state_version(inputs: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in inputs.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a:{h:016x}")
+}
+
+/// Tier-0: the deterministic, keyless classification every event gets with no
+/// model (GC I9) — kind + severity + a headline. The LLM `verdict` is an
+/// enrichment on top (the `semantic` field). Reuses the shipped verdict ladder so
+/// the ledger and the monitor share one tier-0 engine. `kind` (failed/blocked/
+/// done/running/context) doubles as the monitor's surface state.
+pub fn tier0(e: &WorkEntry) -> (String, String, String) {
+    use crate::briefing::Verdict;
+    let default = if e.failed { Verdict::Failed } else { Verdict::Done };
+    let kind = match crate::briefing::classify(&e.verdict, default) {
+        Verdict::Failed => "failed",
+        Verdict::Blocked => "blocked",
+        Verdict::Done => "done",
+        Verdict::Running => "running",
+        Verdict::Context => "context",
+    };
+    let severity = match kind {
+        "failed" => "fail",
+        "blocked" => "warn",
+        _ => "info",
+    };
+    // Deterministic headline: prefer the structured facts, fall back to the
+    // verdict text. Phase B (OSC-133) makes command/exit always present → exact.
+    let headline = match (&e.command, e.exit) {
+        (Some(cmd), Some(x)) => format!("{kind}: {cmd} (exit {x})"),
+        (Some(cmd), None) => format!("{kind}: {cmd}"),
+        _ => e.verdict.clone(),
+    };
+    (kind.to_string(), severity.to_string(), headline)
+}
+
+/// The full Notice-shaped ledger record (read view) — a superset of `WorkEntry`.
+/// (`actions`/`urgency` join in Phase C, where the monitor renders them.)
+// The trace fields (surface/command/cwd/exit/…) are the record's real content;
+// the workspace monitor (Phase C) is their first renderer.
+#[allow(dead_code)]
+pub struct LedgerRecord {
+    pub origin: String,
+    pub seq: u64,
+    pub ts: u64,
+    pub principal: String,
+    pub session: String,
+    pub surface: String,
+    pub kind: String,
+    pub severity: String,
+    pub headline: String,
+    pub semantic_status: String,
+    pub verdict: String,
+    pub state_version: String,
+    pub command: Option<String>,
+    pub cwd: String,
+    pub exit: Option<i32>,
+    pub dur_secs: Option<u64>,
+    pub error_excerpt: Option<String>,
+}
+
+/// The most recent `limit` ledger records for `session` (chronological). Old
+/// pre-ledger lines parse forward: the envelope is re-derived from the base fields.
+pub fn records(session: &str, limit: usize) -> Vec<LedgerRecord> {
+    let Some(path) = worklog_path() else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let mut out: Vec<LedgerRecord> = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|j| j["session"].as_str() == Some(session))
+        .map(|j| {
+            let base = WorkEntry {
+                ts: j["ts"].as_u64().unwrap_or(0),
+                session: session.to_string(),
+                tab: j["tab"].as_str().unwrap_or("").to_string(),
+                verdict: j["verdict"].as_str().unwrap_or("").to_string(),
+                failed: j["failed"].as_bool().unwrap_or(false),
+                dur_secs: j["dur_secs"].as_u64(),
+                cwd: j["cwd"].as_str().unwrap_or("").to_string(),
+                command: j["command"].as_str().map(str::to_string),
+                exit: j["exit"].as_i64().map(|x| x as i32),
+                error_excerpt: j["error_excerpt"].as_str().map(str::to_string),
+            };
+            let (dkind, dsev, dhead) = tier0(&base);
+            let semantic_status = j["semantic"]["status"]
+                .as_str()
+                .unwrap_or(if base.verdict.trim().is_empty() { "pending" } else { "done" })
+                .to_string();
+            LedgerRecord {
+                origin: j["origin"].as_str().unwrap_or("local").to_string(),
+                seq: j["seq"].as_u64().unwrap_or(0),
+                ts: base.ts,
+                principal: j["principal"].as_str().unwrap_or("user").to_string(),
+                surface: base.tab.clone(),
+                kind: j["kind"].as_str().unwrap_or(&dkind).to_string(),
+                severity: j["severity"].as_str().unwrap_or(&dsev).to_string(),
+                headline: j["headline"].as_str().unwrap_or(&dhead).to_string(),
+                semantic_status,
+                verdict: base.verdict.clone(),
+                state_version: j["state_version"].as_str().unwrap_or("").to_string(),
+                command: base.command.clone(),
+                cwd: base.cwd.clone(),
+                exit: base.exit,
+                dur_secs: base.dur_secs,
+                error_excerpt: base.error_excerpt.clone(),
+                session: session.to_string(),
+            }
         })
         .collect();
     let skip = out.len().saturating_sub(limit);
