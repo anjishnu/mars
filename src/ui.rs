@@ -261,6 +261,27 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // The workspace beacon (right edge): dim when nothing needs you, a warm
+    // aggregate (⏸N ✗N) when it does — the one at-a-glance "anything blocked?"
+    // token, reading the same needs-you notices the monitor is built on.
+    let nf = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Failure)).count();
+    let nb = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Blocked)).count();
+    let beacon = if nf == 0 && nb == 0 {
+        Span::styled("◷ all quiet ", Style::default().fg(Color::DarkGray))
+    } else {
+        let mut parts = Vec::new();
+        if nb > 0 { parts.push(format!("⏸{nb}")); }
+        if nf > 0 { parts.push(format!("✗{nf}")); }
+        Span::styled(
+            format!("{} ", parts.join(" ")),
+            Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(beacon)).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 // ── Pane layout ───────────────────────────────────────────────────────────────
@@ -681,6 +702,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let accent = rgb(app.tuning.theme_accent);
     let bright = rgb(app.tuning.theme_accent_bright);
     let teal = rgb(app.tuning.theme_terminal);
+    let green = rgb(app.tuning.theme_healthy);
     let dim = Style::default().fg(Color::DarkGray);
     let white = Style::default().fg(Color::White);
     let cw = inner.width as usize;
@@ -868,7 +890,9 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
         let hue = match r.verdict {
             crate::briefing::Verdict::Failed => bright,
             crate::briefing::Verdict::Blocked => accent,
-            crate::briefing::Verdict::Done | crate::briefing::Verdict::Running => teal,
+            crate::briefing::Verdict::Running => green, // healthy work — calm, dismissible
+            crate::briefing::Verdict::Done => teal,     // the win keeps its teal
+
             _ => Color::DarkGray,
         };
         let body_style = if needsyou || goodnews { white } else { dim };

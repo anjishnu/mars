@@ -1298,6 +1298,23 @@ fn selfcheck() -> Result<()> {
     std::fs::remove_file(&tuning_path)?; // restore defaults for any later checks
     println!("[selfcheck] tuning knobs + override .... PASS");
 
+    // 26a2. Phase C — the workspace beacon (tab-bar right edge): dim "all quiet"
+    //       when nothing needs you; a warm ⏸/✗ aggregate when a notice does.
+    {
+        let mut app = App::new(None)?;
+        app.handle_key(k(KeyCode::Char('x')))?; // dismiss the splash
+        let mut term = Terminal::new(TestBackend::new(100, 20))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("all quiet"),
+            "beacon should read 'all quiet' when nothing needs you");
+        app.notices.push(app::Notice { text: "failed: boom".into(), kind: app::NoticeKind::Failure });
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("✗1") && !t.contains("all quiet"),
+            "beacon should light warm (✗1) on a failure notice: {t}");
+        println!("[selfcheck] workspace beacon ......... PASS");
+    }
+
     // 26b. Default gutter is a slim pointer (no numbers); the knob restores
     //      the number column; the line/col lives in the status bar.
     let mut app = App::new(None)?;

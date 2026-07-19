@@ -33,6 +33,7 @@ pub struct Tuning {
     pub theme_accent_dark: [u8; 3],
     pub theme_chip_fg: [u8; 3],
     pub theme_terminal: [u8; 3],
+    pub theme_healthy: [u8; 3],
     /// Show the line-number gutter in editor panes (position always lives in
     /// the status bar).
     pub line_numbers: bool,
@@ -88,6 +89,7 @@ impl Default for Tuning {
             theme_accent_dark: [183, 65, 14],     // #B7410E rust
             theme_chip_fg: [31, 20, 16],          // dark text on accent chips
             theme_terminal: [13, 115, 119],       // #0D7377 dark teal
+            theme_healthy: [61, 174, 114],        // #3DAE72 healthy green (working/running)
             line_numbers: false,
             auto_name_secs: 45,
             agent_max_tokens: 1024, // headroom for reasoning models (Qwen3/R1)
@@ -209,6 +211,10 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
             "RGB text color on accent-colored chips/badges.")),
         ("theme_terminal", knob(json!(d.theme_terminal),
             "RGB for live terminal panes: focused border + TERM mode chip.")),
+        ("theme_healthy", knob(json!(d.theme_healthy),
+            "RGB for a HEALTHY / running surface in the workspace monitor and \
+             briefing — a calm green you can dismiss at a glance, distinct from \
+             teal (done/win) and the warm danger hues.")),
         ("line_numbers", knob(json!(d.line_numbers),
             "Show the line-number gutter in editor panes. The cursor position \
              is always in the status bar, so this defaults to off for width.")),
@@ -378,6 +384,7 @@ pub fn load() -> Tuning {
         t.theme_accent_dark     = get_rgb(&map, "theme_accent_dark", t.theme_accent_dark);
         t.theme_chip_fg         = get_rgb(&map, "theme_chip_fg", t.theme_chip_fg);
         t.theme_terminal        = get_rgb(&map, "theme_terminal", t.theme_terminal);
+        t.theme_healthy         = get_rgb(&map, "theme_healthy", t.theme_healthy);
         t.line_numbers = map
             .get("line_numbers")
             .and_then(|e| e.value.as_bool())
