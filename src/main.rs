@@ -510,8 +510,11 @@ fn selfcheck() -> Result<()> {
     // C-c → C-v round-trip deterministic via the kill-ring fallback).
     std::env::set_var("MARS_NO_SYSTEM_CLIPBOARD", "1");
     // Isolate config: fresh defaults in a temp dir, immune to the user's real
-    // remaps/tuning — and this exercises the default-file writers.
-    let cfg_dir = std::env::temp_dir().join(format!("mars-selfcheck-{}", std::process::id()));
+    // remaps/tuning — and this exercises the default-file writers. Keep the dir
+    // name SHORT: the session runtime (with its Unix socket, ~104-char SUN_LEN
+    // limit on macOS) nests under it, so a long prefix overflows the socket path
+    // (invisible on Windows, which uses loopback TCP instead of a Unix socket).
+    let cfg_dir = std::env::temp_dir().join(format!("msc{}", std::process::id()));
     std::fs::create_dir_all(&cfg_dir)?;
     std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
     std::env::set_var(session::RUNTIME_DIR_ENV, cfg_dir.join("runtime"));
@@ -3325,7 +3328,13 @@ fn selfcheck() -> Result<()> {
     assert!(!broker::probe_and_sweep(&tmp.join("none.sock")), "nonexistent socket read as live");
     let dead = tmp.join("dead.sock");
     #[cfg(unix)]
-    std::fs::write(&dead, b"")?;
+    {
+        // A real stale socket: bind, then drop the listener (Rust does not unlink
+        // on drop), leaving a socket whose connect is refused → classified Dead →
+        // swept. An empty *regular* file would connect with ENOTSOCK →
+        // Indeterminate, which correctly is NOT swept (never delete a non-socket).
+        drop(crate::sys::control::bind(&dead)?);
+    }
     #[cfg(windows)]
     {
         let unused = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
@@ -3390,7 +3399,7 @@ fn selfcheck() -> Result<()> {
     // must find any live mars-auth-*.sock, not just its own uid's — while
     // still preferring an own-uid socket when one is live.
     assert!(broker::find_live_auth_sock(&tmp).is_none(), "no candidates but one found");
-    std::fs::write(tmp.join("mars-auth-777.sock"), b"")?; // dead stand-in
+    drop(crate::sys::control::bind(tmp.join("mars-auth-777.sock"))?); // dead stand-in: bound, then closed
     let _other = crate::sys::control::bind(tmp.join("mars-auth-888.sock"))?;
     assert_eq!(
         broker::find_live_auth_sock(&tmp).as_deref(),
