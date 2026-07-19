@@ -230,6 +230,7 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
+    let mut tab_w = 0usize; // running display width of the tab section
     for (i, tab) in app.tabs.iter().enumerate() {
         let buf_name = {
             let pane = app.panes.get(&tab.focused_pane);
@@ -243,6 +244,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(&tab.name)
         };
         let label = format!(" {} {} ", tab.name, buf_name);
+        tab_w += label.chars().count();
         if i == app.active_tab {
             spans.push(Span::styled(
                 label,
@@ -259,29 +261,32 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        tab_w += 1;
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // The workspace beacon (right edge): dim when nothing needs you, a warm
-    // aggregate (⏸N ✗N) when it does — the one at-a-glance "anything blocked?"
-    // token, reading the same needs-you notices the monitor is built on.
+    // The workspace beacon — the same tab-bar line, right-aligned via a pad span
+    // (one Paragraph, so it survives the daemon's incremental renderer): a calm
+    // green "● all quiet" when nothing needs you, a warm ⏸N/✗N when something does.
     let nf = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Failure)).count();
     let nb = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Blocked)).count();
-    let beacon = if nf == 0 && nb == 0 {
-        Span::styled("◷ all quiet ", Style::default().fg(Color::DarkGray))
+    let (beacon_text, beacon_style) = if nf == 0 && nb == 0 {
+        ("● all quiet ".to_string(), Style::default().fg(rgb(app.tuning.theme_healthy)))
     } else {
         let mut parts = Vec::new();
         if nb > 0 { parts.push(format!("⏸{nb}")); }
         if nf > 0 { parts.push(format!("✗{nf}")); }
-        Span::styled(
+        (
             format!("{} ", parts.join(" ")),
             Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD),
         )
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(beacon)).alignment(ratatui::layout::Alignment::Right),
-        area,
-    );
+    let beacon_w = beacon_text.chars().count();
+    let total = area.width as usize;
+    if total > tab_w + beacon_w {
+        spans.push(Span::raw(" ".repeat(total - tab_w - beacon_w)));
+        spans.push(Span::styled(beacon_text, beacon_style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── Pane layout ───────────────────────────────────────────────────────────────
