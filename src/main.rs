@@ -17,6 +17,7 @@ mod fleet;
 mod layout;
 mod llm_log;
 mod mode;
+mod osc133;
 mod palette;
 mod pane;
 // The deletion-proof seam: without the `memory` feature the whole retrieval
@@ -2835,6 +2836,45 @@ fn selfcheck() -> Result<()> {
         assert_eq!((lg.kind.as_str(), lg.severity.as_str()), ("done", "info"), "legacy envelope misderived");
         assert_eq!(lg.headline, "done: legacy", "legacy headline should fall back to the verdict");
         assert_eq!(lg.origin, "local", "legacy origin default");
+        // Phase B — OSC-133 scanner: exact command/cwd/exit from shell-integration
+        // markers, reassembled across read boundaries; the noteworthy gate maps only
+        // failures + long runs into the ledger. (movement-1-ledger-spec.md §Phase B)
+        {
+            use osc133::{CmdEvent, Scanner};
+            let stream = b"\x1b]7;file://host/home/me/proj\x07\x1b]633;E;python train.py\x1b\\\x1b]133;C\x07out\r\n\x1b]133;D;137\x07";
+            let evs = Scanner::new().feed(stream);
+            assert_eq!(evs.len(), 2, "expected Start+End: {evs:?}");
+            assert_eq!(evs[0], CmdEvent::Start);
+            match &evs[1] {
+                CmdEvent::End { command, cwd, exit } => {
+                    assert_eq!(command.as_deref(), Some("python train.py"), "command text lost");
+                    assert_eq!(cwd.as_deref(), Some("/home/me/proj"), "cwd lost");
+                    assert_eq!(*exit, Some(137), "exit code lost");
+                }
+                other => panic!("expected End: {other:?}"),
+            }
+            // An OSC split across two reads still parses (partial state persists).
+            let mut s2 = Scanner::new();
+            assert!(s2.feed(b"\x1b]133;D").is_empty(), "partial OSC fired early");
+            assert!(matches!(s2.feed(b";0\x07").as_slice(), [CmdEvent::End { exit: Some(0), .. }]),
+                "reassembled OSC mis-parsed");
+            // No markers → no events: additive, zero regression for plain shells.
+            assert!(Scanner::new().feed(b"plain output, no OSC markers\r\n").is_empty());
+            // The noteworthy gate: a failure records; a trivial quick success does
+            // not; a long success does. Command text goes through redaction.
+            let fe = osc133::to_ledger_entry("s", "0",
+                Some("mysql --password=hunter2".into()), Some("/w".into()), Some(1), Some(2))
+                .expect("a failure must record");
+            assert!(fe.failed && fe.exit == Some(1) && fe.command.is_some(), "failure fields wrong");
+            #[cfg(feature = "memory")]
+            assert!(fe.command.as_deref().map(|c| c.contains("[REDACTED]") && !c.contains("hunter2")).unwrap_or(false),
+                "command not redacted: {:?}", fe.command);
+            assert!(osc133::to_ledger_entry("s", "0", Some("ls".into()), None, Some(0), Some(0)).is_none(),
+                "a trivial quick success must not flood the ledger");
+            assert!(osc133::to_ledger_entry("s", "0", Some("cargo build".into()), None, Some(0), Some(600)).is_some(),
+                "a long-running success is noteworthy");
+        }
+        println!("[selfcheck] OSC-133 ledger capture . PASS");
         // compact(): past 2×max, the journal is rewritten to the newest max lines.
         worklog::compact(10_000); // way under threshold — must be a no-op
         assert_eq!(worklog::recent("train", 10).len(), 4, "compact under threshold rewrote the file");

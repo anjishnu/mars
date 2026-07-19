@@ -99,15 +99,39 @@ pub fn spawn(
     let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
     let reader_parser = parser.clone();
     let output_tx = tx.clone();
+    // Captured for the OSC-133 ledger: exact command records are keyed by session
+    // (skipped in standalone mode, which has no session log). The surface label is
+    // the term id — the pane's tab label is resolved at render time.
+    let ledger_session = session.map(|s| s.to_string());
+    let ledger_surface = id.to_string();
     let (reader_done_tx, reader_done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        // OSC-133 command-boundary scanner — additive: a shell that emits no
+        // markers yields no events, so this is a no-op for un-integrated shells.
+        let mut osc = crate::osc133::Scanner::new();
+        let mut cmd_started: Option<Instant> = None;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if let Ok(mut p) = reader_parser.lock() {
                         p.process(&buf[..n]);
+                    }
+                    if let Some(sess) = &ledger_session {
+                        for ev in osc.feed(&buf[..n]) {
+                            match ev {
+                                crate::osc133::CmdEvent::Start => cmd_started = Some(Instant::now()),
+                                crate::osc133::CmdEvent::End { command, cwd, exit } => {
+                                    let dur = cmd_started.take().map(|t| t.elapsed().as_secs());
+                                    if let Some(entry) = crate::osc133::to_ledger_entry(
+                                        sess, &ledger_surface, command, cwd, exit, dur,
+                                    ) {
+                                        crate::worklog::record(&entry);
+                                    }
+                                }
+                            }
+                        }
                     }
                     if output_tx.send(TermEvent::Output(id)).is_err() {
                         break;
