@@ -57,7 +57,7 @@ pub fn command_memory_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARS_CMD_MEMORY") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("cmd_memory.jsonl"))
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("cmd_memory.jsonl"))
 }
 
 /// One temporally-situated command memory. We store atomic events with time,
@@ -131,7 +131,7 @@ pub fn load_command_records() -> Vec<CommandMemory> {
 /// user's `$HISTFILE` / `~/.zsh_history` / `~/.bash_history`. Zsh extended-history
 /// lines look like `: 1699999999:0;git status` — we strip that prefix.
 fn shell_history(limit: usize) -> Vec<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::sys::paths::home_dir();
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(hf) = std::env::var_os("HISTFILE") {
         candidates.push(PathBuf::from(hf));
@@ -245,7 +245,7 @@ pub fn denylist_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARS_DENYLIST") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mars").join("denylist"))
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("denylist"))
 }
 
 fn denylist() -> Vec<String> {

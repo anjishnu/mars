@@ -452,12 +452,13 @@
   proves default-file writing for keys.json + tuning.json).
 - Session daemon (2026-07, src/session.rs): thin client, server renders — daemon runs
   the same App the selfcheck already proved works headless; input = deserialized
-  crossterm events over a unix socket (`$TMPDIR/ares-<uid>/<name>.sock`, mode 0700);
-  output = ratatui's own ANSI bytes captured by pointing CrosstermBackend at a
-  socket-backed Write sink (FrameWriter) instead of stdout. `ares --session <name>`
-  spawns `ares --server <name>` detached (setsid via libc::setsid in pre_exec) and
-  attaches; `--resume [name]` reattaches (most-recent socket mtime if unnamed);
-  `--list` pings each socket, prunes dead ones. One client per session; new attach
+  crossterm events over `sys::control` (Unix-domain socket on Unix; authenticated
+  loopback TCP + rendezvous file on Windows); output = ratatui's own ANSI bytes
+  captured by pointing CrosstermBackend at a stream-backed Write sink (FrameWriter)
+  instead of stdout. `mars new <name>` spawns `mars --server <name>` detached
+  (`setsid` on Unix; detached process flags on Windows) and attaches; `mars attach`
+  reattaches (most-recent address mtime if unnamed); `mars ls` pings each address,
+  prunes dead ones. One client per session; new attach
   sends the old one an Exit frame (takeover). Detach (C-t D / bar row) leaves the
   session running; C-x C-c ends it (dirty-guard still applies) and removes the socket.
   `App::run` was refactored to take an `InputEvent` receiver instead of reading
@@ -475,6 +476,49 @@
   `ARES_DEBUG_LOG=<path>` env var (session.rs `debug_log`) writes timestamped
   diagnostics for hello/parse/read errors — zero-cost when unset, useful for future
   daemon debugging since a detached daemon has no visible stderr.
+- Windows ConPTY lifecycle (2026-07, src/terminal.rs): the shell process can exit
+  while ConPTY keeps the output pipe open, so reader EOF never arrives. Move the
+  child into a thread blocked in `Child::wait`; keep `clone_killer()` in `Term` for
+  pane close/drop, cache the exit code, and suppress the natural-exit event on drop.
+- Windows control hardening (2026-07, src/sys/windows.rs): rendezvous tokens must
+  come from `getrandom`, not `RandomState` (successive `RandomState::new()` values
+  are related). The force-kill sweep matches `Win32_Process.Name == mars.exe` plus
+  the argument substring; embed `std::process::id()` because PowerShell's `$PID`
+  names the helper PowerShell process, not the calling Mars process.
+- Windows key events (2026-07, crossterm 0.28): `KeyEvent.kind` is always populated
+  and includes `Release`. Filter releases once in `App::apply_input`; otherwise
+  every typed character/action runs twice. Preserve `Repeat` for held keys.
+- Windows OpenSSH (2026-07): stock 9.5p2 parses `ControlMaster`/`ControlPersist`
+  but Microsoft's project scope excludes client multiplexing/background mode.
+  Verified live against Ubuntu sshd: `-R remote-unix-socket:local-tcp` works from
+  Windows. Windows-home `mars ssh` uses that shape plus a per-invocation token
+  relay; no muxing.
+- Persistent remote broker route (2026-07): a remote session daemon outlives its
+  SSH invocation, so a nonce socket/capability captured only in its spawn env dies
+  after first detach. Carry the current route in `ClientFrame::Hello` and replace
+  the daemon's in-memory route on every attach; never log the capability. PTY
+  shells retain their spawn environment, so nested Mars processes must query the
+  daemon with `ClientFrame::BrokerRoute` via `MARS_SESSION` + an immutable
+  `MARS_SESSION_ID`, not trust inherited `MARS_AUTH_SOCK`; the ID survives rename.
+- Windows control authentication (2026-07): a one-way token leaks the token to a
+  process that rebinds a stale recorded TCP port. The control PAL now uses a fresh
+  client nonce plus role-separated HMAC-SHA256 proofs in both directions; keep the
+  500 ms deadline absolute across the whole handshake.
+- Control liveness (2026-07): authentication timeout, permission, and legacy
+  rendezvous parse failures are not proof a daemon is dead. `control::Probe`
+  distinguishes Live/Dead/Indeterminate; only definitive dead endpoints may be
+  unlinked, otherwise surface an upgrade/restart path.
+- SSH credential boundary (2026-07): system OpenSSH can export inherited variables
+  through user `SendEnv` rules. Build every ssh command through `ssh::ssh_command`,
+  which removes all supported provider-key variables after keyd has inherited them.
+- Nested sessions (2026-07): when `mars new` runs inside a PTY, remove parent
+  `MARS_SESSION`, `MARS_SESSION_ID`, `MARS_AUTH_SOCK`, and broker capability from
+  the spawned daemon; its attaching client hands over the current route.
+- Windows process containment (portable-pty 0.8.1): `Child::as_raw_handle()` is
+  available, but the ConPTY backend neither creates a Job Object nor starts the
+  child suspended. Assign the Mars server itself to a kill-on-close Job Object
+  before it creates `App` to contain future PTY descendants without a post-spawn
+  race. Per-pane descendant containment needs a suspended-spawn hook.
 
 - Replacing the installed binary (`~/.cargo/bin/mars`) with `cp` over the existing
   file gets the new binary SIGKILLed on launch (exit 137) — macOS AMFI caches the

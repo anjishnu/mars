@@ -2,7 +2,7 @@ use std::{collections::HashMap, io, sync::mpsc, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 
@@ -265,6 +265,8 @@ pub struct App {
     // ── Session (daemon) state ──
     /// Set when running inside a session daemon (`mars --session <name>`).
     pub session_name: Option<String>,
+    /// Immutable daemon identity used by PTY children across display-name changes.
+    pub session_instance_id: Option<String>,
     /// Action::Detach sets this; the session server consumes it.
     pub detach_requested: bool,
     /// Action::RenameSession sets this; the session server consumes it.
@@ -423,6 +425,7 @@ impl App {
             tree_open: false,
             tree_rows: Vec::new(),
             session_name: None,
+            session_instance_id: None,
             detach_requested: false,
             rename_session_to: None,
             agent_tx,
@@ -2444,10 +2447,11 @@ impl App {
             }
             PromptKind::RenameSession => {
                 let name = p.input.trim().to_string();
-                if !name.is_empty() && !name.contains('/') {
-                    self.rename_session_to = Some(name);
-                } else if !name.is_empty() {
-                    self.status_msg = Some("Session names cannot contain '/'".into());
+                if !name.is_empty() {
+                    match crate::session::validate_session_name(&name) {
+                        Ok(()) => self.rename_session_to = Some(name),
+                        Err(e) => self.status_msg = Some(format!("Invalid session name: {e}")),
+                    }
                 }
             }
             // Search / confirms / query-replace are handled key-by-key, never via finish.
@@ -3216,8 +3220,11 @@ impl App {
         }
         if let PaneContent::Terminal(tid) = self.focused_pane().content {
             if let Some(t) = self.terms.get_mut(&tid) {
-                t.send_bytes(cmd.as_bytes());
-                t.send_bytes(b"\n");
+                let mut input = cmd.as_bytes().to_vec();
+                // What a keyboard Enter sends (key_to_bytes): every shell takes
+                // \r as accept-line; ConPTY apps do NOT take a bare \n.
+                input.push(b'\r');
+                t.send_bytes(&input);
                 // The work journal's `command`: the last thing mars itself ran
                 // in this pane (composer + TYPE: both funnel through here).
                 self.watches.entry(tid).or_default().last_command = Some(cmd.to_string());
@@ -3728,10 +3735,22 @@ impl App {
         self.next_term_id += 1;
         let (rows, cols) = (self.tuning.terminal_default_rows, self.tuning.terminal_default_cols);
         let scrollback = self.tuning.terminal_scrollback_lines;
+        let startup_probe =
+            std::time::Duration::from_millis(self.tuning.terminal_startup_probe_ms);
         // The first opened file's dir if any, else where `mars` was launched —
         // never portable-pty's default (which lands the shell at /).
         let cwd = self.startup_cwd.clone().or_else(|| self.run_cwd.clone());
-        match terminal::spawn(id, rows, cols, scrollback, cwd, self.session_name.as_deref(), self.term_tx.clone()) {
+        match terminal::spawn(
+            id,
+            rows,
+            cols,
+            scrollback,
+            cwd,
+            self.session_name.as_deref(),
+            self.session_instance_id.as_deref(),
+            startup_probe,
+            self.term_tx.clone(),
+        ) {
             Ok(term) => {
                 self.terms.insert(id, term);
                 let pid = self.focused_pane_id();
@@ -3902,6 +3921,10 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
 
+        for term in self.terms.values_mut() {
+            term.flush_startup_input();
+        }
+
         // Drain terminal signals (repaint next frame); mark dead shells and feed
         // the watch clock (W6: output resets quiet, exit queues a verdict).
         let now = self.frame_tick;
@@ -3909,6 +3932,9 @@ impl App {
             self.needs_redraw = true; // terminal content moved → repaint
             match ev {
                 TermEvent::Output(id) => {
+                    if !self.terms.contains_key(&id) {
+                        continue;
+                    }
                     let auto = self.tuning.auto_watch == 1;
                     let min_ticks = (self.tuning.watch_min_active_secs * 1000
                         / self.tuning.poll_interval_ms.max(1))
@@ -3936,9 +3962,11 @@ impl App {
                     }
                 }
                 TermEvent::Exited(id) => {
-                    if let Some(t) = self.terms.get_mut(&id) {
-                        t.exited = true;
+                    let Some(t) = self.terms.get_mut(&id) else { continue };
+                    if t.exited {
+                        continue;
                     }
+                    t.exited = true;
                     let watched = self.watches.get(&id).map(|w| w.watched && !w.triggered).unwrap_or(false);
                     if watched {
                         if !self.pending_watch.iter().any(|(qid, _)| *qid == id) {
@@ -4017,7 +4045,13 @@ impl App {
                         .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
                         .unwrap_or(false);
                     if numeric {
-                        self.rename_session_to = Some(name);
+                        match crate::session::validate_session_name(&name) {
+                            Ok(()) => self.rename_session_to = Some(name),
+                            Err(e) => {
+                                self.status_msg =
+                                    Some(format!("Ignored invalid generated session name: {e}"));
+                            }
+                        }
                     }
                 }
                 AgentEvent::ShellTranslation { command, call_id } => {
@@ -4570,7 +4604,7 @@ impl App {
         let away = crate::briefing::fmt_secs(report.away_secs);
         // Continuity: what the LAST briefing said, so this one can note progress.
         let prev = crate::worklog::load_last_briefing(&self.session_label())
-            .map(|p| format!("{}: {}", crate::broker::ago(p.ts), p.facts))
+            .map(|p| format!("{}: {}", crate::worklog::ago(p.ts), p.facts))
             .unwrap_or_default();
         // Captured for the keyless log path (no ShiftDone will fire without a key).
         let (det_narrative, facts, away_secs) =
@@ -4639,7 +4673,7 @@ impl App {
                 let mark = if e.failed { "✗" } else { "✓" };
                 brief.push_str(&format!(
                     "  {mark} {} [{}] {}\n",
-                    crate::broker::ago(e.ts),
+                    crate::worklog::ago(e.ts),
                     e.tab,
                     e.verdict
                 ));
@@ -4776,7 +4810,7 @@ impl App {
             .iter()
             .map(|e| {
                 let mark = if e.failed { "✗" } else { "✓" };
-                format!("{} {} [{}] {}", mark, crate::broker::ago(e.ts), e.tab, e.verdict)
+                format!("{} {} [{}] {}", mark, crate::worklog::ago(e.ts), e.tab, e.verdict)
             })
             .collect();
         self.bg_busy = true;
@@ -5017,7 +5051,11 @@ impl App {
     /// Apply one source-agnostic input event.
     pub fn apply_input(&mut self, ev: InputEvent) -> Result<()> {
         match ev {
-            InputEvent::Key(key) => self.handle_key(key)?,
+            // Crossterm always reports key releases on Windows. Treating them
+            // as input duplicates every character and command; held-key repeats
+            // are intentional and remain active.
+            InputEvent::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key)?,
+            InputEvent::Key(_) => {}
             InputEvent::Mouse(m) => self.handle_mouse(m),
             InputEvent::Paste(s) => self.paste_text(&s),
             InputEvent::Resize(_, _) => {} // session server rebuilds its viewport

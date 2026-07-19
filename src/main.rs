@@ -2,9 +2,18 @@ mod agent;
 mod app;
 mod banner;
 mod briefing;
+// The ssh/keyd broker is optional as one unit. Without the feature it is replaced
+// by an inert stub, so callers never learn the capability is missing.
+#[cfg(feature = "ssh")]
+mod broker;
+#[cfg(feature = "ssh")]
+mod ssh;
+#[cfg(not(feature = "ssh"))]
+#[path = "broker_stub.rs"]
 mod broker;
 mod buffer;
 mod config;
+mod fleet;
 mod layout;
 mod llm_log;
 mod mode;
@@ -19,6 +28,7 @@ mod retrieval;
 mod retrieval;
 mod project;
 mod session;
+mod sys;
 mod tab;
 mod terminal;
 mod persona;
@@ -67,7 +77,7 @@ SESSIONS  (work survives closed windows and disconnects)
   mars rename <old> <new>        rename a running session
   mars kill <name>               end + delete a session (autosaves first)
   mars killall                   the reset button: end every session (autosaved)
-                                 and mars process, shut down ssh masters + the
+                                 and mars process, shut down ssh tunnel state + the
                                  key broker, sweep stale sockets. Memory files
                                  are kept; no new session is started.
                                  (alias: --killall)
@@ -105,6 +115,8 @@ REMOTE  (BETA — the agent works on every box; the key never leaves home)
                                  home, no key on the box. Detach returns here.
                                  Auto-starts the key broker; plain `ssh` still
                                  gives a bare shell.
+                                 Windows-home → Unix-remote is supported; install
+                                 mars on the remote first. Windows remotes pending.
   mars keyd                      (optional) start the broker explicitly, in a
                                  shell where your API key is set
 
@@ -172,6 +184,15 @@ fn main() -> Result<()> {
             banner::print_banner();
             println!("\n  mars {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
+        }
+        Some("--broker-handoff-version") => {
+            #[cfg(feature = "ssh")]
+            {
+                println!("{}", broker::BROKER_HANDOFF_PROTOCOL);
+                return Ok(());
+            }
+            #[cfg(not(feature = "ssh"))]
+            anyhow::bail!("this Mars build has no SSH broker support");
         }
         // Headless self-check (no TTY needed) — render, bar, PTY, and sessions.
         Some("--selfcheck") => return selfcheck(),
@@ -429,7 +450,7 @@ fn ask_cli(question: String) -> Result<()> {
 
 /// Headless verification of the core paths, runnable without a real terminal.
 fn selfcheck() -> Result<()> {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::backend::TestBackend;
 
     // Hermetic: an inherited agent key would flip no-key code paths (e.g. the
@@ -465,15 +486,38 @@ fn selfcheck() -> Result<()> {
     fn screen_text(term: &Terminal<TestBackend>) -> String {
         term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
+    // The PTY probes drive whatever real shell `sys::shell` picked; scripted
+    // commands must speak its dialect (PowerShell on Windows, POSIX elsewhere).
+    fn shell_is_powershell() -> bool {
+        let s = crate::sys::shell::default_shell().to_lowercase();
+        s.contains("pwsh") || s.contains("powershell")
+    }
+    // Poll a condition instead of napping a fixed interval — a cold shell
+    // (PowerShell especially) can take seconds to prompt; the deadline only
+    // bounds the failure case.
+    fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !cond() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        true
+    }
 
     // Never touch the user's real clipboard from tests (also makes the
     // C-c → C-v round-trip deterministic via the kill-ring fallback).
     std::env::set_var("MARS_NO_SYSTEM_CLIPBOARD", "1");
     // Isolate config: fresh defaults in a temp dir, immune to the user's real
-    // remaps/tuning — and this exercises the default-file writers.
-    let cfg_dir = std::env::temp_dir().join(format!("mars-selfcheck-{}", std::process::id()));
+    // remaps/tuning — and this exercises the default-file writers. Keep the dir
+    // name SHORT: the session runtime (with its Unix socket, ~104-char SUN_LEN
+    // limit on macOS) nests under it, so a long prefix overflows the socket path
+    // (invisible on Windows, which uses loopback TCP instead of a Unix socket).
+    let cfg_dir = std::env::temp_dir().join(format!("msc{}", std::process::id()));
     std::fs::create_dir_all(&cfg_dir)?;
     std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+    std::env::set_var(session::RUNTIME_DIR_ENV, cfg_dir.join("runtime"));
 
     let mut app = App::new(None)?;
     let mut term = Terminal::new(TestBackend::new(120, 40))?;
@@ -494,6 +538,29 @@ fn selfcheck() -> Result<()> {
     assert!(!t2.contains("control for your terminal"), "splash did not dismiss on keypress");
     assert!(app.mode == mode::Mode::Edit, "typing changed mode");
     println!("[selfcheck] non-modal insert ........... PASS");
+
+    let mut event_app = App::new(None)?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+    )))?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    )))?;
+    event_app.apply_input(InputEvent::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('b'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    )))?;
+    assert_eq!(
+        event_app.focused_buf().rope.to_string(),
+        "ab",
+        "key release duplicated input or key repeat was dropped"
+    );
+    println!("[selfcheck] key press/release kinds .... PASS");
 
     // 2b. Idle-render gating (the SSH no-op-flush fix): after a draw, an idle
     //     tick must NOT request a redraw; a background agent event and an active
@@ -822,13 +889,15 @@ fn selfcheck() -> Result<()> {
     typ(&mut app, "echo ares_shell_ok")?;
     app.handle_key(k(KeyCode::Enter))?;
     assert!(app.mode == mode::Mode::Terminal, "shell command did not attach terminal");
-    std::thread::sleep(std::time::Duration::from_millis(900));
     let tid = match app.focused_pane().content {
         pane::PaneContent::Terminal(id) => id,
         _ => panic!("focused pane is not a terminal"),
     };
     assert!(
-        app.terms[&tid].screen().contents().contains("ares_shell_ok"),
+        wait_until(|| {
+            app.tick();
+            app.terms[&tid].screen().contents().contains("ares_shell_ok")
+        }),
         "shell command output not found in PTY"
     );
     println!("[selfcheck] bar `!` → shell ............ PASS");
@@ -873,30 +942,54 @@ fn selfcheck() -> Result<()> {
 
     // 15. A real terminal PTY spawns and echoes.
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, tx)?;
-    sh.send_bytes(b"echo ares_pty_ok\n");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    let startup_probe = std::time::Duration::from_millis(
+        tuning::Tuning::default().terminal_startup_probe_ms,
+    );
+    let mut sh = terminal::spawn(0, 24, 80, 1000, None, None, None, startup_probe, tx)?;
+    let screen_has_line = |sh: &terminal::Term, needle: &str| {
+        sh.screen()
+            .contents()
+            .lines()
+            .any(|line| line.trim() == needle)
+    };
+    sh.send_bytes(b"echo ares_pty_ok\r");
+    assert!(
+        wait_until(|| {
+            sh.flush_startup_input();
+            screen_has_line(&sh, "ares_pty_ok")
+        }),
+        "terminal output not found: {:?}",
+        sh.screen().contents()
+    );
     while rx.try_recv().is_ok() {}
-    assert!(sh.screen().contents().contains("ares_pty_ok"), "terminal echo not found");
     println!("[selfcheck] terminal PTY echo .......... PASS");
 
     // 15a. Terminal mouse-copy: the selection extractor pulls the selected cells
     //      as text (the core of drag-to-copy in a terminal pane).
     {
-        sh.send_bytes(b"printf 'COPYME123\\n'\n");
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // Both dialects print the bare marker on its own row (the echoed command
+        // line never trim-equals it, so only real output can match below).
+        if shell_is_powershell() {
+            sh.send_bytes(b"echo COPYME123\r");
+        } else {
+            sh.send_bytes(b"printf 'COPYME123\\n'\r");
+        }
+        let row_of = |sh: &terminal::Term| -> Option<u16> {
+            let screen = sh.screen();
+            let (rows, cols) = screen.size();
+            (0..rows).find(|&r| {
+                let mut line = String::new();
+                for c in 0..cols {
+                    line.push_str(&screen.cell(r, c).map(|x| x.contents()).unwrap_or_default());
+                }
+                line.trim() == "COPYME123"
+            })
+        };
+        assert!(wait_until(|| row_of(&sh).is_some()), "marker output row not found on screen");
         while rx.try_recv().is_ok() {}
         let screen = sh.screen();
-        let (rows, cols) = screen.size();
-        let mut out_row = None;
-        for r in 0..rows {
-            let mut line = String::new();
-            for c in 0..cols {
-                line.push_str(&screen.cell(r, c).map(|x| x.contents()).unwrap_or_default());
-            }
-            if line.trim() == "COPYME123" { out_row = Some(r); break; }
-        }
-        let r = out_row.expect("printf output row not found on screen");
+        let (_, cols) = screen.size();
+        let r = row_of(&sh).expect("marker row vanished");
         let text = app::selection_text_from_screen(&screen, (r, 0), (r, 8), cols - 1);
         assert_eq!(text, "COPYME123", "terminal selection extraction wrong: {text:?}");
     }
@@ -924,8 +1017,17 @@ fn selfcheck() -> Result<()> {
 
     // 15b. Scrollback: history survives past the viewport and the view can
     //      scroll back through it, then snap to live.
-    sh.send_bytes(b"seq 1 100\n");
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    if shell_is_powershell() {
+        sh.send_bytes(b"1..100\r"); // pwsh's seq: a range prints one line each
+    } else {
+        sh.send_bytes(b"seq 1 100\r");
+    }
+    // "99" is proof the OUTPUT arrived — the echoed command line contains "100"
+    // in both dialects, so waiting on that could fire before the run.
+    assert!(
+        wait_until(|| sh.screen().contents().contains("99")),
+        "seq output missing"
+    );
     while rx.try_recv().is_ok() {}
     let live = sh.screen().contents();
     assert!(live.contains("100"), "seq output missing");
@@ -953,12 +1055,10 @@ fn selfcheck() -> Result<()> {
     app.handle_key(k(KeyCode::Char('!')))?;
     typ(&mut app, "exit")?;
     app.handle_key(k(KeyCode::Enter))?; // attached; shell exits immediately
-    let mut dead = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    let dead = wait_until(|| {
         app.tick(); // drains TermEvent::Exited
-        if app.terms.values().any(|t| t.exited) { dead = true; break; }
-    }
+        app.terms.values().any(|t| t.exited)
+    });
     assert!(dead, "shell exit not detected");
     term.draw(|f| ui::render(f, &mut app))?;
     assert!(
@@ -1180,6 +1280,7 @@ fn selfcheck() -> Result<()> {
     let written = std::fs::read_to_string(&tuning_path)?;
     assert!(written.contains("description"), "tuning defaults lack descriptions");
     assert!(written.contains("which_key_delay_ms"), "tuning defaults missing knobs");
+    assert!(written.contains("terminal_startup_probe_ms"), "tuning defaults missing shell probe knob");
     std::fs::write(
         &tuning_path,
         r#"{ "max_panes": { "value": 2, "description": "test override" } }"#,
@@ -1354,17 +1455,15 @@ fn selfcheck() -> Result<()> {
     app.agent_directive = Some(agent::AgentDirective::Type("echo mars_type_ok".into()));
     app.handle_key(k(KeyCode::Enter))?; // confirm-fire
     assert!(app.mode == mode::Mode::Terminal, "TYPE did not land in the terminal");
-    let mut typed = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    let typed = wait_until(|| {
         app.tick();
-        if let pane::PaneContent::Terminal(tid) = app.focused_pane().content {
-            if app.terms[&tid].screen().contents().contains("mars_type_ok") {
-                typed = true;
-                break;
+        match app.focused_pane().content {
+            pane::PaneContent::Terminal(tid) => {
+                app.terms[&tid].screen().contents().contains("mars_type_ok")
             }
+            _ => false,
         }
-    }
+    });
     assert!(typed, "TYPE'd command never reached the PTY");
     println!("[selfcheck] TYPE → terminal ............ PASS");
 
@@ -1650,19 +1749,13 @@ fn selfcheck() -> Result<()> {
             "quick-key legend missing from the empty-query bar line"
         );
         app.handle_key(kc(KeyCode::Char('g')))?; // back to the terminal
-        typ(&mut app, "seq 1 200")?;
+        typ(&mut app, if shell_is_powershell() { "1..200" } else { "seq 1 200" })?;
         app.handle_key(k(KeyCode::Enter))?;
-        for _ in 0..30 {
+        let pushed = wait_until(|| {
             app.tick();
-            if app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(
-            app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false),
-            "seq did not push the terminal cursor into the dropdown rows"
-        );
+            app.terms.get(&tid).map(|t| t.screen().cursor_position().0 >= 25).unwrap_or(false)
+        });
+        assert!(pushed, "seq did not push the terminal cursor into the dropdown rows");
         app.handle_key(kc(KeyCode::Char(' ')))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
@@ -1826,7 +1919,7 @@ fn selfcheck() -> Result<()> {
     //     version handshake; quit removes the socket. Fully headless.
     {
         use std::io::{BufRead, BufReader};
-        use std::os::unix::net::UnixStream;
+        use crate::sys::control::Stream as UnixStream;
 
         let sname = format!("selfcheck-{}", std::process::id());
         let spath = session::socket_path(&sname)?;
@@ -1837,7 +1930,7 @@ fn selfcheck() -> Result<()> {
         let mut up = false;
         for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(30));
-            if UnixStream::connect(&spath).is_ok() { up = true; break; }
+            if crate::sys::control::connect(&spath).is_ok() { up = true; break; }
         }
         assert!(up, "session server did not come up");
 
@@ -1854,12 +1947,22 @@ fn selfcheck() -> Result<()> {
         }
         impl TestClient {
             fn connect(path: &std::path::Path, version: &str) -> Result<Self> {
+                Self::connect_with_broker(path, version, None, None)
+            }
+            fn connect_with_broker(
+                path: &std::path::Path,
+                version: &str,
+                broker_sock: Option<&str>,
+                broker_capability: Option<&str>,
+            ) -> Result<Self> {
                 use anyhow::Context as _;
-                let stream = UnixStream::connect(path).context("testclient: connect")?;
+                let stream = crate::sys::control::connect(path).context("testclient: connect")?;
                 let reader = BufReader::new(stream.try_clone().context("testclient: clone")?);
                 let mut me = TestClient { writer: stream, reader, screen: vt100::Parser::new(30, 100, 0) };
                 session::write_frame(&mut me.writer, &session::ClientFrame::Hello {
                     cols: 100, rows: 30, version: version.to_string(),
+                    broker_sock: broker_sock.map(str::to_string),
+                    broker_capability: broker_capability.map(str::to_string),
                 })
                 .context("testclient: hello")?;
                 Ok(me)
@@ -1877,6 +1980,20 @@ fn selfcheck() -> Result<()> {
             /// Read Output frames until `needle` appears in the interpreted
             /// screen contents (or an Exit arrives), within `secs`.
             fn read_until(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                self.read_until_matching(secs, |contents| contents.contains(needle))
+            }
+            fn read_until_line(&mut self, needle: &str, secs: u64) -> Result<(bool, Option<String>)> {
+                self.read_until_matching(secs, |contents| {
+                    contents.lines().any(|line| {
+                        line.trim_matches(|c: char| c.is_whitespace() || c == '│') == needle
+                    })
+                })
+            }
+            fn read_until_matching(
+                &mut self,
+                secs: u64,
+                found: impl Fn(&str) -> bool,
+            ) -> Result<(bool, Option<String>)> {
                 use anyhow::Context as _;
                 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
                 self.reader
@@ -1893,25 +2010,26 @@ fn selfcheck() -> Result<()> {
                                 if let Ok(bytes) = B64.decode(b64) {
                                     self.screen.process(&bytes);
                                 }
-                                if self.screen.screen().contents().contains(needle) {
+                                if found(&self.screen.screen().contents()) {
                                     return Ok((true, None));
                                 }
                             }
                             Ok(session::ServerFrame::Exit { message }) => {
-                                return Ok((self.screen.screen().contents().contains(needle), Some(message)));
+                                return Ok((found(&self.screen.screen().contents()), Some(message)));
                             }
                             Ok(session::ServerFrame::Status { .. }) => {}
+                            Ok(session::ServerFrame::BrokerRoute { .. }) => {}
                             Err(_) => {}
                         },
                         Err(_) => {} // timeout tick — keep waiting until deadline
                     }
                 }
-                Ok((self.screen.screen().contents().contains(needle), None))
+                Ok((found(&self.screen.screen().contents()), None))
             }
         }
 
         // c1 attaches, types a marker, sees it rendered.
-        let mut c1 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c1 = TestClient::connect(&spath, session::SESSION_PROTOCOL_VERSION)?;
         c1.text("sessionmarker")?;
         let (found, _) = c1.read_until("sessionmarker", 5)?;
         assert!(found, "marker not rendered to first client");
@@ -1923,14 +2041,50 @@ fn selfcheck() -> Result<()> {
             exit.map(|m| m.contains("version mismatch")).unwrap_or(false),
             "version mismatch not refused"
         );
+        let mut c_old = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let (_, exit) = c_old.read_until("\u{0}never\u{0}", 3)?;
+        assert!(
+            exit.map(|m| m.contains("version mismatch")).unwrap_or(false),
+            "pre-handoff session protocol was not refused"
+        );
+        assert!(session::client_exit_is_error("version mismatch: old server"));
+        assert!(!session::client_exit_is_error("detached: another client attached"));
 
         // Takeover + reattach: c2 attaches → c1 is dropped, c2 gets a full
         // redraw that still contains the marker (state survived).
-        let mut c2 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c2 = TestClient::connect_with_broker(
+            &spath,
+            session::SESSION_PROTOCOL_VERSION,
+            Some("/tmp/mars-auth-cap-route-one.sock"),
+            Some("11111111111111111111111111111111"),
+        )?;
         let (_, c1_exit) = c1.read_until("\u{0}never\u{0}", 3)?;
         assert!(c1_exit.is_some(), "old client not notified on takeover");
         let (found2, _) = c2.read_until("sessionmarker", 5)?;
         assert!(found2, "state lost across reattach");
+        #[cfg(windows)]
+        std::thread::sleep(std::time::Duration::from_millis(2_100));
+        c1.text("stale_writer")?;
+        c2.text("fresh_writer")?;
+        let (fresh, _) = c2.read_until("fresh_writer", 5)?;
+        assert!(fresh, "active client input was not applied after takeover");
+        assert!(
+            !c2.screen.screen().contents().contains("stale_writer"),
+            "detached client injected input after takeover"
+        );
+        #[cfg(feature = "ssh")]
+        {
+            assert_eq!(
+                broker::detect_broker_sock().as_deref(),
+                Some("/tmp/mars-auth-cap-route-one.sock"),
+                "session daemon did not accept the attached client's broker route"
+            );
+            assert_eq!(
+                broker::broker_capability_for("/tmp/mars-auth-cap-route-one.sock").as_deref(),
+                Some("11111111111111111111111111111111"),
+                "session daemon lost the attached client's broker capability"
+            );
+        }
 
         // Shell pane survives a hard disconnect: start one, run a command,
         // drop the client entirely, reconnect, and find the output.
@@ -1938,16 +2092,53 @@ fn selfcheck() -> Result<()> {
         c2.key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))?;
         c2.text("echo daemon_pty_ok")?;
         c2.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-        let (pty_ok, _) = c2.read_until("daemon_pty_ok", 8)?;
-        assert!(pty_ok, "shell output not rendered in session");
+        let pty_started = std::time::Instant::now();
+        let (pty_ok, pty_exit) = c2.read_until_line("daemon_pty_ok", 15)?;
+        assert!(
+            pty_ok,
+            "shell output not rendered in session after {:?} (exit {pty_exit:?}): {:?}",
+            pty_started.elapsed(),
+            c2.screen.screen().contents()
+        );
         drop(c2); // hard disconnect — no Detach, just gone
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let mut c3 = TestClient::connect(&spath, env!("CARGO_PKG_VERSION"))?;
+        let mut c3 = TestClient::connect_with_broker(
+            &spath,
+            session::SESSION_PROTOCOL_VERSION,
+            Some("/tmp/mars-auth-cap-route-two.sock"),
+            Some("22222222222222222222222222222222"),
+        )?;
         // Reattach now always greets with the briefing overlay (iteration mode) —
         // dismiss it like a real user before reading the workspace underneath.
         c3.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-        let (pty_survived, _) = c3.read_until("daemon_pty_ok", 5)?;
+        let (pty_survived, _) = c3.read_until_line("daemon_pty_ok", 5)?;
         assert!(pty_survived, "PTY did not survive the disconnect");
+        #[cfg(feature = "ssh")]
+        let session_instance_id = {
+            assert_eq!(
+                broker::detect_broker_sock().as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "reattach did not replace the stale broker route"
+            );
+            assert_eq!(
+                broker::broker_capability_for("/tmp/mars-auth-cap-route-two.sock").as_deref(),
+                Some("22222222222222222222222222222222"),
+                "reattach did not replace the stale broker capability"
+            );
+            let (nested_sock, nested_capability, nested_instance_id) =
+                session::query_broker_route(&sname, None)?;
+            assert_eq!(
+                nested_sock.as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "persistent PTYs cannot query the reattached broker route"
+            );
+            assert_eq!(
+                nested_capability.as_deref(),
+                Some("22222222222222222222222222222222"),
+                "persistent PTYs cannot query the reattached broker capability"
+            );
+            nested_instance_id
+        };
 
         // `mars ls` sees it, including the attached state (c3 is attached).
         assert!(
@@ -1961,7 +2152,7 @@ fn selfcheck() -> Result<()> {
         let renamed = format!("{sname}-renamed");
         let rpath = session::socket_path(&renamed)?;
         {
-            let ctl = UnixStream::connect(&spath)?;
+            let ctl = crate::sys::control::connect(&spath)?;
             let mut w = ctl.try_clone()?;
             session::write_frame(&mut w, &session::ClientFrame::Rename { to: renamed.clone() })?;
         }
@@ -1975,6 +2166,22 @@ fn selfcheck() -> Result<()> {
             session::list_sessions()?.iter().any(|(n, alive, _)| n == &renamed && *alive),
             "renamed session missing from ls"
         );
+        #[cfg(feature = "ssh")]
+        {
+            let (nested_sock, nested_capability, renamed_instance_id) =
+                session::query_broker_route(&sname, Some(&session_instance_id))?;
+            assert_eq!(renamed_instance_id, session_instance_id);
+            assert_eq!(
+                nested_sock.as_deref(),
+                Some("/tmp/mars-auth-cap-route-two.sock"),
+                "renamed PTY lost the current broker route"
+            );
+            assert_eq!(
+                nested_capability.as_deref(),
+                Some("22222222222222222222222222222222"),
+                "renamed PTY lost the current broker capability"
+            );
+        }
         // c3 (attached before the rename) still drives the session.
         c3.text("post-rename")?;
         let (still_alive, _) = c3.read_until("post-rename", 5)?;
@@ -2005,7 +2212,7 @@ fn selfcheck() -> Result<()> {
         let mut up = false;
         for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(30));
-            if UnixStream::connect(&kpath).is_ok() { up = true; break; }
+            if crate::sys::control::connect(&kpath).is_ok() { up = true; break; }
         }
         assert!(up, "kill-test server did not come up");
         assert!(
@@ -2022,7 +2229,7 @@ fn selfcheck() -> Result<()> {
         // 27b2. Quit = detach; kill is the deleting verb. In a session, Quit
         //       requests a detach and never ends the daemon; KillSession is the
         //       confirm-gated ender; `mars killall` sweeps every live daemon
-        //       (under an isolated TMPDIR so real sessions are untouchable).
+        //       (under the suite's isolated runtime dir, never the user's).
         {
             let mut app = App::new(None)?;
             app.session_name = Some("some-session".into());
@@ -2037,10 +2244,6 @@ fn selfcheck() -> Result<()> {
                 "KillSession must be confirm-gated for agent directives"
             );
 
-            let saved_tmp = std::env::var("TMPDIR").ok();
-            let iso = std::env::temp_dir().join(format!("mars-killall-{}", std::process::id()));
-            std::fs::create_dir_all(&iso)?;
-            std::env::set_var("TMPDIR", &iso);
             let names: Vec<String> =
                 (0..2).map(|i| format!("selfcheck-ka{i}-{}", std::process::id())).collect();
             let mut servers = Vec::new();
@@ -2053,7 +2256,7 @@ fn selfcheck() -> Result<()> {
                 let mut up = false;
                 for _ in 0..100 {
                     std::thread::sleep(std::time::Duration::from_millis(30));
-                    if UnixStream::connect(&p).is_ok() { up = true; break; }
+                    if crate::sys::control::connect(&p).is_ok() { up = true; break; }
                 }
                 assert!(up, "killall-test server '{n}' did not come up");
             }
@@ -2062,12 +2265,58 @@ fn selfcheck() -> Result<()> {
             for n in &names {
                 assert!(!session::socket_path(n)?.exists(), "killall left the socket for '{n}'");
             }
-            match saved_tmp {
-                Some(v) => std::env::set_var("TMPDIR", v),
-                None => std::env::remove_var("TMPDIR"),
-            }
         }
         println!("[selfcheck] quit=detach + killall ..... PASS");
+    }
+
+    #[cfg(windows)]
+    {
+        use std::io::{BufRead as _, Write as _};
+        use std::time::Duration;
+
+        let force_sweep = crate::sys::proc::kill_all_mars_script(4242);
+        assert!(
+            force_sweep.contains("-Filter \"Name = 'mars.exe'\"")
+                && force_sweep.contains("ProcessId -ne 4242")
+                && !force_sweep.contains("CommandLine -like"),
+            "Windows killall must target every other mars.exe by exact executable name"
+        );
+
+        let dir = std::env::temp_dir()
+            .join(format!("mars-control-auth-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let addr = dir.join("impostor.sock");
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let port = listener.local_addr()?.port();
+        let token = "0123456789abcdef0123456789abcdef";
+        std::fs::write(&addr, format!("2 {port} {token}\n"))?;
+        let impostor = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("impostor accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("impostor timeout");
+                let mut nonce = String::new();
+                std::io::BufReader::new(stream.try_clone().expect("impostor clone"))
+                    .read_line(&mut nonce)
+                    .expect("impostor nonce");
+                assert_eq!(nonce.trim_end().len(), 32);
+                assert_ne!(nonce.trim_end(), token, "client disclosed the shared token");
+                writeln!(stream, "{}", "0".repeat(64)).expect("impostor proof");
+            }
+        });
+        assert!(
+            crate::sys::control::connect(&addr).is_err(),
+            "client accepted a server that could not prove the rendezvous token"
+        );
+        assert_eq!(
+            crate::sys::control::probe(&addr),
+            crate::sys::control::Probe::Dead,
+            "authentication failure was not distinguished from an OS permission error"
+        );
+        impostor.join().expect("impostor thread");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[selfcheck] control mutual auth ........ PASS");
     }
 
     // 27c. Auto session name is a lowest-free number; session AI-name applies
@@ -2087,8 +2336,50 @@ fn selfcheck() -> Result<()> {
         app.agent_tx.send(agent::AgentEvent::SessionName { name: "auto".into() })?;
         app.tick();
         assert!(app.rename_session_to.is_none(), "explicit session name overridden by AI");
+        let mut app = App::new(None)?;
+        app.session_name = Some("0".into());
+        app.agent_tx.send(agent::AgentEvent::SessionName { name: "CON".into() })?;
+        app.tick();
+        assert!(app.rename_session_to.is_none(), "reserved generated session name accepted");
+        assert!(
+            app.status_msg.as_deref().unwrap_or_default().contains("reserved by Windows"),
+            "invalid generated session name was not surfaced"
+        );
     }
     println!("[selfcheck] session auto-naming ....... PASS");
+
+    for name in ["0", "mars-dev", "release 0.4", "alpha.beta"] {
+        assert!(session::validate_session_name(name).is_ok(), "valid session name rejected: {name}");
+    }
+    for name in [
+        "", ".", "..", "../escape", r"folder\name", "C:drive", "bad?name",
+        "NUL", "con.txt", "COM1", "lpt9.log", "trail.", " padded",
+    ] {
+        assert!(
+            session::validate_session_name(name).is_err(),
+            "non-portable session name accepted: {name:?}"
+        );
+    }
+    assert!(
+        session::socket_path("runtime-probe")?.starts_with(cfg_dir.join("runtime")),
+        "selfcheck session runtime escaped its isolated root"
+    );
+    let mut daemon_env = std::process::Command::new(std::env::current_exe()?);
+    session::isolate_session_daemon_env(&mut daemon_env);
+    for name in [
+        "MARS_SESSION",
+        "MARS_SESSION_ID",
+        "MARS_AUTH_SOCK",
+        "MARS_BROKER_CAPABILITY",
+    ] {
+        assert!(
+            daemon_env
+                .get_envs()
+                .any(|(candidate, value)| candidate == std::ffi::OsStr::new(name) && value.is_none()),
+            "nested session daemon still inherits parent route variable {name}"
+        );
+    }
+    println!("[selfcheck] portable session names .... PASS");
 
     // 28. Config migration: a pre-rename ~/.config/ares is copied to mars/.
     {
@@ -2711,6 +3002,7 @@ fn selfcheck() -> Result<()> {
     }
 
     // 30. SSH broker: detection + precedence + honest availability + proxy round-trip.
+    #[cfg(feature = "ssh")]
     {
         use std::io::{BufRead, BufReader};
         for v in ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -2724,7 +3016,7 @@ fn selfcheck() -> Result<()> {
         let sock = dir.join("auth.sock");
         let sock_s = sock.to_string_lossy().to_string();
         let _ = std::fs::remove_file(&sock);
-        let listener = std::os::unix::net::UnixListener::bind(&sock)?;
+        let listener = crate::sys::control::bind(&sock)?;
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { break };
@@ -2768,32 +3060,134 @@ fn selfcheck() -> Result<()> {
 
         std::env::remove_var("MARS_AUTH_SOCK");
         let _ = std::fs::remove_file(&sock);
+        println!("[selfcheck] ssh broker (proxy/detect) . PASS");
     }
-    println!("[selfcheck] ssh broker (proxy/detect) . PASS");
+    // 30b. Windows-home tunnels authenticate before exposing broker frames.
+    #[cfg(feature = "ssh")]
+    {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir()
+            .join(format!("mars-broker-cap-sc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let addr = dir.join("auth.sock");
+        let _ = std::fs::remove_file(&addr);
+        let listener = crate::sys::control::bind(&addr)?;
+        let expected = "0123456789abcdef0123456789abcdef";
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().expect("capability server accept");
+            let mut reader = std::io::BufReader::new(
+                stream.try_clone().expect("capability stream clone")
+            );
+            let mut capability = String::new();
+            reader.read_line(&mut capability).expect("capability preamble");
+            assert_eq!(capability.trim_end(), expected);
+            let mut request = String::new();
+            reader.read_line(&mut request).expect("broker request");
+            assert!(
+                serde_json::from_str::<broker::BrokerRequest>(request.trim()).is_ok(),
+                "capability was not followed by a broker request"
+            );
+            session::write_frame(
+                &mut stream,
+                &broker::BrokerResponse::Chat { text: "capability-ok".into() },
+            )
+            .expect("capability response");
+        });
+        std::env::set_var(broker::BROKER_CAPABILITY_ENV, expected);
+        let cfg = agent::AgentConfig {
+            url: String::new(), key: String::new(), model: String::new(),
+            provider: "broker", max_tokens: 512, temperature: 0.3,
+            broker_sock: Some(addr.to_string_lossy().into_owned()),
+        };
+        assert_eq!(
+            broker::chat_via_broker(
+                cfg.broker_sock.as_deref().unwrap(), &cfg, Vec::new()
+            )?,
+            "capability-ok"
+        );
+        std::env::remove_var(broker::BROKER_CAPABILITY_ENV);
+        server.join().expect("capability server thread");
+
+        let relay_home = dir.join("relay-home.sock");
+        let home_listener = crate::sys::control::bind(&relay_home)?;
+        let home = std::thread::spawn(move || {
+            let mut stream = home_listener.accept().expect("relay home accept");
+            let mut reader =
+                std::io::BufReader::new(stream.try_clone().expect("home clone"));
+            let mut request = String::new();
+            reader.read_line(&mut request).expect("relayed request");
+            assert_eq!(request, "{\"probe\":true}\n");
+            stream.write_all(b"{\"relayed\":true}\n").expect("relayed response");
+            stream.flush().expect("relayed response flush");
+        });
+        let relay = ssh::BrokerRelay::start(&relay_home, expected)?;
+
+        let mut wrong = std::net::TcpStream::connect(relay.addr())?;
+        wrong.set_read_timeout(Some(Duration::from_secs(1)))?;
+        wrong.write_all(b"wrong\n{\"probe\":true}\n")?;
+        let mut byte = [0u8; 1];
+        assert!(
+            !matches!(wrong.read(&mut byte), Ok(n) if n > 0),
+            "relay returned broker bytes to an unauthenticated client"
+        );
+
+        let mut tunneled = std::net::TcpStream::connect(relay.addr())?;
+        tunneled.write_all(expected.as_bytes())?;
+        tunneled.write_all(b"\n{\"probe\":true}\n")?;
+        tunneled.flush()?;
+        let mut response = String::new();
+        std::io::BufReader::new(tunneled).read_line(&mut response)?;
+        assert_eq!(response, "{\"relayed\":true}\n");
+        drop(relay);
+        home.join().expect("relay home thread");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[selfcheck] ssh broker capability ..... PASS");
+    }
+    // 30-stub. Without the capability the stub must be inert and honest: no
+    // broker is ever detected (even with the env var set), and the ssh/keyd
+    // entry points explain themselves instead of half-working.
+    #[cfg(not(feature = "ssh"))]
+    {
+        std::env::set_var("MARS_AUTH_SOCK", "/tmp/mars-stub-sc.sock");
+        assert!(broker::detect_broker_sock().is_none(), "stub must never detect a broker");
+        assert_ne!(
+            agent::AgentConfig::from_env().provider, "broker",
+            "stub build selected the broker provider"
+        );
+        std::env::remove_var("MARS_AUTH_SOCK");
+        assert!(broker::keyd_main().is_err(), "stub keyd must refuse, not no-op");
+        assert!(broker::ssh_main("x".into(), Vec::new()).is_err(), "stub ssh must refuse, not no-op");
+        assert!(broker::broker_socket_path().is_err(), "stub socket path must be absent");
+        assert!(broker::find_live_auth_sock(std::path::Path::new("/tmp")).is_none());
+        println!("[selfcheck] ssh broker stub (no ssh) . PASS");
+    }
 
     // 31. Fleet cache + `mars ls` follow-up resolver (ordinal + name/prefix).
     {
         let hosts = vec!["gpubox".to_string(), "prod-7".to_string()];
-        assert_eq!(broker::resolve_target(&hosts, "2"), Some("prod-7".into()), "ordinal");
-        assert_eq!(broker::resolve_target(&hosts, "gpubox"), Some("gpubox".into()), "exact name");
-        assert_eq!(broker::resolve_target(&hosts, "prod"), Some("prod-7".into()), "unique prefix");
-        assert_eq!(broker::resolve_target(&hosts, ""), None, "empty skips");
-        assert_eq!(broker::resolve_target(&hosts, "9"), None, "out-of-range ordinal");
-        // Fleet round-trip under an isolated HOME (upsert dedupes, recency orders).
-        let saved = std::env::var("HOME").ok();
+        assert_eq!(fleet::resolve_target(&hosts, "2"), Some("prod-7".into()), "ordinal");
+        assert_eq!(fleet::resolve_target(&hosts, "gpubox"), Some("gpubox".into()), "exact name");
+        assert_eq!(fleet::resolve_target(&hosts, "prod"), Some("prod-7".into()), "unique prefix");
+        assert_eq!(fleet::resolve_target(&hosts, ""), None, "empty skips");
+        assert_eq!(fleet::resolve_target(&hosts, "9"), None, "out-of-range ordinal");
+        // Fleet round-trip under an isolated home dir (upsert dedupes, recency
+        // orders). sys::paths names the env var, so this redirects on any OS.
+        let saved = std::env::var(sys::paths::HOME_ENV).ok();
         let tmp = std::env::temp_dir().join(format!("mars-fleet-sc-{}", std::process::id()));
         std::fs::create_dir_all(&tmp)?;
-        std::env::set_var("HOME", &tmp);
-        broker::fleet_record("prod-7", None);
-        broker::fleet_record("gpubox", None); // touched last → most recent
-        broker::fleet_record("prod-7", None); // upsert, not a dup
-        let f = broker::fleet_load();
+        std::env::set_var(sys::paths::HOME_ENV, &tmp);
+        fleet::fleet_record("prod-7", None);
+        fleet::fleet_record("gpubox", None); // touched last → most recent
+        fleet::fleet_record("prod-7", None); // upsert, not a dup
+        let f = fleet::fleet_load();
         assert_eq!(f.len(), 2, "fleet upsert duplicated a host");
         assert_eq!(f[0].host, "prod-7", "fleet not ordered most-recent-first");
         // The status push (what a brokered agent call reports home) refreshes
         // session + last_status — the "latest status" mars ls renders.
-        broker::fleet_status("gpubox", Some("train".into()), "agent active");
-        let f = broker::fleet_load();
+        fleet::fleet_status("gpubox", Some("train".into()), "agent active");
+        let f = fleet::fleet_load();
         let g = f.iter().find(|e| e.host == "gpubox").expect("status push dropped the host");
         assert_eq!(g.last_status.as_deref(), Some("agent active"));
         assert_eq!(g.session.as_deref(), Some("train"));
@@ -2822,50 +3216,108 @@ fn selfcheck() -> Result<()> {
         );
         let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
         assert_eq!(
-            broker::resolve_target(&names, "gpub").as_deref(),
+            fleet::resolve_target(&names, "gpub").as_deref(),
             Some("gpubox"),
             "unified resolver lost prefix matching"
         );
         match saved {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+            Some(h) => std::env::set_var(sys::paths::HOME_ENV, h),
+            None => std::env::remove_var(sys::paths::HOME_ENV),
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
     println!("[selfcheck] fleet cache + ls resolver . PASS");
 
     // 32. The embedded installer (pushed to remotes by `mars ssh`) is intact.
-    assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
-    assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
-        "embedded install.sh missing its core steps");
-    assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
-    println!("[selfcheck] embedded installer ........ PASS");
+    #[cfg(feature = "ssh")]
+    {
+        assert!(broker::INSTALL_SH.starts_with("#!/bin/sh"), "install.sh lost its shebang");
+        assert!(broker::INSTALL_SH.contains("sh.rustup.rs") && broker::INSTALL_SH.contains("mars-terminal"),
+            "embedded install.sh missing its core steps");
+        assert!(broker::INSTALL_SH.contains("MINGW"), "embedded install.sh lost the Windows guard");
+        assert!(
+            !ssh::installer_payload().contains('\r'),
+            "embedded installer payload must use Unix line endings"
+        );
+        println!("[selfcheck] embedded installer ........ PASS");
+    }
 
     // 32b. The ssh remote-command builders. The prelude must sweep a stale auth
     //      socket BEFORE the interactive ssh requests the -R forward (sshd won't
     //      bind over a leftover; client-side StreamLocalBindUnlink only covers
     //      local forwards), and the install check must probe the real install
     //      destinations, not just sshd's bare non-login PATH.
-    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true);
+    #[cfg(feature = "ssh")]
+    {
+    let prelude = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", true, false);
     let sweep = prelude.find("rm -f /tmp/mars-auth-42.sock;")
         .expect("prelude lost the stale-socket sweep (or its ; separator)");
     assert!(sweep < prelude.find("install.sh").expect("prelude lost the installer drop"),
         "sweep must precede the installer drop");
+    for needle in [
+        "NEED_INSTALL=1",
+        "sh \"$HOME/.mars/install.sh\"",
+        "automatic installer did not produce a usable mars binary",
+    ] {
+        assert!(prelude.contains(needle), "prelude lost automatic bootstrap step: {needle}");
+    }
+    assert!(!prelude.contains("--broker-handoff-version"),
+        "ordinary Unix bootstrap unexpectedly requires the capability protocol");
     // Reused ControlMaster ⇒ its old -R forward is still live on the existing
     // socket inode; sweeping would orphan a working tunnel.
-    let reuse = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", false);
+    let reuse = broker::remote_prelude_cmd("/tmp/mars-auth-42.sock", false, false);
     assert!(!reuse.contains("rm -f"), "master-reuse prelude must NOT sweep the live socket");
     assert!(reuse.contains("install.sh"), "master-reuse prelude lost the installer drop");
+    let windows_bootstrap = broker::remote_prelude_cmd(
+        "/tmp/mars-auth-cap-home-nonce.sock", true, true
+    );
+    assert!(
+        windows_bootstrap.contains("export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"")
+            && windows_bootstrap.contains("--broker-handoff-version")
+            && windows_bootstrap.contains(broker::BROKER_HANDOFF_PROTOCOL)
+            && windows_bootstrap.contains("NEED_INSTALL=1")
+            && windows_bootstrap.contains("still too old for broker handoff"),
+        "Windows-home bootstrap lost its protocol-aware upgrade path"
+    );
     let sess = broker::remote_session_cmd("/tmp/mars-auth-42.sock", true);
-    for needle in ["command -v mars", "$HOME/.cargo/bin/mars", "$HOME/.local/bin/mars",
+    for needle in ["command -v mars", "export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"",
                    "export MARS_AUTH_SOCK=/tmp/mars-auth-42.sock", "exec ${SHELL:-/bin/sh} -l",
-                   "install.sh",
+                   "automatic bootstrap completed",
                    "[ -S /tmp/mars-auth-42.sock ]", "agent tunnel ready", "no agent tunnel",
                    "\"$M\" attach", "exec \"$M\" new main"] {
         assert!(sess.contains(needle), "session cmd missing: {needle}");
     }
     assert!(broker::remote_session_cmd("/x.sock", false).contains("sh.rustup.rs"),
         "no-installer nudge lost the manual install steps");
+    let secured = broker::remote_session_cmd_with_capability(
+        "/tmp/mars-auth-secure.sock", false, Some("0123456789abcdef")
+    );
+    assert!(secured.contains("export MARS_BROKER_CAPABILITY=0123456789abcdef"),
+        "Windows-home command lost the tunnel capability");
+    assert!(
+        secured.contains("--broker-handoff-version")
+            && secured.contains(broker::BROKER_HANDOFF_PROTOCOL)
+            && secured.contains("remote Mars is outdated"),
+        "Windows-home command lost the remote broker protocol gate"
+    );
+    let scrubbed = ssh::ssh_command();
+    for name in agent::PROVIDER_CREDENTIAL_ENV_VARS {
+        assert!(
+            scrubbed
+                .get_envs()
+                .any(|(candidate, value)| candidate == std::ffi::OsStr::new(name) && value.is_none()),
+            "ssh child still inherits provider credential {name}"
+        );
+    }
+    let protocol = std::process::Command::new(std::env::current_exe()?)
+        .arg("--broker-handoff-version")
+        .output()?;
+    assert!(
+        protocol.status.success()
+            && String::from_utf8_lossy(&protocol.stdout).trim()
+                == broker::BROKER_HANDOFF_PROTOCOL,
+        "remote broker protocol probe returned the wrong marker"
+    );
     println!("[selfcheck] ssh remote commands ....... PASS");
 
     // 32c. Dead-socket self-heal: a leftover auth socket with no listener must
@@ -2875,31 +3327,94 @@ fn selfcheck() -> Result<()> {
     std::fs::create_dir_all(&tmp)?;
     assert!(!broker::probe_and_sweep(&tmp.join("none.sock")), "nonexistent socket read as live");
     let dead = tmp.join("dead.sock");
-    std::fs::write(&dead, b"")?;
+    #[cfg(unix)]
+    {
+        // A real stale socket: bind, then drop the listener (Rust does not unlink
+        // on drop), leaving a socket whose connect is refused → classified Dead →
+        // swept. An empty *regular* file would connect with ENOTSOCK →
+        // Indeterminate, which correctly is NOT swept (never delete a non-socket).
+        drop(crate::sys::control::bind(&dead)?);
+    }
+    #[cfg(windows)]
+    {
+        let unused = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let port = unused.local_addr()?.port();
+        drop(unused);
+        std::fs::write(
+            &dead,
+            format!("2 {port} 0123456789abcdef0123456789abcdef\n"),
+        )?;
+    }
     assert!(!broker::probe_and_sweep(&dead), "dead socket file read as live");
     assert!(!dead.exists(), "dead socket was not swept");
+    #[cfg(windows)]
+    {
+        let legacy = tmp.join("legacy.sock");
+        let legacy_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        std::fs::write(
+            &legacy,
+            format!(
+                "{} 0123456789abcdef0123456789abcdef\n",
+                legacy_listener.local_addr()?.port()
+            ),
+        )?;
+        assert!(!broker::probe_and_sweep(&legacy));
+        assert!(legacy.exists(), "legacy live descriptor was destructively swept");
+        drop(legacy_listener);
+
+        let busy = tmp.join("busy.sock");
+        let busy_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        std::fs::write(
+            &busy,
+            format!(
+                "2 {} 0123456789abcdef0123456789abcdef\n",
+                busy_listener.local_addr()?.port()
+            ),
+        )?;
+        let busy_peer = std::thread::spawn(move || {
+            let _ = busy_listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        });
+        assert!(!broker::probe_and_sweep(&busy));
+        assert!(busy.exists(), "timed-out live descriptor was destructively swept");
+        busy_peer.join().expect("busy control peer");
+    }
     let live = tmp.join("live.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&live)?;
+    let listener = crate::sys::control::bind(&live)?;
+    #[cfg(windows)]
+    let live_accept = std::thread::spawn(move || {
+        listener.accept().expect("live socket probe accept")
+    });
+    #[cfg(unix)]
+    let _listener = listener;
     assert!(broker::probe_and_sweep(&live), "bound socket read as dead");
+    #[cfg(windows)]
+    drop(live_accept.join().expect("live socket probe thread"));
     assert!(live.exists(), "live socket must not be swept");
+    #[cfg(unix)]
+    {
     // The glob fallback: the socket name carries the HOME uid, so the remote
     // must find any live mars-auth-*.sock, not just its own uid's — while
     // still preferring an own-uid socket when one is live.
     assert!(broker::find_live_auth_sock(&tmp).is_none(), "no candidates but one found");
-    std::fs::write(tmp.join("mars-auth-777.sock"), b"")?; // dead stand-in
-    let _other = std::os::unix::net::UnixListener::bind(tmp.join("mars-auth-888.sock"))?;
+    drop(crate::sys::control::bind(tmp.join("mars-auth-777.sock"))?); // dead stand-in: bound, then closed
+    let _other = crate::sys::control::bind(tmp.join("mars-auth-888.sock"))?;
     assert_eq!(
         broker::find_live_auth_sock(&tmp).as_deref(),
         Some(tmp.join("mars-auth-888.sock").to_str().unwrap()),
         "glob fallback did not find the live foreign-uid socket"
     );
     assert!(!tmp.join("mars-auth-777.sock").exists(), "dead candidate not swept by scan");
-    let own = tmp.join(format!("mars-auth-{}.sock", unsafe { libc::getuid() }));
-    let _own = std::os::unix::net::UnixListener::bind(&own)?;
+    let own = tmp.join(format!("mars-auth-{}.sock", crate::sys::proc::uid_tag()));
+    let _own = crate::sys::control::bind(&own)?;
     assert_eq!(broker::find_live_auth_sock(&tmp).as_deref(), own.to_str(),
         "own-uid socket must win over a foreign live one");
+    }
     let _ = std::fs::remove_dir_all(&tmp);
     println!("[selfcheck] auth-socket liveness ...... PASS");
+    }
 
     // 33. Closing a tab with a live terminal confirms, then reaps the PTY —
     //     never orphans the shell (P0.1). Decline keeps everything; confirm
@@ -3020,6 +3535,10 @@ fn selfcheck() -> Result<()> {
             false
         }
 
+        // (a)-(c) drive POSIX `printf`+`cat` and assert on the pty's raw echo of
+        // escape sequences — ConPTY translates those into key events instead of
+        // echoing them, so on a PowerShell host only (d) can run honestly.
+        if !shell_is_powershell() {
         // (a) Alternate screen, no mouse reporting → arrows, not a silent no-op.
         let mut app = App::new(None)?;
         let tid = term_with(&mut app, b"printf '\\033[?1049h'; cat\n");
@@ -3049,11 +3568,17 @@ fn selfcheck() -> Result<()> {
         assert!(wait_for(&mut app, tid, "[<64;1;1M"), "SGR wheel-up not forwarded");
         app.handle_mouse(wheel(false));
         assert!(wait_for(&mut app, tid, "[<65;1;1M"), "SGR wheel-down not forwarded");
+        } else {
+            println!("[selfcheck] wheel → app modes ........ SKIP (POSIX tty-echo probe; PowerShell host)");
+        }
 
         // (d) Plain shell (no modes): the wheel still browses mars scrollback.
         let mut app = App::new(None)?;
-        let tid = term_with(&mut app, b"seq 1 100\n");
-        assert!(wait_for(&mut app, tid, "100"), "seq output never arrived");
+        let tid = term_with(
+            &mut app,
+            if shell_is_powershell() { &b"1..100\r"[..] } else { &b"seq 1 100\n"[..] },
+        );
+        assert!(wait_for(&mut app, tid, "99"), "seq output never arrived");
         app.handle_mouse(wheel(true));
         assert!(app.terms.get(&tid).unwrap().view_offset() > 0,
             "plain-shell wheel-up no longer scrolls mars scrollback");
@@ -3253,14 +3778,11 @@ fn selfcheck() -> Result<()> {
         app.on_detach();
         // Let the shell run and exit; drain events (queues the exit trigger,
         // keyless fire produces the deterministic tier-0 verdict).
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_until(|| {
             app.frame_tick += 3; // simulated time passes while detached
             app.tick();
-            if app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false) {
-                break;
-            }
-        }
+            app.watches.get(&fail_tid).map(|w| w.verdict.is_some()).unwrap_or(false)
+        });
         assert!(
             app.watches.get(&fail_tid).and_then(|w| w.verdict.clone())
                 .map(|v| v.starts_with("failed"))

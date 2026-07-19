@@ -2,13 +2,12 @@
 ///
 /// Architecture (recorded in key_design.md §H2): thin client, server renders.
 /// The server runs the entire `App` headless and streams ratatui's ANSI bytes
-/// over a unix socket as `Output` frames; the client owns the real TTY,
+/// over the platform control channel as `Output` frames; the client owns the real TTY,
 /// forwards serialized input events, and writes frames verbatim to stdout.
 /// One client per session; a new attach takes over. Disconnect leaves the
 /// session (buffers, panes, shells, agent threads) running.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -30,12 +29,23 @@ use crate::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const SESSION_PROTOCOL_VERSION: &str =
+    concat!(env!("CARGO_PKG_VERSION"), "/session-2");
+pub const RUNTIME_DIR_ENV: &str = "MARS_RUNTIME_DIR";
 
 // ── Protocol ─────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientFrame {
-    Hello { cols: u16, rows: u16, version: String },
+    Hello {
+        cols: u16,
+        rows: u16,
+        version: String,
+        #[serde(default)]
+        broker_sock: Option<String>,
+        #[serde(default)]
+        broker_capability: Option<String>,
+    },
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
@@ -49,6 +59,9 @@ pub enum ClientFrame {
     /// Open a file as a new tab in the running session (used by a nested
     /// `mars <file>` run from a terminal pane inside this session).
     Open { path: String },
+    /// Return the daemon's current broker route to a Mars subprocess running
+    /// inside one of its persistent terminal panes.
+    BrokerRoute,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,6 +72,12 @@ pub enum ServerFrame {
     Exit { message: String },
     /// Reply to `ClientFrame::Status`.
     Status { attached: bool, version: String },
+    /// Reply to `ClientFrame::BrokerRoute`.
+    BrokerRoute {
+        session_instance_id: String,
+        broker_sock: Option<String>,
+        broker_capability: Option<String>,
+    },
 }
 
 pub fn write_frame<T: Serialize>(w: &mut impl Write, frame: &T) -> io::Result<()> {
@@ -68,7 +87,7 @@ pub fn write_frame<T: Serialize>(w: &mut impl Write, frame: &T) -> io::Result<()
     w.flush()
 }
 
-fn send_exit(stream: &UnixStream, message: &str) -> io::Result<()> {
+fn send_exit(stream: &crate::sys::control::Stream, message: &str) -> io::Result<()> {
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ServerFrame::Exit { message: message.to_string() })
 }
@@ -81,18 +100,7 @@ fn send_exit(stream: &UnixStream, message: &str) -> io::Result<()> {
 /// Also run before entering the TUI, so crossterm saves a *sane* state to
 /// restore on exit instead of faithfully re-breaking the terminal.
 pub fn sanitize_tty() {
-    unsafe {
-        if libc::isatty(libc::STDOUT_FILENO) != 1 {
-            return;
-        }
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(libc::STDOUT_FILENO, &mut t) == 0 {
-            t.c_oflag |= libc::OPOST | libc::ONLCR;
-            t.c_lflag |= libc::ICANON | libc::ECHO | libc::ECHOE | libc::ISIG;
-            t.c_iflag |= libc::ICRNL;
-            let _ = libc::tcsetattr(libc::STDOUT_FILENO, libc::TCSANOW, &t);
-        }
-    }
+    crate::sys::tty::sanitize();
 }
 
 /// On panic, put the terminal back together before the message prints —
@@ -117,24 +125,59 @@ pub fn install_panic_restore() {
 // ── Socket paths ─────────────────────────────────────────────────────────────
 
 fn socket_dir() -> Result<PathBuf> {
-    let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!("mars-{}", uid));
+    let base = std::env::var_os(RUNTIME_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("mars-{}", crate::sys::proc::uid_tag()));
     std::fs::create_dir_all(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::sys::fsperm::restrict_dir(&dir)?;
     Ok(dir)
 }
 
-pub fn socket_path(name: &str) -> Result<PathBuf> {
-    if name.is_empty() || name.contains('/') {
-        return Err(anyhow!("invalid session name: {name:?}"));
+pub fn validate_session_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("session name cannot be empty"));
     }
+    if name != name.trim() {
+        return Err(anyhow!("session name cannot start or end with whitespace"));
+    }
+    if matches!(name, "." | "..") {
+        return Err(anyhow!("session name cannot be a path component"));
+    }
+    if name.ends_with('.') {
+        return Err(anyhow!("session name cannot end with '.'"));
+    }
+    if name.chars().any(|c| {
+        c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
+        return Err(anyhow!(
+            "session name contains a path separator or reserved character"
+        ));
+    }
+
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered_device = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered_device
+    {
+        return Err(anyhow!("session name is reserved by Windows"));
+    }
+    Ok(())
+}
+
+pub fn socket_path(name: &str) -> Result<PathBuf> {
+    validate_session_name(name)?;
     Ok(socket_dir()?.join(format!("{name}.sock")))
 }
 
 /// Ask a live session whether a client is currently attached.
 fn query_attached(path: &std::path::Path) -> Option<bool> {
-    let stream = UnixStream::connect(path).ok()?;
+    let stream = crate::sys::control::connect(path).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     let mut w = stream.try_clone().ok()?;
     write_frame(&mut w, &ClientFrame::Status).ok()?;
@@ -145,6 +188,57 @@ fn query_attached(path: &std::path::Path) -> Option<bool> {
         ServerFrame::Status { attached, .. } => Some(attached),
         _ => None,
     }
+}
+
+#[cfg(feature = "ssh")]
+fn query_broker_route_at(
+    path: &std::path::Path,
+) -> Result<(Option<String>, Option<String>, String)> {
+    let stream = crate::sys::control::connect(&path)
+        .map_err(|_| anyhow!("parent session control endpoint is unavailable"))?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    let mut w = stream.try_clone()?;
+    write_frame(&mut w, &ClientFrame::BrokerRoute)?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    match serde_json::from_str::<ServerFrame>(line.trim())? {
+        ServerFrame::BrokerRoute {
+            session_instance_id,
+            broker_sock,
+            broker_capability,
+        } => Ok((broker_sock, broker_capability, session_instance_id)),
+        ServerFrame::Exit { message } => Err(anyhow!(message)),
+        _ => Err(anyhow!("parent session returned an invalid broker route")),
+    }
+}
+
+#[cfg(feature = "ssh")]
+pub(crate) fn query_broker_route(
+    name: &str,
+    expected_instance_id: Option<&str>,
+) -> Result<(Option<String>, Option<String>, String)> {
+    let preferred = socket_path(name)?;
+    if let Ok(route) = query_broker_route_at(&preferred) {
+        if expected_instance_id.is_none_or(|expected| route.2 == expected) {
+            return Ok(route);
+        }
+    }
+    let Some(expected) = expected_instance_id else {
+        return Err(anyhow!("no live parent session '{name}'"));
+    };
+    for entry in std::fs::read_dir(socket_dir()?)?.flatten() {
+        let path = entry.path();
+        if path == preferred || path.extension().and_then(|value| value.to_str()) != Some("sock") {
+            continue;
+        }
+        if let Ok(route) = query_broker_route_at(&path) {
+            if route.2 == expected {
+                return Ok(route);
+            }
+        }
+    }
+    Err(anyhow!("no live parent session instance '{expected}'"))
 }
 
 /// Lowest free numeric session name (tmux-style: 0, 1, 2, …).
@@ -168,10 +262,16 @@ pub fn list_sessions() -> Result<Vec<(String, bool, bool)>> {
         let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         match query_attached(&path) {
             Some(attached) => out.push((name, true, attached)),
-            None => {
-                let _ = std::fs::remove_file(&path); // dead or unresponsive
-                out.push((name, false, false));
-            }
+            None => match crate::sys::control::probe(&path) {
+                crate::sys::control::Probe::Dead => {
+                    let _ = std::fs::remove_file(&path);
+                    out.push((name, false, false));
+                }
+                crate::sys::control::Probe::Live
+                | crate::sys::control::Probe::Indeterminate => {
+                    out.push((name, true, false));
+                }
+            },
         }
     }
     out.sort();
@@ -184,13 +284,13 @@ pub fn list_sessions() -> Result<Vec<(String, bool, bool)>> {
 /// flush (i.e. per drawn frame). IO errors mark the client dead instead of
 /// erroring the draw — the reader thread reports the disconnect.
 struct FrameWriter {
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     buf: Vec<u8>,
     dead: bool,
 }
 
 impl FrameWriter {
-    fn new(stream: UnixStream) -> Self {
+    fn new(stream: crate::sys::control::Stream) -> Self {
         // Don't let one wedged client stall the whole session forever.
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
         FrameWriter { stream, buf: Vec::new(), dead: false }
@@ -217,8 +317,18 @@ impl Write for FrameWriter {
 }
 
 enum SrvEvent {
-    Attach { stream: UnixStream, cols: u16, rows: u16, gen: u64 },
-    Input(InputEvent),
+    Attach {
+        stream: crate::sys::control::Stream,
+        cols: u16,
+        rows: u16,
+        gen: u64,
+        broker_sock: Option<String>,
+        broker_capability: Option<String>,
+    },
+    Input {
+        event: InputEvent,
+        gen: u64,
+    },
     ClientGone(u64),
     /// `mars kill <name>` — force-quit (autosaves first, skips the dirty guard).
     Kill,
@@ -228,8 +338,16 @@ enum SrvEvent {
     OpenFile(String),
 }
 
+struct BrokerRouteReset;
+
+impl Drop for BrokerRouteReset {
+    fn drop(&mut self) {
+        crate::broker::reset_session_broker();
+    }
+}
+
 fn make_terminal(
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     cols: u16,
     rows: u16,
 ) -> Result<Terminal<CrosstermBackend<FrameWriter>>> {
@@ -246,14 +364,36 @@ fn make_terminal(
 /// `name`/`path` are mutable: live rename moves the socket file (the bound
 /// listener follows the inode, so clients keep connecting — verified).
 pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
+    crate::broker::reset_session_broker();
+    let _broker_route_reset = BrokerRouteReset;
     let mut name = name.to_string();
     let mut path = socket_path(&name)?;
     // Clean a stale socket (previous daemon died without unlinking).
-    if path.exists() && UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
+    if path.exists() {
+        match crate::sys::control::probe(&path) {
+            crate::sys::control::Probe::Dead => {
+                let _ = std::fs::remove_file(&path);
+            }
+            crate::sys::control::Probe::Indeterminate => {
+                anyhow::bail!(
+                    "session '{name}' has an incompatible or busy control endpoint; \
+                     stop its old daemon or run `mars killall`"
+                );
+            }
+            crate::sys::control::Probe::Live => {}
+        }
     }
-    let listener = UnixListener::bind(&path)
+    let listener = crate::sys::control::bind(&path)
         .map_err(|e| anyhow!("cannot create session '{name}': {e} (already running?)"))?;
+    let session_instance_id = format!(
+        "{:x}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    );
+    let shared_instance_id: Arc<str> = Arc::from(session_instance_id.as_str());
 
     let (tx, rx) = mpsc::channel::<SrvEvent>();
     let gen_counter = Arc::new(AtomicU64::new(0));
@@ -263,13 +403,17 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
         let tx = tx.clone();
         let gen_counter = gen_counter.clone();
         let attached = attached.clone();
+        let session_instance_id = shared_instance_id.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
                 let tx = tx.clone();
                 let gc = gen_counter.clone();
                 let at = attached.clone();
-                std::thread::spawn(move || client_connection(stream, tx, gc, at));
+                let session_instance_id = session_instance_id.clone();
+                std::thread::spawn(move || {
+                    client_connection(stream, tx, gc, at, session_instance_id)
+                });
             }
         });
     }
@@ -277,13 +421,15 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
     let had_file = file.is_some();
     let mut app = App::new(file)?;
     app.session_name = Some(name.to_string());
+    app.session_instance_id = Some(session_instance_id);
     // A no-file session opens straight into a terminal (multiplexer default).
     if !had_file && std::env::var("MARS_OPEN_TERMINAL").is_ok() {
         app.open_terminal();
     }
 
-    let mut client: Option<(UnixStream, u64)> = None;
+    let mut client: Option<(crate::sys::control::Stream, u64)> = None;
     let mut term: Option<Terminal<CrosstermBackend<FrameWriter>>> = None;
+    let mut latest_client_gen = 0;
 
     loop {
         app.tick();
@@ -307,7 +453,25 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
         }
 
         match rx.recv_timeout(Duration::from_millis(app.tuning.poll_interval_ms)) {
-            Ok(SrvEvent::Attach { stream, cols, rows, gen }) => {
+            Ok(SrvEvent::Attach {
+                stream,
+                cols,
+                rows,
+                gen,
+                broker_sock,
+                broker_capability,
+            }) => {
+                if gen <= latest_client_gen {
+                    let _ = send_exit(&stream, "detached: a newer client already attached");
+                    continue;
+                }
+                if let Err(e) =
+                    crate::broker::set_session_broker(broker_sock, broker_capability)
+                {
+                    let _ = send_exit(&stream, &format!("invalid broker handoff: {e}"));
+                    continue;
+                }
+                latest_client_gen = gen;
                 if let Some((old, _)) = client.take() {
                     let _ = send_exit(&old, "detached: another client attached");
                 }
@@ -322,18 +486,24 @@ pub fn server_main(name: &str, file: Option<String>) -> Result<()> {
                     }
                 }
             }
-            Ok(SrvEvent::Input(InputEvent::Resize(cols, rows))) => {
-                if let Some((s, _)) = client.as_ref() {
-                    term = Some(make_terminal(s.try_clone()?, cols, rows)?);
-                    if let Some(t) = term.as_mut() {
-                        let _ = t.clear();
+            Ok(SrvEvent::Input { event, gen }) => {
+                if client.as_ref().is_some_and(|(_, current)| *current == gen) {
+                    match event {
+                        InputEvent::Resize(cols, rows) => {
+                            if let Some((s, _)) = client.as_ref() {
+                                term = Some(make_terminal(s.try_clone()?, cols, rows)?);
+                                if let Some(t) = term.as_mut() {
+                                    let _ = t.clear();
+                                }
+                                app.needs_redraw = true;
+                            }
+                        }
+                        ev => {
+                            let _ = app.apply_input(ev);
+                            app.needs_redraw = true;
+                        }
                     }
-                    app.needs_redraw = true;
                 }
-            }
-            Ok(SrvEvent::Input(ev)) => {
-                let _ = app.apply_input(ev);
-                app.needs_redraw = true; // input → repaint
             }
             Ok(SrvEvent::ClientGone(gen)) => {
                 if client.as_ref().map(|(_, g)| *g == gen).unwrap_or(false) {
@@ -419,10 +589,11 @@ pub fn debug_log(msg: &str) {
 
 /// Per-connection thread: handshake, then pump client frames into the server.
 fn client_connection(
-    stream: UnixStream,
+    stream: crate::sys::control::Stream,
     tx: mpsc::Sender<SrvEvent>,
     gc: Arc<AtomicU64>,
     attached: Arc<std::sync::atomic::AtomicBool>,
+    session_instance_id: Arc<str>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let Ok(read_half) = stream.try_clone() else { return };
@@ -461,21 +632,66 @@ fn client_connection(
             let _ = send_exit(&stream, &format!("opening '{path}'"));
             return;
         }
+        Ok(ClientFrame::BrokerRoute) => {
+            let mut w = stream;
+            match crate::broker::current_session_broker_route() {
+                Ok((broker_sock, broker_capability)) => {
+                    let _ = write_frame(
+                        &mut w,
+                        &ServerFrame::BrokerRoute {
+                            session_instance_id: session_instance_id.to_string(),
+                            broker_sock,
+                            broker_capability,
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = write_frame(
+                        &mut w,
+                        &ServerFrame::Exit {
+                            message: e.to_string(),
+                        },
+                    );
+                }
+            }
+            return;
+        }
         _ => {}
     }
-    let Ok(ClientFrame::Hello { cols, rows, version }) = first else {
-        debug_log(&format!("hello parse failed on {:?}: {:?}", line.trim(), first.err()));
+    let Ok(ClientFrame::Hello {
+        cols,
+        rows,
+        version,
+        broker_sock,
+        broker_capability,
+    }) = first else {
+        debug_log(&format!("hello parse failed: {:?}", first.err()));
         return;
     };
-    if version != VERSION {
-        let _ = send_exit(&stream, &format!("version mismatch: server {VERSION}, client {version} — rebuild/upgrade"));
+    if version != SESSION_PROTOCOL_VERSION {
+        let _ = send_exit(
+            &stream,
+            &format!(
+                "version mismatch: server session protocol {SESSION_PROTOCOL_VERSION}, \
+                 client {version} — restart the session or upgrade Mars"
+            ),
+        );
         return;
     }
     let _ = stream.set_read_timeout(None);
+    // A Windows TcpStream clone retains the Hello deadline on its own handle.
+    let _ = reader.get_ref().set_read_timeout(None);
 
     let gen = gc.fetch_add(1, Ordering::SeqCst) + 1;
     let Ok(attach_stream) = stream.try_clone() else { return };
-    if tx.send(SrvEvent::Attach { stream: attach_stream, cols, rows, gen }).is_err() {
+    if tx.send(SrvEvent::Attach {
+        stream: attach_stream,
+        cols,
+        rows,
+        gen,
+        broker_sock,
+        broker_capability,
+    }).is_err() {
         return;
     }
 
@@ -497,7 +713,7 @@ fn client_connection(
                     }
                 };
                 if let Some(ev) = ev {
-                    if tx.send(SrvEvent::Input(ev)).is_err() {
+                    if tx.send(SrvEvent::Input { event: ev, gen }).is_err() {
                         break; // server loop gone
                     }
                 }
@@ -508,6 +724,10 @@ fn client_connection(
 }
 
 // ── Client ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn client_exit_is_error(message: &str) -> bool {
+    message.starts_with("version mismatch:") || message.starts_with("invalid broker handoff:")
+}
 
 /// Attach the real TTY to a running session.
 pub fn client_main(name: &str) -> Result<()> {
@@ -524,13 +744,23 @@ pub fn client_main(name: &str) -> Result<()> {
     };
 
     let path = socket_path(name)?;
-    let stream = UnixStream::connect(&path)
+    let stream = crate::sys::control::connect(&path)
         .map_err(|_| anyhow!("no live session '{name}' — see: mars ls"))?;
     let mut writer = stream.try_clone()?;
     let (cols, rows) = crossterm::terminal::size()?;
+    let broker_sock = crate::broker::detect_broker_sock();
+    let broker_capability = broker_sock
+        .as_deref()
+        .and_then(crate::broker::broker_capability_for);
     write_frame(
         &mut writer,
-        &ClientFrame::Hello { cols, rows, version: VERSION.to_string() },
+        &ClientFrame::Hello {
+            cols,
+            rows,
+            version: SESSION_PROTOCOL_VERSION.to_string(),
+            broker_sock,
+            broker_capability,
+        },
     )?;
 
     install_panic_restore();
@@ -546,7 +776,7 @@ pub fn client_main(name: &str) -> Result<()> {
     }
 
     // Server-frame pump: Output → stdout verbatim; Exit → done.
-    let (done_tx, done_rx) = mpsc::channel::<String>();
+    let (done_tx, done_rx) = mpsc::channel::<(String, bool)>();
     {
         let read_half = stream.try_clone()?;
         std::thread::spawn(move || {
@@ -555,7 +785,7 @@ pub fn client_main(name: &str) -> Result<()> {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => {
-                        let _ = done_tx.send("connection lost".into());
+                        let _ = done_tx.send(("connection lost".into(), true));
                         break;
                     }
                     Ok(_) => match serde_json::from_str::<ServerFrame>(line.trim()) {
@@ -567,10 +797,12 @@ pub fn client_main(name: &str) -> Result<()> {
                             }
                         }
                         Ok(ServerFrame::Exit { message }) => {
-                            let _ = done_tx.send(message);
+                            let failed = client_exit_is_error(&message);
+                            let _ = done_tx.send((message, failed));
                             break;
                         }
                         Ok(ServerFrame::Status { .. }) => {} // not expected mid-attach
+                        Ok(ServerFrame::BrokerRoute { .. }) => {} // not expected mid-attach
                         Err(_) => {}
                     },
                 }
@@ -579,10 +811,11 @@ pub fn client_main(name: &str) -> Result<()> {
     }
 
     // Input pump: TTY events → frames.
-    let exit_msg;
+    let (exit_msg, exit_error);
     loop {
-        if let Ok(msg) = done_rx.try_recv() {
+        if let Ok((msg, failed)) = done_rx.try_recv() {
             exit_msg = msg;
+            exit_error = failed;
             break;
         }
         if crossterm::event::poll(Duration::from_millis(50))? {
@@ -596,6 +829,7 @@ pub fn client_main(name: &str) -> Result<()> {
             if let Some(f) = frame {
                 if write_frame(&mut writer, &f).is_err() {
                     exit_msg = "connection lost".into();
+                    exit_error = true;
                     break;
                 }
             }
@@ -613,16 +847,30 @@ pub fn client_main(name: &str) -> Result<()> {
         DisableBracketedPaste,
         crossterm::cursor::Show
     );
+    if exit_error {
+        return Err(anyhow!(exit_msg));
+    }
     println!("[mars] {exit_msg}");
     Ok(())
 }
 
 // ── CLI entries ──────────────────────────────────────────────────────────────
 
+pub(crate) fn isolate_session_daemon_env(command: &mut std::process::Command) {
+    for name in [
+        "MARS_SESSION",
+        "MARS_SESSION_ID",
+        "MARS_AUTH_SOCK",
+        "MARS_BROKER_CAPABILITY",
+    ] {
+        command.env_remove(name);
+    }
+}
+
 /// `~/.local/state/mars` (or $XDG_STATE_HOME/mars) — daemon logs live here.
 fn state_dir() -> Option<PathBuf> {
     let base = std::env::var("XDG_STATE_HOME").map(PathBuf::from).ok().or_else(|| {
-        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local").join("state"))
+        crate::sys::paths::home_dir().map(|h| h.join(".local").join("state"))
     })?;
     let dir = base.join("mars");
     std::fs::create_dir_all(&dir).ok()?;
@@ -632,62 +880,66 @@ fn state_dir() -> Option<PathBuf> {
 /// `mars --session <name>`: attach if alive, else spawn the daemon and attach.
 pub fn session_main(name: &str, file: Option<String>) -> Result<()> {
     let path = socket_path(name)?;
-    if UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path); // stale
-        let exe = std::env::current_exe()?;
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--server").arg(name);
-        if let Some(f) = &file {
-            cmd.arg(f);
+    match crate::sys::control::probe(&path) {
+        crate::sys::control::Probe::Indeterminate => {
+            anyhow::bail!(
+                "session '{name}' has an incompatible or busy control endpoint; \
+                 stop its old daemon or run `mars killall`"
+            );
         }
-        // Daemon output goes to a log file — a crashed session must leave a
-        // postmortem, not vanish into /dev/null.
-        let log = state_dir()
-            .map(|d| d.join(format!("{name}.log")))
-            .and_then(|p| {
-                std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
-            });
-        cmd.env("RUST_BACKTRACE", "1");
-        // A no-file session opens straight into a terminal pane.
-        if file.is_none() {
-            cmd.env("MARS_OPEN_TERMINAL", "1");
-        }
-        cmd.stdin(std::process::Stdio::null());
-        match log {
-            Some(f) => {
-                let f2 = f.try_clone().ok();
-                cmd.stdout(f);
-                match f2 {
-                    Some(f2) => { cmd.stderr(f2); }
-                    None => { cmd.stderr(std::process::Stdio::null()); }
+        crate::sys::control::Probe::Dead => {
+            let _ = std::fs::remove_file(&path);
+            let exe = std::env::current_exe()?;
+            let mut cmd = std::process::Command::new(exe);
+            isolate_session_daemon_env(&mut cmd);
+            cmd.arg("--server").arg(name);
+            if let Some(f) = &file {
+                cmd.arg(f);
+            }
+            // Daemon output goes to a log file — a crashed session must leave a
+            // postmortem, not vanish into /dev/null.
+            let log = state_dir()
+                .map(|d| d.join(format!("{name}.log")))
+                .and_then(|p| {
+                    std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+                });
+            cmd.env("RUST_BACKTRACE", "1");
+            // A no-file session opens straight into a terminal pane.
+            if file.is_none() {
+                cmd.env("MARS_OPEN_TERMINAL", "1");
+            }
+            cmd.stdin(std::process::Stdio::null());
+            match log {
+                Some(f) => {
+                    let f2 = f.try_clone().ok();
+                    cmd.stdout(f);
+                    match f2 {
+                        Some(f2) => { cmd.stderr(f2); }
+                        None => { cmd.stderr(std::process::Stdio::null()); }
+                    }
+                }
+                None => {
+                    cmd.stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
                 }
             }
-            None => {
-                cmd.stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
+            // Fully detach from this TTY so the daemon survives the window.
+            crate::sys::daemon::detach(&mut cmd);
+            cmd.spawn()?;
+            // Wait for the daemon's socket to come up.
+            let mut ok = false;
+            for _ in 0..60 {
+                std::thread::sleep(Duration::from_millis(50));
+                if crate::sys::control::probe(&path) == crate::sys::control::Probe::Live {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
+                return Err(anyhow!("session daemon for '{name}' did not start"));
             }
         }
-        // Fully detach from this TTY so the daemon survives the window.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        cmd.spawn()?;
-        // Wait for the daemon's socket to come up.
-        let mut ok = false;
-        for _ in 0..60 {
-            std::thread::sleep(Duration::from_millis(50));
-            if UnixStream::connect(&path).is_ok() {
-                ok = true;
-                break;
-            }
-        }
-        if !ok {
-            return Err(anyhow!("session daemon for '{name}' did not start"));
-        }
+        crate::sys::control::Probe::Live => {}
     }
     client_main(name)
 }
@@ -797,7 +1049,7 @@ pub fn session_summary(name: &str) -> String {
     if let Some(e) = meaningful {
         let low = e.verdict.to_lowercase();
         if fresh(e.ts) && (e.failed || low.starts_with("blocked") || low.contains("failed")) {
-            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::worklog::ago(e.ts));
         }
     }
     // 2. The goals captured at the last detach — the clearest "what is this session
@@ -817,7 +1069,7 @@ pub fn session_summary(name: &str) -> String {
     // 4. The freshest real event (a completed run, etc.) — while fresh.
     if let Some(e) = meaningful {
         if fresh(e.ts) {
-            return format!("{} · {}", trim_verdict(&e.verdict), crate::broker::ago(e.ts));
+            return format!("{} · {}", trim_verdict(&e.verdict), crate::worklog::ago(e.ts));
         }
     }
     // 5. A fresh summary is being generated right now (the detach fired the LLM
@@ -832,9 +1084,13 @@ pub fn session_summary(name: &str) -> String {
     //    says where and when: the working directory and how long ago. This is the
     //    deterministic guarantee — it does not depend on any LLM call landing.
     if let Some(e) = recent.last() {
-        let dir = e.cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("session");
+        let dir = std::path::Path::new(&e.cwd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("session");
         let what = e.command.as_deref().map(|c| clip(c, 48)).unwrap_or_else(|| "active".into());
-        return format!("{dir} · {what} · {}", crate::broker::ago(e.ts));
+        return format!("{dir} · {what} · {}", crate::worklog::ago(e.ts));
     }
     "active — nothing logged yet".to_string()
 }
@@ -888,7 +1144,7 @@ pub fn all_sessions() -> Result<Vec<SessionEntry>> {
             as_of: None,
         });
     }
-    for e in crate::broker::fleet_load() {
+    for e in crate::fleet::fleet_load() {
         let mut status = e.last_status.clone().unwrap_or_else(|| "seen".to_string());
         if let Some(s) = &e.session {
             status = format!("{status} · session {s}");
@@ -924,7 +1180,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
     for (i, e) in entries.iter().enumerate() {
         let seen = match e.as_of {
             None => "now".to_string(),
-            Some(t) => crate::broker::ago(t),
+            Some(t) => crate::worklog::ago(t),
         };
         let prefix = format!(
             "  {:<2} {:<18} {:<6} {:<18} {:<8} ",
@@ -956,7 +1212,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
     // Interactive follow-up: an ordinal or (prefix of a) name attaches a local
     // session or sshes to a remote host — same resolver over the same list.
     // Skipped by --no-prompt or when stdin isn't a TTY (scripts).
-    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    let is_tty = crate::sys::tty::is_stdin_tty();
     if prompt && is_tty {
         use std::io::Write;
         print!("\n→ open (number/name, Enter to skip): ");
@@ -964,7 +1220,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_ok() {
             let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
-            if let Some(name) = crate::broker::resolve_target(&names, &line) {
+            if let Some(name) = crate::fleet::resolve_target(&names, &line) {
                 let e = entries.iter().find(|e| e.name == name).unwrap();
                 return if e.remote {
                     crate::broker::ssh_main(e.name.clone(), Vec::new())
@@ -982,7 +1238,7 @@ pub fn list_main(prompt: bool) -> Result<()> {
 /// opens correctly even though the daemon has a different working directory.
 pub fn open_in_session(name: &str, path: &str) -> Result<()> {
     let sock = socket_path(name)?;
-    let stream = UnixStream::connect(&sock)
+    let stream = crate::sys::control::connect(&sock)
         .map_err(|_| anyhow!("session '{name}' is not running"))?;
     let p = std::path::Path::new(path);
     let abs = if p.is_absolute() {
@@ -1002,7 +1258,7 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
         return Err(anyhow!("session '{new}' already exists"));
     }
     let old_path = socket_path(old)?;
-    let stream = UnixStream::connect(&old_path)
+    let stream = crate::sys::control::connect(&old_path)
         .map_err(|_| anyhow!("no live session '{old}' — see: mars ls"))?;
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ClientFrame::Rename { to: new.to_string() })?;
@@ -1022,7 +1278,7 @@ pub fn rename_main(old: &str, new: &str) -> Result<()> {
 /// the key broker, and sweep the stale sockets they leave behind. Agentic
 /// memory (cmd_memory, worklog, mission, denylist, fleet) is untouched, and
 /// no new session is started. `force: false` is for the selfcheck, whose
-/// TMPDIR isolation a process-wide pkill would not respect.
+/// runtime-dir isolation a process-wide kill sweep would not respect.
 pub fn killall_main(force: bool) -> Result<()> {
     let mut ended = 0;
     for (name, alive, _) in list_sessions()? {
@@ -1038,20 +1294,22 @@ pub fn killall_main(force: bool) -> Result<()> {
         return Ok(());
     }
     // Anything still standing didn't answer its socket — put it down hard.
-    for pat in ["mars --server", "mars keyd"] {
-        let _ = std::process::Command::new("pkill")
-            .arg("-f").arg(pat)
-            .status();
-    }
-    // Shut down ssh ControlMasters cleanly, then sweep their socket files —
+    // Windows intentionally treats this reset command as permission to stop
+    // every other mars.exe; Unix retains its targeted daemon sweep.
+    crate::sys::proc::kill_all_mars();
+    // The capability-marked reverse forward uniquely identifies a Windows
+    // handoff. Its ssh.exe child can outlive a force-killed Mars parent.
+    crate::sys::proc::kill_matching("ssh -R /tmp/mars-auth-cap-");
+    // Shut down Unix ControlMasters cleanly, then sweep their socket files —
     // a leftover master ambushes the next `mars ssh` with a broken pipe.
+    #[cfg(feature = "ssh")]
     if let Some(dir) = crate::broker::broker_socket_path().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 if !e.file_name().to_string_lossy().starts_with("cm-") {
                     continue;
                 }
-                let _ = std::process::Command::new("ssh")
+                let _ = crate::ssh::ssh_command()
                     .arg("-O").arg("exit")
                     .arg("-o").arg(format!("ControlPath={}", e.path().display()))
                     .arg("killall-sweep")
@@ -1074,7 +1332,7 @@ pub fn killall_main(force: bool) -> Result<()> {
         }
     }
     println!(
-        "killall: {ended} session(s) ended gracefully; force-swept daemons, \
+        "killall: {ended} session(s) ended gracefully; force-swept Mars processes, \
          ssh masters, and stale sockets. Memory files untouched."
     );
     Ok(())
@@ -1083,7 +1341,7 @@ pub fn killall_main(force: bool) -> Result<()> {
 /// `mars kill <name>`: terminate a session daemon (autosaves, then exits).
 pub fn kill_main(name: &str) -> Result<()> {
     let path = socket_path(name)?;
-    let stream = UnixStream::connect(&path)
+    let stream = crate::sys::control::connect(&path)
         .map_err(|_| anyhow!("no live session '{name}' — see: mars ls"))?;
     let mut w = stream.try_clone()?;
     write_frame(&mut w, &ClientFrame::Kill)?;

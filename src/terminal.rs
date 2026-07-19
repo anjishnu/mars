@@ -2,18 +2,30 @@
 /// Output is parsed by `vt100` into a screen grid that the UI renders.
 
 use std::io::{Read, Write};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Mutex,
+};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 pub type TermId = usize;
 
-/// Emitted by the reader thread whenever terminal `id`'s screen changes,
-/// so the main loop knows to repaint — or when the shell exits.
+/// Emitted when terminal `id`'s screen changes or its child process exits.
 pub enum TermEvent {
     Output(TermId),
     Exited(TermId),
+}
+
+static NEXT_STARTUP_PROBE: AtomicU64 = AtomicU64::new(1);
+
+struct StartupInput {
+    bytes: Vec<u8>,
+    marker: String,
+    probe_interval: Duration,
+    last_probe: Option<Instant>,
 }
 
 pub struct Term {
@@ -26,7 +38,10 @@ pub struct Term {
     parser: Arc<Mutex<vt100::Parser>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    kill_tx: mpsc::Sender<()>,
+    startup_input: Option<StartupInput>,
+    exit_code: Arc<Mutex<Option<i32>>>,
+    notify_exit: Arc<AtomicBool>,
     rows: u16,
     cols: u16,
     /// How far back the view is scrolled (0 = live). Mirrors the vt100 state.
@@ -34,9 +49,9 @@ pub struct Term {
     scrollback_limit: usize,
 }
 
-/// Spawn `$SHELL` on a PTY sized `rows` x `cols` with `scrollback` lines of
-/// history, streaming output into a `vt100::Parser`. A background thread
-/// pumps the PTY and signals `tx`.
+/// Spawn the platform shell on a PTY sized `rows` x `cols` with `scrollback` lines of
+/// history, streaming output into a `vt100::Parser`. One background thread
+/// pumps the PTY; another waits for child-process exit.
 pub fn spawn(
     id: TermId,
     rows: u16,
@@ -44,6 +59,8 @@ pub fn spawn(
     scrollback: usize,
     cwd: Option<std::path::PathBuf>,
     session: Option<&str>,
+    session_instance_id: Option<&str>,
+    startup_probe_interval: Duration,
     tx: mpsc::Sender<TermEvent>,
 ) -> Result<Term> {
     let rows = rows.max(1);
@@ -57,7 +74,7 @@ pub fn spawn(
         pixel_height: 0,
     })?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let shell = crate::sys::shell::default_shell();
     let mut cmd = CommandBuilder::new(shell);
     let spawn_cwd = cwd.filter(|d| d.is_dir());
     if let Some(dir) = &spawn_cwd {
@@ -68,8 +85,12 @@ pub fn spawn(
     if let Some(name) = session {
         cmd.env("MARS_SESSION", name);
     }
-    let child = pair.slave.spawn_command(cmd)?;
-    // Drop the slave so the master reader sees EOF when the shell exits.
+    if let Some(id) = session_instance_id {
+        cmd.env("MARS_SESSION_ID", id);
+    }
+    let mut child = pair.slave.spawn_command(cmd)?;
+    // Drop our slave copy; child-process exit is tracked separately because
+    // ConPTY can keep the master output pipe open after the child is gone.
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -77,6 +98,8 @@ pub fn spawn(
 
     let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
     let reader_parser = parser.clone();
+    let output_tx = tx.clone();
+    let (reader_done_tx, reader_done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -86,23 +109,67 @@ pub fn spawn(
                     if let Ok(mut p) = reader_parser.lock() {
                         p.process(&buf[..n]);
                     }
-                    if tx.send(TermEvent::Output(id)).is_err() {
+                    if output_tx.send(TermEvent::Output(id)).is_err() {
                         break;
                     }
                 }
             }
         }
-        // EOF: the shell is gone — tell the app so the pane can say so.
-        let _ = tx.send(TermEvent::Exited(id));
+        let _ = reader_done_tx.send(());
     });
 
+    let exit_code = Arc::new(Mutex::new(None));
+    let wait_exit_code = exit_code.clone();
+    let notify_exit = Arc::new(AtomicBool::new(true));
+    let wait_notify_exit = notify_exit.clone();
+    let (kill_tx, kill_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status.exit_code() as i32),
+                Err(_) => break None,
+                Ok(None) => {}
+            }
+            match kill_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) => {
+                    let _ = child.kill();
+                    break child.wait().ok().map(|status| status.exit_code() as i32);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    break child.wait().ok().map(|status| status.exit_code() as i32);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        if let Ok(mut slot) = wait_exit_code.lock() {
+            *slot = code;
+        }
+        if wait_notify_exit.swap(false, Ordering::AcqRel) {
+            let _ = reader_done_rx.recv_timeout(Duration::from_millis(100));
+            let _ = tx.send(TermEvent::Exited(id));
+        }
+    });
+
+    let marker = format!(
+        "__MARS_READY_{:x}__",
+        NEXT_STARTUP_PROBE.fetch_add(1, Ordering::Relaxed)
+    );
     Ok(Term {
         exited: false,
         spawn_cwd,
         parser,
         writer,
         master: pair.master,
-        child,
+        kill_tx,
+        startup_input: Some(StartupInput {
+            bytes: Vec::new(),
+            marker,
+            probe_interval: startup_probe_interval,
+            last_probe: None,
+        }),
+        exit_code,
+        notify_exit,
         rows,
         cols,
         view_offset: 0,
@@ -110,24 +177,92 @@ pub fn spawn(
     })
 }
 
-/// Removing a Term (closed pane/tab, app exit) must not orphan the shell: kill
-/// the child process tree with the pane, never leave it running invisibly.
+/// Removing a Term (closed pane/tab, app exit) must not orphan the shell process.
+/// Descendant containment is a separate platform lifecycle responsibility.
 impl Drop for Term {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.notify_exit.store(false, Ordering::Release);
+        let _ = self.kill_tx.send(());
     }
 }
 
 impl Term {
+    fn prompt_visible(&self) -> bool {
+        let Ok(parser) = self.parser.lock() else { return false };
+        let screen = parser.screen();
+        if screen.hide_cursor() {
+            return false;
+        }
+        let (row, _) = screen.cursor_position();
+        let (_, cols) = screen.size();
+        let line: String = (0..cols)
+            .filter_map(|col| screen.cell(row, col))
+            .map(|cell| cell.contents())
+            .collect();
+        matches!(
+            line.trim_end().chars().last(),
+            Some('$' | '#' | '%' | '>' | '❯' | '➜' | 'λ' | '»' | '›')
+        )
+    }
+
+    pub fn flush_startup_input(&mut self) {
+        if self.startup_input.is_none() {
+            return;
+        }
+        if self.prompt_visible() {
+            let bytes = self.startup_input.take().map(|startup| startup.bytes);
+            if let Some(bytes) = bytes {
+                self.write_input(&bytes);
+            }
+            return;
+        }
+        let marker_seen = self.startup_input.as_ref().is_some_and(|startup| {
+            let Ok(parser) = self.parser.lock() else { return false };
+            parser
+                .screen()
+                .contents()
+                .lines()
+                .any(|line| line.trim() == startup.marker)
+        });
+        if marker_seen {
+            let bytes = self.startup_input.take().map(|startup| startup.bytes);
+            if let Some(bytes) = bytes {
+                self.write_input(&bytes);
+            }
+            return;
+        }
+        let probe = self.startup_input.as_mut().and_then(|startup| {
+            let last_probe = startup.last_probe?;
+            if last_probe.elapsed() < startup.probe_interval {
+                return None;
+            }
+            startup.last_probe = Some(Instant::now());
+            Some(format!("echo {}\r", startup.marker))
+        });
+        if let Some(probe) = probe {
+            self.write_input(probe.as_bytes());
+        }
+    }
+
     pub fn send_bytes(&mut self, bytes: &[u8]) {
+        if let Some(startup) = self.startup_input.as_mut() {
+            startup.bytes.extend_from_slice(bytes);
+            startup.last_probe.get_or_insert_with(Instant::now);
+            self.flush_startup_input();
+            return;
+        }
+        self.write_input(bytes);
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) {
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }
 
     /// The shell's exit code, if it has exited and the OS reported one —
-    /// available once the reader thread has seen EOF (watch-on-exit time).
+    /// available once the process watcher has reported exit.
     pub fn exit_code(&mut self) -> Option<i32> {
-        self.child.try_wait().ok().flatten().map(|s| s.exit_code() as i32)
+        self.exit_code.lock().ok().and_then(|code| *code)
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {

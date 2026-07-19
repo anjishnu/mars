@@ -41,7 +41,7 @@ Three ideas shape everything:
    (standalone)        (sessions by default)             (headless CI)
         │                        │                            │
         │             ┌──────────┴──────────┐                 │
-        │             │ client   ⇄  daemon  │ Unix socket:    │
+        │             │ client   ⇄  daemon  │ local control:  │
         │             │ (TTY)      (App)    │ ClientFrame /   │
         │             └──────────┬──────────┘ ServerFrame     │
         ▼                        ▼                            ▼
@@ -68,7 +68,7 @@ Three ideas shape everything:
 | Rendering | `ui.rs` | 1,370 |
 | Data model | `buffer.rs`, `pane.rs`, `layout.rs`, `tab.rs`, `mode.rs` | 460 |
 | Command surface | `palette.rs`, `config.rs`, `tuning.rs` | 1,060 |
-| Subsystems | `terminal.rs`, `agent.rs`, `session.rs`, `project.rs`, `banner.rs` | 1,450 |
+| Subsystems | `terminal.rs`, `agent.rs`, `session.rs`, `sys/`, `project.rs`, `banner.rs` | 1,450 |
 | Memory (feature `memory`, default-on) | `retrieval.rs` (`retrieval_stub.rs` when off) | 700 |
 
 Dependencies point downward-ish: `main` → `session`/`app`; `session` → `app`;
@@ -256,14 +256,17 @@ Five small files, deliberately dumb:
 
 ### `terminal.rs` — PTY panes
 
-`spawn` runs `$SHELL` on a `portable-pty` PTY and pumps its output into a
-`vt100::Parser` on a dedicated reader thread, signaling the main loop via an
-mpsc `TermEvent::Output`/`Exited` only to trigger a repaint. **The parser and
-shell run whether or not anyone is watching** — this one property is what makes
-session detach free; the daemon needs no special handling for terminals.
+`spawn` runs the platform shell on a `portable-pty` PTY and pumps its output into
+a `vt100::Parser` on a dedicated reader thread. A separate process watcher owns and
+polls the child, handles pane-close kill requests, and emits `TermEvent::Exited`
+after a bounded final-output drain; this is required because ConPTY can keep its
+output pipe open after the child exits. **The parser and shell run whether or not
+anyone is watching** — this property is what makes session detach free.
 `Term` also owns scrollback view state (`scroll_view`, `scroll_to_live`) and
 `history_tail(lines)` — the method that pages back through vt100 scrollback
 (and restores the live view) to satisfy the agent's `NEED: scrollback` requests.
+Every fresh terminal buffers input until a recognized prompt or retryable
+shell-readiness marker proves that profile startup has completed.
 
 ### `agent.rs` — the LLM layer
 
@@ -291,12 +294,34 @@ directive** on the final line:
 `strip_reasoning` removes `<think>…</think>` blocks from reasoning models
 (Qwen3, DeepSeek-R1) on every response.
 
+### `broker.rs` + `ssh.rs` — key-never-leaves-home
+
+`broker.rs` owns the portable JSON request protocol, the `mars keyd` service, and
+the remote chat proxy. keyd listens through `sys::control`: a protected Unix
+socket on Unix or token-authenticated loopback TCP on Windows.
+
+`ssh.rs` owns system-OpenSSH lifecycle and remote POSIX command construction.
+Unix retains connection multiplexing. A Windows home uses a per-invocation
+capability relay and `-R remote-unix-socket:local-tcp`; the relay authenticates
+the remote bytes, then opens the protected local keyd channel. The current socket
+and capability travel in the session `Hello`, so reattaching a persistent remote
+daemon replaces its dead prior tunnel route. SSH child environments explicitly
+remove provider credentials before OpenSSH can apply user `SendEnv` rules. A
+separate prelude stages the embedded installer and runs it only for a missing or
+handoff-incompatible remote Mars; Windows may therefore authenticate twice.
+
 ### `session.rs` — persistence as a process split
 
-The tmux-style client/server implementation. Wire protocol: newline-delimited
-JSON frames over a Unix socket in `$TMPDIR/mars-<uid>/<name>.sock` (mode 0700).
-Client→server is `ClientFrame` — `Hello{cols,rows,version}` (strict version
-handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
+The tmux-style client/server implementation. The wire protocol is newline-delimited
+JSON over a platform-local control stream: a mode-0700 Unix-domain socket on Unix,
+or nonce/HMAC mutually-authenticated loopback TCP with a rendezvous file on Windows. Addresses
+normally live under the platform temp directory in `mars-<user-tag>`; the
+`MARS_RUNTIME_DIR` base override makes selfcheck isolation explicit.
+Control probes distinguish live, definitively dead, and indeterminate endpoints,
+so an upgrade or authentication timeout never unlinks a live daemon's address.
+Client→server is `ClientFrame` — `Hello{cols,rows,version,broker_*}` (strict
+protocol-qualified version handshake plus optional live SSH broker handoff),
+`Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
 `Status`/`Kill`/`Rename` used by `mars ls`/`kill`/`rename`. Server→client is
 `ServerFrame` — `Output{b64}` (one rendered frame's ANSI bytes), `Exit{message}`,
 `Status`.
@@ -310,15 +335,18 @@ handshake), `Key`/`Mouse`/`Paste`/`Resize`, plus one-shot control frames
   autosave, and watch summaries alive while detached. Attach triggers
   `App::on_attach` (the W7 briefing diff); disconnect triggers `on_detach` +
   autosave. Generation counters on connections guard against a stale client's
-  disconnect tearing down its successor.
+  disconnect or input affecting its successor. The one-shot `BrokerRoute`
+  control frame lets Mars subprocesses in persistent PTYs resolve the current
+  attach's socket and capability rather than their inherited environment; an
+  immutable instance ID keeps that lookup valid across session renames.
 - **`client_main`**: owns the real TTY (raw mode, alt screen, mouse, bracketed
   paste, kitty flags), one thread pumping `Output` frames to stdout, one loop
   serializing input events to the socket. One client per session; a new attach
   sends the old client a clean takeover `Exit`.
 - **`session_main`**: attach-if-alive, else spawn `mars --server <name>` fully
-  detached (`setsid`, stdio → `~/.local/state/mars/<name>.log` — the postmortem
-  file), wait for the socket, attach. Live rename moves the socket *file*; the
-  bound listener follows the inode, so attached clients keep working.
+  detached (`setsid` on Unix, detached process flags on Windows; stdio goes to the
+  per-session postmortem log), wait for the address, attach. Live rename moves the
+  address file without disturbing the already-bound listener or attached clients.
 - **TTY hygiene**: `sanitize_tty` (idempotent raw-mode repair) and a panic hook
   that restores the terminal before the panic message prints.
 
