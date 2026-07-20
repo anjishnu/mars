@@ -1401,7 +1401,8 @@ fn render_bar_dropdown(
 ) -> Option<Rect> {
     let palette = app.palette.as_ref()?;
 
-    let items = palette.visible_items(&app.frecency);
+    // ONE source: surfaces that need you (Tier-2 board) lead the launcher/fuzzy rows.
+    let items = app.bar_rows();
     if items.is_empty() {
         return None;
     }
@@ -1445,6 +1446,37 @@ fn render_bar_dropdown(
         // unhighlighted Enter never fires a row.
         let selected = palette.navigated && idx == palette.selected;
         let item_bg  = if selected { Color::DarkGray } else { Color::Reset };
+
+        // Tier-2 surface row: a live pane that needs you. A different skeleton from
+        // the launcher rows — verdict stripe+glyph, name, why-line, and a right-
+        // aligned "tab · age  ↵ jump" — so the board block reads apart from the
+        // command list below it without needing a divider. The verdict color comes
+        // from the same `verdict_style` seam as the tab labels and pane borders.
+        if let ItemKind::Surface(s) = &row.kind {
+            let (glyph, vcolor) = verdict_style(app, s.verdict).unwrap_or(("•", Color::White));
+            let mut spans: Vec<Span> = vec![
+                Span::styled("▎", Style::default().fg(vcolor).bg(item_bg)),
+                Span::styled(format!("{glyph} "), Style::default().fg(vcolor).bg(item_bg).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", row.label),
+                    Style::default().fg(if selected { vcolor } else { Color::White }).bg(item_bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if row.description.is_empty() { String::new() } else { format!("· {} ", row.description) },
+                    Style::default().fg(Color::DarkGray).bg(item_bg),
+                ),
+            ];
+            let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
+            let meta = format!("{}{}  ↵ jump ", s.tab_name, age);
+            let left_w: usize = spans.iter().map(|sp| sp.content.chars().count()).sum();
+            let meta_w = meta.chars().count();
+            let pad = (inner.width as usize).saturating_sub(left_w + meta_w);
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(item_bg)));
+            spans.push(Span::styled(meta, Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(item_bg)));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
         let has_sub  = matches!(row.kind, ItemKind::Submenu(_));
 
         // Two teaching columns: the IN-BAR quick key first and chip-styled —
@@ -1452,11 +1484,11 @@ fn render_bar_dropdown(
         // looked up live (§5.3: show the key on every menu row).
         let quick = match &row.kind {
             ItemKind::Run(a) => crate::palette::bar_quick_key(a),
-            ItemKind::Submenu(_) => None,
+            _ => None,
         };
         let binding = match &row.kind {
             ItemKind::Run(a) => app.keys.binding_for(a).unwrap_or_default(),
-            ItemKind::Submenu(_) => String::new(),
+            _ => String::new(),
         };
 
         let desc = if row.description.is_empty() {

@@ -618,6 +618,103 @@ impl App {
             .unwrap_or(Verdict::Context)
     }
 
+    /// The Tier-2 board: live workspace surfaces that need you, ranked needs-you
+    /// first, injected ahead of the launcher when the command bar's query is empty.
+    /// Only CURRENT, actionable states lead — Blocked/Failed/Running — never idle or
+    /// a finished-Done job (Done would silt the bar; the tab labels and the bottom
+    /// summary already carry it). Built fresh from the `pane_verdict` seam every
+    /// keystroke; no new state, the same enumeration the bottom summary runs.
+    fn bar_surface_rows(&self) -> Vec<crate::palette::PaletteRow> {
+        use crate::briefing::Verdict;
+        use crate::palette::{ItemKind, PaletteRow, SurfaceRef};
+        let ms = self.tuning.poll_interval_ms.max(1);
+        let now = self.frame_tick;
+        let mut ranked: Vec<(u8, PaletteRow)> = Vec::new();
+        for (ti, tab) in self.tabs.iter().enumerate() {
+            for pid in tab.layout.pane_ids() {
+                let v = self.pane_verdict(pid);
+                if !matches!(v, Verdict::Blocked | Verdict::Failed | Verdict::Running) {
+                    continue;
+                }
+                let (name, why, age) = self.surface_row_parts(pid, now, ms);
+                ranked.push((v.rank(), PaletteRow {
+                    label: name,
+                    kind: ItemKind::Surface(SurfaceRef {
+                        pane_id: pid,
+                        tab_index: ti,
+                        tab_name: tab.name.clone(),
+                        verdict: v,
+                        age_secs: age,
+                    }),
+                    description: why,
+                }));
+            }
+        }
+        ranked.sort_by(|a, b| b.0.cmp(&a.0)); // needs-you first (stable within a rank)
+        ranked.into_iter().map(|(_, r)| r).collect()
+    }
+
+    /// Name / why-snippet / age for one surface row, from its terminal + watch.
+    fn surface_row_parts(&self, pid: crate::pane::PaneId, now: u64, ms: u64) -> (String, String, u64) {
+        let pane = self.panes.get(&pid);
+        let tid = match pane.map(|p| &p.content) {
+            Some(PaneContent::Terminal(t)) => Some(*t),
+            _ => None,
+        };
+        let name = pane
+            .and_then(|p| p.title.clone())
+            .unwrap_or_else(|| "terminal".to_string());
+        let w = tid.and_then(|t| self.watches.get(&t));
+        let why = if let Some(v) = w.and_then(|w| w.verdict.as_ref()) {
+            v.lines().next().unwrap_or("").trim().to_string()
+        } else if let Some(t) = tid.and_then(|t| self.terms.get(&t)) {
+            if t.exited {
+                match t.exit_code() {
+                    Some(c) if c != 0 => format!("exited · code {c}"),
+                    _ => "done".to_string(),
+                }
+            } else {
+                "working…".to_string()
+            }
+        } else {
+            String::new()
+        };
+        let age = w
+            .map(|w| w.run_started_tick)
+            .filter(|s| *s > 0)
+            .map(|s| now.saturating_sub(s) * ms / 1000)
+            .unwrap_or(0);
+        (name, why, age)
+    }
+
+    /// The full ranked row list the bar RENDERS and DISPATCHES — surfaces that need
+    /// you (empty query only) ahead of the launcher/fuzzy results. One source, so
+    /// the render and the Enter dispatch index into the identical list.
+    pub fn bar_rows(&self) -> Vec<crate::palette::PaletteRow> {
+        let Some(p) = self.palette.as_ref() else { return Vec::new() };
+        let mut rows = Vec::new();
+        if p.query.is_empty() {
+            rows.extend(self.bar_surface_rows());
+        }
+        rows.extend(p.visible_items(&self.frecency));
+        rows
+    }
+
+    /// `↵` (or a click) on a surface row — the safe universal verb: focus its tab +
+    /// pane and land in it (cursor in the terminal, ready to answer a blocked
+    /// prompt). It never auto-answers or reruns — those stay behind the confirm gate,
+    /// per the destructive-action rule; jump the user TO the answer, don't press it.
+    fn jump_to_surface(&mut self, s: crate::palette::SurfaceRef) {
+        self.palette = None;
+        if s.tab_index < self.tabs.len() {
+            self.active_tab = s.tab_index;
+            if self.tabs[s.tab_index].layout.pane_ids().contains(&s.pane_id) {
+                self.tabs[s.tab_index].focused_pane = s.pane_id;
+            }
+        }
+        self.mode = self.mode_for_focused_pane();
+    }
+
     pub fn focused_buf_id(&self) -> BufferId {
         match self.focused_pane().content {
             PaneContent::Editor(buf_id) => buf_id,
@@ -2270,6 +2367,14 @@ impl App {
         // composer opens unengaged — typing or arrowing selects the top match
         // (registry-first Enter), and an unengaged Enter is a no-op.
         p.navigated = self.bar_return != Mode::Terminal;
+        // Tier 2: when a surface needs you, it LEADS the empty query and is visibly
+        // pre-selected (row 0), so the one chord you already press lands you on it —
+        // even from a terminal. Honest because the highlight is visible (the "no
+        // invisible Enter" rule is about unhighlighted rows). Quiet → unchanged.
+        if !self.bar_surface_rows().is_empty() {
+            p.navigated = true;
+            p.selected = 0;
+        }
         self.palette = Some(p);
         self.mode = Mode::Bar;
         self.shell_ready = false;
@@ -2727,10 +2832,7 @@ impl App {
     }
 
     fn handle_bar_command(&mut self, key: KeyEvent, ctrl: bool, none: bool, shift: bool) {
-        let items_len = {
-            let frec = &self.frecency;
-            self.palette.as_ref().map(|p| p.visible_items(frec).len()).unwrap_or(0)
-        };
+        let items_len = self.bar_rows().len();
 
         match key.code {
             KeyCode::Esc => {
@@ -2750,14 +2852,9 @@ impl App {
                 if let Some(p) = self.palette.as_mut() { p.select_down(items_len); }
             }
             KeyCode::Enter => {
-                let frec = &self.frecency;
-                let (kind, navigated) = self
-                    .palette
-                    .as_ref()
-                    .map(|p| {
-                        (p.visible_items(frec).into_iter().nth(p.selected).map(|r| r.kind), p.navigated)
-                    })
-                    .unwrap_or((None, false));
+                let selected = self.palette.as_ref().map(|p| p.selected).unwrap_or(0);
+                let navigated = self.palette.as_ref().map(|p| p.navigated).unwrap_or(false);
+                let kind = self.bar_rows().into_iter().nth(selected).map(|r| r.kind);
                 // REGISTRY-FIRST (2026-07 ruling, reversing the earlier
                 // shell-first one): typing pre-selects the top match and Enter
                 // fires it — commands stay one keystroke away. Only when
@@ -3563,6 +3660,7 @@ impl App {
                 self.mode = self.bar_return.clone();
                 self.run_action_from_bar(action);
             }
+            Some(ItemKind::Surface(s)) => self.jump_to_surface(s),
             None => {}
         }
     }

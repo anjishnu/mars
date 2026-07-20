@@ -200,6 +200,22 @@ pub fn bar_quick_legend() -> &'static [(&'static str, &'static str)] {
 pub enum ItemKind {
     Run(Action),
     Submenu(&'static str), // name passed to menu_for()
+    /// A live workspace surface (Tier-2 board): a pane running work that needs
+    /// you, injected ahead of the launcher when the query is empty. `↵` jumps to
+    /// it. Built fresh each keystroke from the `pane_verdict` seam — never static.
+    Surface(SurfaceRef),
+}
+
+/// A snapshot of one workspace surface, enough to rank it, render its row, and
+/// jump to it. The verdict is snapshotted at build time so ranking and rendering
+/// can never disagree within a frame.
+#[derive(Debug, Clone)]
+pub struct SurfaceRef {
+    pub pane_id: crate::pane::PaneId,
+    pub tab_index: usize,
+    pub tab_name: String,
+    pub verdict: crate::briefing::Verdict,
+    pub age_secs: u64,
 }
 
 pub struct MenuItem {
@@ -332,6 +348,7 @@ fn all_items() -> Vec<(String, ItemKind, String)> {
                     result.push((subitem.label.to_string(), subitem.kind, subitem.description.to_string()));
                 }
             }
+            ItemKind::Surface(_) => {} // never appears in a static menu (built live in app.rs)
         }
     }
     result
