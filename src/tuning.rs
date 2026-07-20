@@ -34,6 +34,8 @@ pub struct Tuning {
     pub theme_chip_fg: [u8; 3],
     pub theme_terminal: [u8; 3],
     pub theme_healthy: [u8; 3],
+    pub theme_status_failed: [u8; 3],
+    pub theme_status_blocked: [u8; 3],
     /// Show the line-number gutter in editor panes (position always lives in
     /// the status bar).
     pub line_numbers: bool,
@@ -90,6 +92,8 @@ impl Default for Tuning {
             theme_chip_fg: [31, 20, 16],          // dark text on accent chips
             theme_terminal: [13, 115, 119],       // #0D7377 dark teal
             theme_healthy: [61, 174, 114],        // #3DAE72 healthy green (working/running)
+            theme_status_failed: [217, 83, 79],   // #D9534F conventional error red (failed)
+            theme_status_blocked: [230, 165, 60], // #E6A53C conventional amber (blocked / waiting on you)
             line_numbers: false,
             auto_name_secs: 45,
             agent_max_tokens: 1024, // headroom for reasoning models (Qwen3/R1)
@@ -215,6 +219,12 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
             "RGB for a HEALTHY / running surface in the workspace monitor and \
              briefing — a calm green you can dismiss at a glance, distinct from \
              teal (done/win) and the warm danger hues.")),
+        ("theme_status_failed", knob(json!(d.theme_status_failed),
+            "RGB for a FAILED surface (✗) — conventional error red, the loudest \
+             status hue.")),
+        ("theme_status_blocked", knob(json!(d.theme_status_blocked),
+            "RGB for a BLOCKED surface (⏸) waiting on your input — conventional \
+             amber, distinct from the red of an outright failure.")),
         ("line_numbers", knob(json!(d.line_numbers),
             "Show the line-number gutter in editor panes. The cursor position \
              is always in the status bar, so this defaults to off for width.")),
@@ -385,6 +395,8 @@ pub fn load() -> Tuning {
         t.theme_chip_fg         = get_rgb(&map, "theme_chip_fg", t.theme_chip_fg);
         t.theme_terminal        = get_rgb(&map, "theme_terminal", t.theme_terminal);
         t.theme_healthy         = get_rgb(&map, "theme_healthy", t.theme_healthy);
+        t.theme_status_failed   = get_rgb(&map, "theme_status_failed", t.theme_status_failed);
+        t.theme_status_blocked  = get_rgb(&map, "theme_status_blocked", t.theme_status_blocked);
         t.line_numbers = map
             .get("line_numbers")
             .and_then(|e| e.value.as_bool())

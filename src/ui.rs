@@ -231,63 +231,113 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
 /// picks its own recede (a readable label, a dim border, or nothing at all).
 fn verdict_style(app: &App, v: crate::briefing::Verdict) -> Option<(&'static str, Color)> {
     use crate::briefing::Verdict;
+    // Conventional semantic palette (obvious at a glance): amber=blocked/waiting,
+    // red=failed, green=running, teal=done, gray=idle. Colorblind-safe because the
+    // glyph disambiguates the hue.
     Some(match v {
-        Verdict::Blocked => ("⏸", rgb(app.tuning.theme_accent)),        // needs you (clay)
-        Verdict::Failed  => ("✗", rgb(app.tuning.theme_accent_bright)), // failed (sand)
-        Verdict::Running => ("●", rgb(app.tuning.theme_healthy)),       // working (calm green)
-        Verdict::Done    => ("✓", rgb(app.tuning.theme_terminal)),      // done (teal)
-        Verdict::Context => return None,                               // idle
+        Verdict::Blocked => ("⏸", rgb(app.tuning.theme_status_blocked)), // needs you (amber)
+        Verdict::Failed  => ("✗", rgb(app.tuning.theme_status_failed)),  // failed (red)
+        Verdict::Running => ("●", rgb(app.tuning.theme_healthy)),        // working (green)
+        Verdict::Done    => ("✓", rgb(app.tuning.theme_terminal)),       // done (teal)
+        Verdict::Context => return None,                                // idle (gray)
     })
+}
+
+/// A pane's display name for the top bar and the board: an editor's filename (with a
+/// dirty dot), or a terminal's title / running command / "shell" — never a bare
+/// "terminal". This is what gives editor panes and split terminals a real identity.
+fn pane_name(app: &App, pane_id: PaneId) -> String {
+    let Some(pane) = app.panes.get(&pane_id) else { return "—".to_string() };
+    match pane.content {
+        PaneContent::Editor(buf_id) => {
+            let b = app.buffers.get(&buf_id);
+            let name = b.map(|b| b.name.clone()).unwrap_or_else(|| "buffer".to_string());
+            if b.map(|b| b.modified).unwrap_or(false) { format!("{name} ●") } else { name }
+        }
+        PaneContent::Terminal(tid) => {
+            if let Some(t) = pane.title.as_deref() {
+                return t.to_string();
+            }
+            if let Some(cmd) = app.watches.get(&tid).and_then(|w| w.last_command.as_ref()) {
+                if let Some(w0) = cmd.split_whitespace().next() {
+                    return w0.rsplit('/').next().unwrap_or(w0).to_string();
+                }
+            }
+            "shell".to_string()
+        }
+    }
+}
+
+/// Cross-workspace status counts (needs-you first) for the top-right corner counter:
+/// one entry per non-empty class. Idle panes don't count.
+fn status_counts(app: &App) -> Vec<(crate::briefing::Verdict, u32)> {
+    use crate::briefing::Verdict;
+    let mut c: std::collections::BTreeMap<Verdict, u32> = std::collections::BTreeMap::new();
+    for tab in &app.tabs {
+        for pid in tab.layout.pane_ids() {
+            let v = app.pane_verdict(pid);
+            if matches!(v, Verdict::Context) { continue; }
+            *c.entry(v).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<_> = c.into_iter().collect();
+    out.sort_by(|a, b| b.0.rank().cmp(&a.0.rank())); // needs-you first
+    out
 }
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    let mut tab_w = 0usize; // running display width of the tab section
+    let dim = Style::default().fg(Color::DarkGray);
     for (i, tab) in app.tabs.iter().enumerate() {
-        let buf_name = {
-            let pane = app.panes.get(&tab.focused_pane);
-            pane.and_then(|p| {
-                if let PaneContent::Editor(buf_id) = p.content {
-                    app.buffers.get(&buf_id).map(|b| b.name.as_str())
-                } else {
-                    Some("terminal")
-                }
-            })
-            .unwrap_or(&tab.name)
-        };
-        // The surface-status seam: the tab's worst-pane verdict colors the WHOLE
-        // label (one pop-out dimension — no dot to hunt) with a colorblind-safe
-        // glyph. Idle stays the readable default so quiet tabs recede, not vanish.
-        let status = app.tab_status(tab);
-        let (glyph, status_color) = match verdict_style(app, status) {
-            Some((g, c)) => (format!("{g} "), c),
-            None => (String::new(), rgb(app.tuning.theme_accent_bright)), // idle (readable, no glyph)
-        };
-        let label = format!(" {glyph}{} {} ", tab.name, buf_name);
-        tab_w += label.chars().count();
+        let id = i + 1;
         if i == app.active_tab {
-            // Focused tab: you're looking at it, so its status is de-emphasized —
-            // the chrome highlight wins (the glyph still hints a split's worst pane).
+            // Active workspace: its id, then ONE slot per pane — each colored by its
+            // own verdict, the focused pane bold. This is where editor panes and the
+            // panes of a split finally get individual, named, colored slots.
             spans.push(Span::styled(
-                label,
+                format!(" {id} ▸ "),
                 Style::default()
                     .fg(rgb(app.tuning.theme_chip_fg))
                     .bg(rgb(app.tuning.theme_accent))
                     .add_modifier(Modifier::BOLD),
             ));
+            for (j, pid) in tab.layout.pane_ids().iter().enumerate() {
+                if j > 0 { spans.push(Span::styled(" · ", dim)); }
+                let (glyph, color) = verdict_style(app, app.pane_verdict(*pid))
+                    .unwrap_or(("", rgb(app.tuning.theme_accent_bright)));
+                let g = if glyph.is_empty() { String::new() } else { format!("{glyph} ") };
+                let mut st = Style::default().fg(color);
+                if *pid == tab.focused_pane { st = st.add_modifier(Modifier::BOLD); }
+                spans.push(Span::styled(format!("{g}{}", pane_name(app, *pid)), st));
+            }
+            spans.push(Span::raw(" "));
         } else {
-            spans.push(Span::styled(label, Style::default().fg(status_color)));
+            // Other workspace: a compact chip — id, worst-pane glyph, name — colored
+            // by the tab's aggregate status (idle recedes to a readable default).
+            let (glyph, color) = match verdict_style(app, app.tab_status(tab)) {
+                Some((g, c)) => (format!("{g} "), c),
+                None => (String::new(), rgb(app.tuning.theme_accent_bright)),
+            };
+            let name = if tab.name.is_empty() { pane_name(app, tab.focused_pane) } else { tab.name.clone() };
+            spans.push(Span::styled(format!(" {id} {glyph}{name} "), Style::default().fg(color)));
         }
-        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-        tab_w += 1;
+        spans.push(Span::styled("│", dim));
     }
-
-    // The top-right beacon is gone: the tab LABELS carry per-tab status here, the
-    // pane BORDERS carry per-pane status in the split, and the bottom status bar
-    // carries the cross-workspace aggregate — status now lives where the eyes are,
-    // not stranded in a corner.
-    let _ = tab_w;
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // Top-right corner counter: how many surfaces of each status across ALL
+    // workspaces, needs-you first, each in its class color. Blank when everything is
+    // idle — the honest aggregate the bottom-row dot used to fumble.
+    let counts = status_counts(app);
+    if !counts.is_empty() {
+        let mut cspans: Vec<Span> = Vec::new();
+        for (v, n) in counts {
+            if let Some((g, c)) = verdict_style(app, v) {
+                cspans.push(Span::styled(format!("{g}{n} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(cspans)).alignment(Alignment::Right), area);
+    }
 }
 
 // ── Pane layout ───────────────────────────────────────────────────────────────
@@ -1261,41 +1311,14 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         }
         PaneContent::Terminal(_) => format!("terminal{session} "),
     };
-    // Workspace summary — the aggregate that used to sit in the top-right beacon,
-    // relocated to the bottom bar where the eyes rest. Counts every surface across
-    // ALL tabs (not just this one), needs-you first, then working. Quiet disappears:
-    // nothing renders when nothing needs you (the dark-cockpit doctrine).
-    let (mut nb, mut nf, mut nr) = (0u32, 0u32, 0u32);
-    for tab in &app.tabs {
-        for id in tab.layout.pane_ids() {
-            match app.pane_verdict(id) {
-                crate::briefing::Verdict::Blocked => nb += 1,
-                crate::briefing::Verdict::Failed  => nf += 1,
-                crate::briefing::Verdict::Running => nr += 1,
-                _ => {}
-            }
-        }
-    }
-    let mut right: Vec<Span> = Vec::new();
-    for (n, v) in [
-        (nb, crate::briefing::Verdict::Blocked),
-        (nf, crate::briefing::Verdict::Failed),
-        (nr, crate::briefing::Verdict::Running),
-    ] {
-        if n == 0 { continue; }
-        if let Some((g, c)) = verdict_style(app, v) {
-            right.push(Span::styled(format!("{g}{n} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
-        }
-    }
-    if !right.is_empty() {
-        right.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
-    }
-    right.push(Span::styled(
-        readout,
-        Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
-    ));
+    // The cross-workspace status aggregate lives in the top-right corner counter
+    // (render_tab_bar), not down here — the bottom bar stays the position readout.
     frame.render_widget(
-        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+        Paragraph::new(Line::from(Span::styled(
+            readout,
+            Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right),
         area,
     );
 }

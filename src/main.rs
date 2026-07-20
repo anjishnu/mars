@@ -1298,10 +1298,9 @@ fn selfcheck() -> Result<()> {
     std::fs::remove_file(&tuning_path)?; // restore defaults for any later checks
     println!("[selfcheck] tuning knobs + override .... PASS");
 
-    // 26a2. The workspace summary (bottom status bar): the aggregate that used to
-    //       live in the top-right beacon, relocated to where the eyes rest. Counts
-    //       every surface across all tabs, needs-you first; quiet shows nothing (no
-    //       green "all quiet" lie), and the old beacon is gone from the tab bar.
+    // 26a2. The top-right corner counter: how many surfaces of each status across
+    //       all workspaces, needs-you first; quiet shows nothing (no green "all quiet"
+    //       lie). The lone bottom-row dot is gone — the aggregate lives up here.
     {
         let mut app = App::new(None)?;
         app.handle_key(k(KeyCode::Char('x')))?; // dismiss the splash
