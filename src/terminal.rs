@@ -285,7 +285,7 @@ impl Term {
 
     /// The shell's exit code, if it has exited and the OS reported one —
     /// available once the process watcher has reported exit.
-    pub fn exit_code(&mut self) -> Option<i32> {
+    pub fn exit_code(&self) -> Option<i32> {
         self.exit_code.lock().ok().and_then(|code| *code)
     }
 

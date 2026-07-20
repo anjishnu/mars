@@ -228,6 +228,21 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
 
 // ── Tab bar ──────────────────────────────────────────────────────────────────
 
+/// The one place a surface verdict becomes a glyph + semantic color. Tab labels,
+/// pane borders, and the workspace summary all read this, so a status means the
+/// same thing everywhere it shows. Returns None for idle (Context) — each caller
+/// picks its own recede (a readable label, a dim border, or nothing at all).
+fn verdict_style(app: &App, v: crate::briefing::Verdict) -> Option<(&'static str, Color)> {
+    use crate::briefing::Verdict;
+    Some(match v {
+        Verdict::Blocked => ("⏸", rgb(app.tuning.theme_accent)),        // needs you (clay)
+        Verdict::Failed  => ("✗", rgb(app.tuning.theme_accent_bright)), // failed (sand)
+        Verdict::Running => ("●", rgb(app.tuning.theme_healthy)),       // working (calm green)
+        Verdict::Done    => ("✓", rgb(app.tuning.theme_terminal)),      // done (teal)
+        Verdict::Context => return None,                               // idle
+    })
+}
+
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     let mut tab_w = 0usize; // running display width of the tab section
@@ -243,9 +258,19 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             })
             .unwrap_or(&tab.name)
         };
-        let label = format!(" {} {} ", tab.name, buf_name);
+        // The surface-status seam: the tab's worst-pane verdict colors the WHOLE
+        // label (one pop-out dimension — no dot to hunt) with a colorblind-safe
+        // glyph. Idle stays the readable default so quiet tabs recede, not vanish.
+        let status = app.tab_status(tab);
+        let (glyph, status_color) = match verdict_style(app, status) {
+            Some((g, c)) => (format!("{g} "), c),
+            None => (String::new(), rgb(app.tuning.theme_accent_bright)), // idle (readable, no glyph)
+        };
+        let label = format!(" {glyph}{} {} ", tab.name, buf_name);
         tab_w += label.chars().count();
         if i == app.active_tab {
+            // Focused tab: you're looking at it, so its status is de-emphasized —
+            // the chrome highlight wins (the glyph still hints a split's worst pane).
             spans.push(Span::styled(
                 label,
                 Style::default()
@@ -254,38 +279,17 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            // Readable (not near-invisible DarkGray) so you can see inactive tab names.
-            spans.push(Span::styled(
-                label,
-                Style::default().fg(rgb(app.tuning.theme_accent_bright)),
-            ));
+            spans.push(Span::styled(label, Style::default().fg(status_color)));
         }
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
         tab_w += 1;
     }
 
-    // The workspace beacon — the same tab-bar line, right-aligned via a pad span
-    // (one Paragraph, so it survives the daemon's incremental renderer): a calm
-    // green "● all quiet" when nothing needs you, a warm ⏸N/✗N when something does.
-    let nf = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Failure)).count();
-    let nb = app.notices.iter().filter(|n| matches!(n.kind, crate::app::NoticeKind::Blocked)).count();
-    let (beacon_text, beacon_style) = if nf == 0 && nb == 0 {
-        ("● all quiet ".to_string(), Style::default().fg(rgb(app.tuning.theme_healthy)))
-    } else {
-        let mut parts = Vec::new();
-        if nb > 0 { parts.push(format!("⏸{nb}")); }
-        if nf > 0 { parts.push(format!("✗{nf}")); }
-        (
-            format!("{} ", parts.join(" ")),
-            Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD),
-        )
-    };
-    let beacon_w = beacon_text.chars().count();
-    let total = area.width as usize;
-    if total > tab_w + beacon_w {
-        spans.push(Span::raw(" ".repeat(total - tab_w - beacon_w)));
-        spans.push(Span::styled(beacon_text, beacon_style));
-    }
+    // The top-right beacon is gone: the tab LABELS carry per-tab status here, the
+    // pane BORDERS carry per-pane status in the split, and the bottom status bar
+    // carries the cross-workspace aggregate — status now lives where the eyes are,
+    // not stranded in a corner.
+    let _ = tab_w;
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -986,26 +990,41 @@ fn render_terminal_pane(
 
     let exited = app.terms.get(&term_id).map(|t| t.exited).unwrap_or(true);
     let offset = app.terms.get(&term_id).map(|t| t.view_offset()).unwrap_or(0);
-    let border_style = if exited {
-        Style::default().fg(rgb(app.tuning.theme_accent_dark))
-    } else if focused {
+    // Per-pane status: the surface's own verdict colors the glyph (shown even on the
+    // focused pane — the eyes are here) and, when this pane is NOT focused, its
+    // border, so a job that needs you glows warm across a split without stealing the
+    // focus color from the pane you're actually in.
+    let (glyph, vcolor) = verdict_style(app, app.pane_verdict(pane_id)).unwrap_or(("", Color::DarkGray));
+    let border_style = if focused {
         Style::default().fg(rgb(app.tuning.theme_terminal))
+    } else if !glyph.is_empty() {
+        Style::default().fg(vcolor)
+    } else if exited {
+        Style::default().fg(rgb(app.tuning.theme_accent_dark))
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let base = pane.title.as_deref().unwrap_or("terminal");
-    let title = if exited {
-        format!(" {base} · exited ")
+    let suffix = if exited {
+        " · exited".to_string()
     } else if offset > 0 {
-        format!(" {base} ↑{offset} ")
+        format!(" ↑{offset}")
     } else {
-        format!(" {base} ")
+        String::new()
     };
+    let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
+    let mut title_spans: Vec<Span> = Vec::new();
+    if !glyph.is_empty() {
+        title_spans.push(Span::styled(
+            format!(" {glyph} "),
+            Style::default().fg(vcolor).add_modifier(Modifier::BOLD),
+        ));
+        title_spans.push(Span::styled(format!("{base}{suffix} "), Style::default().add_modifier(title_mod)));
+    } else {
+        title_spans.push(Span::styled(format!(" {base}{suffix} "), Style::default().add_modifier(title_mod)));
+    }
     let block = Block::default()
-        .title(Span::styled(
-            title,
-            Style::default().add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
-        ))
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(rect);
@@ -1245,12 +1264,41 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         }
         PaneContent::Terminal(_) => format!("terminal{session} "),
     };
+    // Workspace summary — the aggregate that used to sit in the top-right beacon,
+    // relocated to the bottom bar where the eyes rest. Counts every surface across
+    // ALL tabs (not just this one), needs-you first, then working. Quiet disappears:
+    // nothing renders when nothing needs you (the dark-cockpit doctrine).
+    let (mut nb, mut nf, mut nr) = (0u32, 0u32, 0u32);
+    for tab in &app.tabs {
+        for id in tab.layout.pane_ids() {
+            match app.pane_verdict(id) {
+                crate::briefing::Verdict::Blocked => nb += 1,
+                crate::briefing::Verdict::Failed  => nf += 1,
+                crate::briefing::Verdict::Running => nr += 1,
+                _ => {}
+            }
+        }
+    }
+    let mut right: Vec<Span> = Vec::new();
+    for (n, v) in [
+        (nb, crate::briefing::Verdict::Blocked),
+        (nf, crate::briefing::Verdict::Failed),
+        (nr, crate::briefing::Verdict::Running),
+    ] {
+        if n == 0 { continue; }
+        if let Some((g, c)) = verdict_style(app, v) {
+            right.push(Span::styled(format!("{g}{n} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
+        }
+    }
+    if !right.is_empty() {
+        right.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
+    }
+    right.push(Span::styled(
+        readout,
+        Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
+    ));
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            readout,
-            Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Right),
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
         area,
     );
 }

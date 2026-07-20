@@ -25,6 +25,20 @@ impl Verdict {
             Verdict::Context => "·",
         }
     }
+
+    /// Live-attention rank — needs-you first. The ONE order every live view sorts
+    /// by: the tab bar's worst-pane aggregate, the bottom summary, and the
+    /// command-bar board. (Deliberately distinct from the derived `Ord`, which is
+    /// Failed-first — tuned for the arrival briefing's "what happened" display.)
+    pub fn rank(self) -> u8 {
+        match self {
+            Verdict::Blocked => 5, // needs you now — a keystroke unblocks it
+            Verdict::Failed  => 4,
+            Verdict::Running => 3,
+            Verdict::Done    => 2,
+            Verdict::Context => 1,
+        }
+    }
 }
 
 pub struct ReportRow {

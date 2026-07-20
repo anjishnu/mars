@@ -576,6 +576,48 @@ impl App {
         let id = self.focused_pane_id();
         self.panes.get_mut(&id).unwrap()
     }
+    /// The status of one pane's surface — the single source every view (tab label,
+    /// pane border, board row) reads, so no two surfaces of the monitor can ever
+    /// disagree. A terminal's status is its watch verdict (LLM- or tier-0-authored),
+    /// else Running while it produces output, else its exit outcome, else idle.
+    /// Editors carry no run status.
+    pub fn pane_verdict(&self, pane_id: PaneId) -> crate::briefing::Verdict {
+        use crate::briefing::Verdict;
+        let Some(pane) = self.panes.get(&pane_id) else { return Verdict::Context };
+        let tid = match pane.content {
+            PaneContent::Terminal(tid) => tid,
+            PaneContent::Editor(_) => return Verdict::Context,
+        };
+        if let Some(w) = self.watches.get(&tid) {
+            if let Some(v) = &w.verdict {
+                return crate::briefing::classify(v, Verdict::Running);
+            }
+            if w.run_started_tick > 0 {
+                return Verdict::Running; // actively producing output
+            }
+        }
+        if let Some(t) = self.terms.get(&tid) {
+            if t.exited {
+                return match t.exit_code() {
+                    Some(0) | None => Verdict::Done,
+                    Some(_) => Verdict::Failed,
+                };
+            }
+        }
+        Verdict::Context // idle / quiet
+    }
+    /// A tab's aggregate status: worst-wins across its panes, needs-you first — so a
+    /// tab with any blocked/failed pane reads warm even if its other panes are fine.
+    pub fn tab_status(&self, tab: &Tab) -> crate::briefing::Verdict {
+        use crate::briefing::Verdict;
+        tab.layout
+            .pane_ids()
+            .into_iter()
+            .map(|id| self.pane_verdict(id))
+            .max_by_key(|v| v.rank())
+            .unwrap_or(Verdict::Context)
+    }
+
     pub fn focused_buf_id(&self) -> BufferId {
         match self.focused_pane().content {
             PaneContent::Editor(buf_id) => buf_id,

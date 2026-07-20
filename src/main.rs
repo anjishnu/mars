@@ -1298,21 +1298,51 @@ fn selfcheck() -> Result<()> {
     std::fs::remove_file(&tuning_path)?; // restore defaults for any later checks
     println!("[selfcheck] tuning knobs + override .... PASS");
 
-    // 26a2. Phase C — the workspace beacon (tab-bar right edge): dim "all quiet"
-    //       when nothing needs you; a warm ⏸/✗ aggregate when a notice does.
+    // 26a2. The workspace summary (bottom status bar): the aggregate that used to
+    //       live in the top-right beacon, relocated to where the eyes rest. Counts
+    //       every surface across all tabs, needs-you first; quiet shows nothing (no
+    //       green "all quiet" lie), and the old beacon is gone from the tab bar.
     {
         let mut app = App::new(None)?;
         app.handle_key(k(KeyCode::Char('x')))?; // dismiss the splash
+        app.open_terminal(); // focused pane → a terminal surface
+        let tid = *app.terms.keys().next().expect("open_terminal makes a terminal");
         let mut term = Terminal::new(TestBackend::new(100, 20))?;
         term.draw(|f| ui::render(f, &mut app))?;
-        assert!(screen_text(&term).contains("all quiet"),
-            "beacon should read 'all quiet' when nothing needs you");
-        app.notices.push(app::Notice { text: "failed: boom".into(), kind: app::NoticeKind::Failure });
+        assert!(!screen_text(&term).contains("all quiet"),
+            "the top-right beacon must be gone — quiet shows nothing");
+        // A blocked surface counts into the bottom summary as ⏸1.
+        app.watches.entry(tid).or_default().verdict =
+            Some("blocked: overwrite runs/best.pt? [y/N]".into());
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("✗1") && !t.contains("all quiet"),
-            "beacon should light warm (✗1) on a failure notice: {t}");
-        println!("[selfcheck] workspace beacon ......... PASS");
+        assert!(t.contains("⏸1"),
+            "a blocked surface must count into the bottom summary (⏸1): {t}");
+        println!("[selfcheck] workspace summary ......... PASS");
+    }
+
+    // 26a3. The surface-status seam: pane/tab verdict is the ONE source the tab
+    //       labels (and later the board + pane borders) render, so no two views of
+    //       the monitor can disagree. Per-tab status colors the WHOLE label.
+    {
+        let mut app = App::new(None)?;
+        app.handle_key(k(KeyCode::Char('x')))?; // dismiss splash
+        app.open_terminal(); // focused pane → a terminal surface
+        let tid = *app.terms.keys().next().expect("open_terminal makes a terminal");
+        // Alive terminal, no watch → idle (Context); the tab reads idle, not a lie.
+        assert_eq!(app.tab_status(app.tab()), briefing::Verdict::Context,
+            "an idle terminal pane must read Context");
+        // A blocked watch verdict propagates pane → tab (worst-wins aggregate)…
+        app.watches.entry(tid).or_default().verdict =
+            Some("blocked: overwrite runs/best.pt? [y/N]".into());
+        assert_eq!(app.pane_verdict(app.focused_pane_id()), briefing::Verdict::Blocked);
+        assert_eq!(app.tab_status(app.tab()), briefing::Verdict::Blocked);
+        // …and the tab bar renders its colorblind-safe glyph.
+        let mut term = Terminal::new(TestBackend::new(80, 20))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(screen_text(&term).contains("⏸"),
+            "a blocked tab must render the ⏸ glyph in the tab bar");
+        println!("[selfcheck] surface status seam ...... PASS");
     }
 
     // 26b. Default gutter is a slim pointer (no numbers); the knob restores
