@@ -1332,6 +1332,20 @@ fn selfcheck() -> Result<()> {
         // Alive terminal, no watch → idle (Context); the tab reads idle, not a lie.
         assert_eq!(app.tab_status(app.tab()), briefing::Verdict::Context,
             "an idle terminal pane must read Context");
+        // Running means producing output NOW, not "ever produced output". A watch
+        // whose run started but whose last output is stale (a shell idling at a
+        // prompt) must read Context — NOT a green Running lie. frame_tick is far
+        // past a stale last_output_tick, so the quiet window has elapsed.
+        app.frame_tick = 100_000;
+        app.watches.entry(tid).or_default().run_started_tick = 1;
+        app.watches.entry(tid).or_default().last_output_tick = 1; // long ago
+        assert_eq!(app.pane_verdict(app.focused_pane_id()), briefing::Verdict::Context,
+            "an idle-at-prompt terminal (stale output) must read Context, not Running");
+        // …but fresh output (last_output_tick ≈ now) is a real Running.
+        app.watches.entry(tid).or_default().last_output_tick = app.frame_tick;
+        assert_eq!(app.pane_verdict(app.focused_pane_id()), briefing::Verdict::Running,
+            "a terminal producing output now must read Running");
+        app.watches.remove(&tid); // reset for the blocked-verdict check below
         // A blocked watch verdict propagates pane → tab (worst-wins aggregate)…
         app.watches.entry(tid).or_default().verdict =
             Some("blocked: overwrite runs/best.pt? [y/N]".into());

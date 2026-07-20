@@ -592,8 +592,17 @@ impl App {
             if let Some(v) = &w.verdict {
                 return crate::briefing::classify(v, Verdict::Running);
             }
+            // Running means producing output RIGHT NOW — not "has ever produced
+            // output." run_started_tick stays set forever (it anchors the duration
+            // clock), so gate on recent activity using the watch's own quiet window;
+            // a shell idling at a prompt has gone quiet and reads as Context, not a
+            // green "running" lie.
             if w.run_started_tick > 0 {
-                return Verdict::Running; // actively producing output
+                let quiet_ticks =
+                    self.tuning.watch_quiet_secs * 1000 / self.tuning.poll_interval_ms.max(1);
+                if self.frame_tick.saturating_sub(w.last_output_tick) < quiet_ticks.max(1) {
+                    return Verdict::Running;
+                }
             }
         }
         if let Some(t) = self.terms.get(&tid) {
