@@ -2395,23 +2395,11 @@ impl App {
         // composer opens unengaged — typing or arrowing selects the top match
         // (registry-first Enter), and an unengaged Enter is a no-op.
         p.navigated = self.bar_return != Mode::Terminal;
-        // Two-pane board: when a workspace needs you (blocked/failed), open with the
-        // Workspaces column focused and its top (needs-you) row selected, so the one
-        // chord you already press lands you on it. Otherwise focus stays on the
-        // Commands launcher (today's behavior). The left column is only shown at all
-        // once there's a fleet to survey (bar_show_workspaces).
+        // The bar always opens on the Commands launcher (its familiar behaviour). The
+        // separate WORKSPACES panel appears beside it when there's a fleet to survey;
+        // ← moves focus into it, → returns.
         p.column = crate::palette::BarColumn::Commands;
         p.sel_ws = 0;
-        if self.bar_show_workspaces() {
-            let needs_you = self.bar_workspace_rows().first().map(|r| {
-                matches!(&r.kind, crate::palette::ItemKind::Surface(s)
-                    if matches!(s.verdict, crate::briefing::Verdict::Blocked | crate::briefing::Verdict::Failed))
-            }).unwrap_or(false);
-            if needs_you {
-                p.column = crate::palette::BarColumn::Workspaces;
-                p.navigated = true;
-            }
-        }
         self.palette = Some(p);
         self.mode = Mode::Bar;
         self.shell_ready = false;

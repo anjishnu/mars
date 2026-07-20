@@ -454,6 +454,7 @@ fn selfcheck() -> Result<()> {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::backend::TestBackend;
 
+
     // Hermetic: an inherited agent key would flip no-key code paths (e.g. the
     // shell composer translates instead of running). Clear them so the suite is
     // deterministic regardless of the caller's environment.
@@ -3641,35 +3642,38 @@ fn selfcheck() -> Result<()> {
             Some("blocked: overwrite runs/best.pt? [y/N]".into());
         app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl-Space → command bar
         assert!(app.mode == mode::Mode::Bar, "Ctrl-Space did not open the bar");
-        // A blocked workspace → the left column shows, and the bar opens focused on it.
-        assert!(app.bar_show_workspaces(), "a blocked workspace must show the Workspaces column");
+        // The bar opens on the familiar Commands launcher; a blocked workspace makes
+        // the separate WORKSPACES panel available beside it.
+        assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Commands,
+            "the bar must open on the Commands launcher (previous behaviour)");
+        assert!(app.bar_show_workspaces(), "a blocked workspace must show the WORKSPACES panel");
         let ws = app.bar_workspace_rows();
         assert!(matches!(ws.first().map(|r| &r.kind), Some(palette::ItemKind::Surface(_))),
-            "the blocked workspace must lead the Workspaces column");
+            "the blocked workspace must lead the WORKSPACES panel");
+        // ← moves focus into the WORKSPACES panel (the new thing), → returns.
+        app.handle_key(k(KeyCode::Left))?;
         assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Workspaces,
-            "the bar must open focused on the Workspaces column when one needs you");
-        // The dropdown renders the verdict glyph, the legend, and the ↵ verb.
-        let mut term = Terminal::new(TestBackend::new(100, 24))?;
+            "← must move focus into the WORKSPACES panel");
+        // The panel renders its title, verdict glyph, the ↵ verb, and the legend.
+        let mut term = Terminal::new(TestBackend::new(110, 24))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("⏸") && t.contains("↵ jump") && t.contains("needs you"),
-            "the board must show the glyph, the jump verb, and the legend: {t}");
-        // ↵ on the Workspaces column jumps to the workspace and closes the bar.
-        app.handle_key(k(KeyCode::Enter))?;
-        assert!(app.palette.is_none(), "↵ on a workspace did not close the bar");
-        // →/← cross columns: from Workspaces, → focuses Commands.
-        app.handle_key(kc(KeyCode::Char(' ')))?;
+        assert!(t.contains("WORKSPACES") && t.contains("↵ jump") && t.contains("blocked"),
+            "the panel must show its title, the jump verb, and the legend: {t}");
         app.handle_key(k(KeyCode::Right))?;
         assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Commands,
-            "→ must move focus to the Commands column");
-        app.handle_key(k(KeyCode::Esc))?; app.handle_key(k(KeyCode::Esc))?;
-        // Quiet + solo: one idle workspace → no left column, the plain launcher.
+            "→ must move focus back to the Commands launcher");
+        // ↵ on the workspace (after ←) jumps and closes the bar.
+        app.handle_key(k(KeyCode::Left))?;
+        app.handle_key(k(KeyCode::Enter))?;
+        assert!(app.palette.is_none(), "↵ on a workspace did not close the bar");
+        // Quiet + solo: one idle workspace → no panel, the plain launcher stands.
         app.watches.get_mut(&tid).unwrap().verdict = None;
         app.terms.get_mut(&tid).unwrap().exited = false;
         app.watches.get_mut(&tid).unwrap().run_started_tick = 0;
         assert!(!app.bar_show_workspaces(),
-            "a solo idle workspace must NOT show the board — the plain launcher stands");
-        println!("[selfcheck] command board (two-pane) . PASS");
+            "a solo idle workspace must NOT show the panel — the plain launcher stands");
+        println!("[selfcheck] workspaces panel + bar .. PASS");
     }
 
     // 35. C-g cancels the command bar from every submode (doctrine §3.4).

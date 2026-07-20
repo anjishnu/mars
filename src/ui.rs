@@ -287,41 +287,29 @@ fn status_counts(app: &App) -> Vec<(crate::briefing::Verdict, u32)> {
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    let dim = Style::default().fg(Color::DarkGray);
     for (i, tab) in app.tabs.iter().enumerate() {
-        let id = i + 1;
+        // The tab's worst-pane verdict colors the whole label (one pop-out dimension,
+        // no dot to hunt) with a colorblind-safe glyph; idle stays a readable default.
+        let (glyph, status_color) = match verdict_style(app, app.tab_status(tab)) {
+            Some((g, c)) => (format!("{g} "), c),
+            None => (String::new(), rgb(app.tuning.theme_accent_bright)),
+        };
+        let name = if tab.name.is_empty() { pane_name(app, tab.focused_pane) } else { tab.name.clone() };
+        let label = format!(" {glyph}{name} ");
         if i == app.active_tab {
-            // Active workspace: its id, then ONE slot per pane — each colored by its
-            // own verdict, the focused pane bold. This is where editor panes and the
-            // panes of a split finally get individual, named, colored slots.
+            // The active tab keeps the chrome highlight (you're looking at it); the
+            // glyph still hints its worst-pane status.
             spans.push(Span::styled(
-                format!(" {id} ▸ "),
+                label,
                 Style::default()
                     .fg(rgb(app.tuning.theme_chip_fg))
                     .bg(rgb(app.tuning.theme_accent))
                     .add_modifier(Modifier::BOLD),
             ));
-            for (j, pid) in tab.layout.pane_ids().iter().enumerate() {
-                if j > 0 { spans.push(Span::styled(" · ", dim)); }
-                let (glyph, color) = verdict_style(app, app.pane_verdict(*pid))
-                    .unwrap_or(("", rgb(app.tuning.theme_accent_bright)));
-                let g = if glyph.is_empty() { String::new() } else { format!("{glyph} ") };
-                let mut st = Style::default().fg(color);
-                if *pid == tab.focused_pane { st = st.add_modifier(Modifier::BOLD); }
-                spans.push(Span::styled(format!("{g}{}", pane_name(app, *pid)), st));
-            }
-            spans.push(Span::raw(" "));
         } else {
-            // Other workspace: a compact chip — id, worst-pane glyph, name — colored
-            // by the tab's aggregate status (idle recedes to a readable default).
-            let (glyph, color) = match verdict_style(app, app.tab_status(tab)) {
-                Some((g, c)) => (format!("{g} "), c),
-                None => (String::new(), rgb(app.tuning.theme_accent_bright)),
-            };
-            let name = if tab.name.is_empty() { pane_name(app, tab.focused_pane) } else { tab.name.clone() };
-            spans.push(Span::styled(format!(" {id} {glyph}{name} "), Style::default().fg(color)));
+            spans.push(Span::styled(label, Style::default().fg(status_color)));
         }
-        spans.push(Span::styled("│", dim));
+        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -1416,88 +1404,19 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Returns the rect it drew (None when nothing rendered) so the cursor-anchored
 /// shell overlay can yield to it instead of drawing on top.
-/// A dim uppercase column header ("WORKSPACES" / "COMMANDS").
-fn column_header(text: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!(" {text}"),
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-    ))
+/// Truncate to a column width with an ellipsis, so names/why-lines never hard-clip.
+fn ellip(s: &str, w: usize) -> String {
+    if w == 0 { return String::new(); }
+    if s.chars().count() <= w { return s.to_string(); }
+    let t: String = s.chars().take(w.saturating_sub(1)).collect();
+    format!("{t}…")
 }
 
-/// The Workspaces column: header + one row per workspace (id · name), verdict glyph
-/// in class color, current workspace marked ‹, age right-aligned. Scrolls to keep
-/// the selection visible.
-fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, active: bool, width: u16, max_rows: usize) -> Vec<Line<'static>> {
-    let mut out = vec![column_header("WORKSPACES")];
-    let body_max = max_rows.saturating_sub(1).max(1);
-    let scroll = if sel >= body_max { sel + 1 - body_max } else { 0 };
-    for (idx, row) in rows.iter().enumerate().skip(scroll).take(body_max) {
-        let s = active && idx == sel;
-        let bg = if s { Color::DarkGray } else { Color::Reset };
-        let (glyph, vcolor, id, cur) = match &row.kind {
-            ItemKind::Surface(sr) => {
-                let (g, c) = verdict_style(app, sr.verdict).unwrap_or(("·", Color::DarkGray));
-                (g, c, sr.tab_index + 1, sr.tab_index == app.active_tab)
-            }
-            _ => ("·", Color::DarkGray, 0, false),
-        };
-        let g = if glyph.is_empty() { "·" } else { glyph };
-        let marker = if cur { "‹" } else { " " };
-        let age = match &row.kind {
-            ItemKind::Surface(sr) if sr.age_secs > 0 => crate::briefing::fmt_secs(sr.age_secs),
-            _ => String::new(),
-        };
-        let mut spans = vec![
-            Span::styled(marker.to_string(), Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(bg).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{g} "), Style::default().fg(vcolor).bg(bg).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("{id} · {}", row.label),
-                Style::default().fg(if s { vcolor } else { Color::White }).bg(bg)
-                    .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
-            ),
-        ];
-        let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
-        let pad = (width as usize).saturating_sub(lw + age.chars().count() + 1);
-        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        spans.push(Span::styled(format!("{age} "), Style::default().fg(Color::DarkGray).bg(bg)));
-        out.push(Line::from(spans));
-    }
-    out
-}
-
-/// The detail strip under the Workspaces column: the highlighted workspace in full
-/// — a rule, then name · status · age, then its why-line and the ↵ verb. Detail
-/// follows focus (no expand key), so moving the selection updates it in place.
-fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16) -> Vec<Line<'static>> {
-    use crate::briefing::Verdict;
-    let mut out = vec![Line::from(Span::styled("─".repeat(width as usize), Style::default().fg(Color::DarkGray)))];
-    let Some(ItemKind::Surface(s)) = row.map(|r| &r.kind) else { return out };
-    let (glyph, vcolor) = verdict_style(app, s.verdict).unwrap_or(("·", Color::DarkGray));
-    let vlabel = match s.verdict {
-        Verdict::Blocked => "blocked", Verdict::Failed => "failed",
-        Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
-    };
-    let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
-    let wsname = row.map(|r| r.label.clone()).unwrap_or_default();
-    out.push(Line::from(vec![
-        Span::styled(format!("{glyph} "), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{wsname} · {vlabel}{age}"),
-            Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
-    ]));
-    let why = row.map(|r| r.description.clone()).unwrap_or_default();
-    if !why.is_empty() {
-        out.push(Line::from(Span::styled(why, Style::default().fg(Color::White))));
-    }
-    out.push(Line::from(Span::styled("↵ jump", Style::default().fg(rgb(app.tuning.theme_accent_bright)))));
-    out
-}
-
-/// The Commands column (or the whole dropdown when there are no workspaces to
-/// survey): the launcher / fuzzy list. `active` gates whether the selection shows.
-fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, navigated: bool, active: bool, header: bool, max_rows: usize) -> Vec<Line<'static>> {
+/// The Commands list — the classic launcher rows: in-bar quick key, live binding
+/// badge, label, dim description. `active` gates whether the selection highlights.
+fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, navigated: bool, active: bool, max_rows: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    if header { out.push(column_header("COMMANDS")); }
-    let body_max = max_rows.saturating_sub(header as usize).max(1);
+    let body_max = max_rows.max(1);
     let scroll = if sel >= body_max { sel + 1 - body_max } else { 0 };
     for (idx, row) in rows.iter().enumerate().skip(scroll).take(body_max) {
         let selected = active && navigated && idx == sel;
@@ -1525,19 +1444,139 @@ fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, nav
     out
 }
 
-/// The always-visible legend: the status class taxonomy + its colors, so the
-/// scheme is obvious rather than remembered.
-fn legend_line(app: &App) -> Line<'static> {
-    use crate::briefing::Verdict;
-    let mut spans = vec![Span::raw(" ")];
-    for (v, label) in [(Verdict::Blocked, "needs you"), (Verdict::Failed, "failed"), (Verdict::Running, "running"), (Verdict::Done, "done")] {
-        if let Some((g, c)) = verdict_style(app, v) {
-            spans.push(Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(format!("{label}   "), Style::default().fg(Color::DarkGray)));
-        }
+/// One row per workspace: current marker ‹, verdict glyph (class color), id · name
+/// (ellipsized), age right-aligned. Scrolls to keep the selection visible.
+fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, active: bool, width: u16, max_rows: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let body_max = max_rows.max(1);
+    let scroll = if sel >= body_max { sel + 1 - body_max } else { 0 };
+    for (idx, row) in rows.iter().enumerate().skip(scroll).take(body_max) {
+        let s = active && idx == sel;
+        let bg = if s { Color::DarkGray } else { Color::Reset };
+        let (glyph, vcolor, id, cur) = match &row.kind {
+            ItemKind::Surface(sr) => {
+                let (g, c) = verdict_style(app, sr.verdict).unwrap_or(("·", Color::DarkGray));
+                (if g.is_empty() { "·" } else { g }, c, sr.tab_index + 1, sr.tab_index == app.active_tab)
+            }
+            _ => ("·", Color::DarkGray, 0, false),
+        };
+        let marker = if cur { "‹" } else { " " };
+        let age = match &row.kind {
+            ItemKind::Surface(sr) if sr.age_secs > 0 => crate::briefing::fmt_secs(sr.age_secs),
+            _ => String::new(),
+        };
+        // Budget: marker(1) glyph(2) "id · " age( ) — the name gets what's left.
+        let name_budget = (width as usize).saturating_sub(3 + format!("{id} · ").len() + age.chars().count() + 2);
+        let mut spans = vec![
+            Span::styled(marker.to_string(), Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(bg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{glyph} "), Style::default().fg(vcolor).bg(bg).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{id} · {}", ellip(&row.label, name_budget)),
+                Style::default().fg(if s { vcolor } else { Color::White }).bg(bg)
+                    .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ];
+        let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
+        let pad = (width as usize).saturating_sub(lw + age.chars().count() + 1);
+        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+        spans.push(Span::styled(format!("{age} "), Style::default().fg(Color::DarkGray).bg(bg)));
+        out.push(Line::from(spans));
     }
-    spans.push(Span::styled("· idle", Style::default().fg(Color::DarkGray)));
-    Line::from(spans)
+    out
+}
+
+/// The detail strip: the highlighted workspace in full — a rule separator, then
+/// name · status · age, its why-line (ellipsized), and the ↵ verb. Detail follows
+/// focus (no expand key), so moving the selection updates it in place.
+fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16) -> Vec<Line<'static>> {
+    use crate::briefing::Verdict;
+    let w = width as usize;
+    let mut out = vec![Line::from(Span::styled("─".repeat(w), Style::default().fg(Color::DarkGray)))];
+    let Some(ItemKind::Surface(s)) = row.map(|r| &r.kind) else { return out };
+    let (glyph, vcolor) = verdict_style(app, s.verdict).unwrap_or(("·", Color::DarkGray));
+    let vlabel = match s.verdict {
+        Verdict::Blocked => "blocked", Verdict::Failed => "failed",
+        Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
+    };
+    let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
+    let wsname = row.map(|r| r.label.clone()).unwrap_or_default();
+    let head = ellip(&format!("{wsname} · {vlabel}{age}"), w.saturating_sub(2));
+    out.push(Line::from(vec![
+        Span::styled(format!("{glyph} "), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+        Span::styled(head, Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+    ]));
+    let why = row.map(|r| r.description.clone()).unwrap_or_default();
+    if !why.is_empty() {
+        out.push(Line::from(Span::styled(ellip(&why, w), Style::default().fg(Color::White))));
+    }
+    out.push(Line::from(Span::styled("↵ jump", Style::default().fg(rgb(app.tuning.theme_accent_bright)))));
+    out
+}
+
+/// The legend — the status class taxonomy + its colors, so the scheme is obvious
+/// rather than remembered. Two compact lines to fit the navigator-width panel.
+fn legend_lines(app: &App) -> Vec<Line<'static>> {
+    use crate::briefing::Verdict;
+    let chip = |v: Verdict, label: &str| -> Vec<Span<'static>> {
+        match verdict_style(app, v) {
+            Some((g, c)) => vec![
+                Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{label}  "), Style::default().fg(Color::DarkGray)),
+            ],
+            None => vec![],
+        }
+    };
+    let mut l1 = vec![Span::raw(" ")]; l1.extend(chip(Verdict::Blocked, "blocked")); l1.extend(chip(Verdict::Failed, "failed"));
+    let mut l2 = vec![Span::raw(" ")]; l2.extend(chip(Verdict::Running, "running")); l2.extend(chip(Verdict::Done, "done"));
+    l2.push(Span::styled("· idle", Style::default().fg(Color::DarkGray)));
+    vec![Line::from(l1), Line::from(l2)]
+}
+
+/// The Workspaces board — a separate bordered panel (navigator-width), reached from
+/// the command bar with the ← arrow. Its own title, a rule separator before the
+/// detail, and the legend pinned to the bottom.
+fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
+    let active = app.palette.as_ref().map(|p| p.column == crate::palette::BarColumn::Workspaces).unwrap_or(false);
+    let sel = app.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
+    let border = if active { rgb(app.tuning.theme_accent) } else { Color::DarkGray };
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(" WORKSPACES ", Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = app.bar_workspace_rows();
+    let ih = inner.height as usize;
+    let legend_h = 2.min(ih);
+    let detail_h = if ih > legend_h + 3 { 4 } else { 0 };
+    let list_h = ih.saturating_sub(legend_h + detail_h);
+    frame.render_widget(Paragraph::new(Text::from(workspace_lines(app, &rows, sel, active, inner.width, list_h))),
+        Rect { x: inner.x, y: inner.y, width: inner.width, height: list_h as u16 });
+    if detail_h > 0 {
+        frame.render_widget(Paragraph::new(Text::from(detail_lines(app, rows.get(sel), inner.width))),
+            Rect { x: inner.x, y: inner.y + list_h as u16, width: inner.width, height: detail_h as u16 });
+    }
+    if legend_h > 0 {
+        frame.render_widget(Paragraph::new(Text::from(legend_lines(app))),
+            Rect { x: inner.x, y: inner.y + inner.height - legend_h as u16, width: inner.width, height: legend_h as u16 });
+    }
+}
+
+/// The Commands launcher — the classic single-column dropdown, in its own bordered
+/// box. `left_border` is dropped when the Workspaces panel sits to its left (that
+/// panel's right border serves as the divider).
+fn render_command_panel(frame: &mut Frame, app: &App, rect: Rect, left_border: bool, active: bool) {
+    let palette = match app.palette.as_ref() { Some(p) => p, None => return };
+    let borders = if left_border { Borders::TOP | Borders::LEFT | Borders::RIGHT } else { Borders::TOP | Borders::RIGHT };
+    let border = if active { rgb(app.tuning.theme_accent) } else { Color::DarkGray };
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(border));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = app.bar_rows();
+    let lines = command_lines(app, &rows, palette.selected, palette.navigated, active, inner.height as usize);
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn render_bar_dropdown(
@@ -1549,67 +1588,34 @@ fn render_bar_dropdown(
     let palette = app.palette.as_ref()?;
     let show_ws = app.bar_show_workspaces();
     let cmd_rows = app.bar_rows();
-    let ws_rows = if show_ws { app.bar_workspace_rows() } else { Vec::new() };
-    if cmd_rows.is_empty() && ws_rows.is_empty() {
+    if cmd_rows.is_empty() && !show_ws {
         return None;
     }
 
     let max_height = ((pane_area.height * app.tuning.panel_max_height_pct / 100) as usize)
         .min(app.tuning.dropdown_max_rows as usize) as u16;
-    let legend_h: u16 = if show_ws { 1 } else { 0 };
-    let detail_h: u16 = if show_ws { 4 } else { 0 }; // rule + name·status + why + ↵ jump
-    // The taller column drives the list height (+1 for each column header).
-    let list_rows = cmd_rows.len().max(ws_rows.len()) as u16 + if show_ws { 1 } else { 0 };
-    let drop_h = (list_rows + detail_h + legend_h + 1).min(max_height).max(2);
-    let drop_rect = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(drop_h), width: bar_area.width, height: drop_h };
-    frame.render_widget(Clear, drop_rect);
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(rgb(app.tuning.theme_accent)));
-    let inner = block.inner(drop_rect);
-    frame.render_widget(block, drop_rect);
+    // The command list drives the height; the workspaces panel needs room for a few
+    // rows + its detail(4) + legend(2). +1 for the top border.
+    let cmd_need = cmd_rows.len() as u16 + 1;
+    let ws_need = if show_ws { app.bar_workspace_rows().len().max(3) as u16 + 4 + 2 + 1 } else { 0 };
+    let drop_h = cmd_need.max(ws_need).min(max_height).max(2);
+    let full = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(drop_h), width: bar_area.width, height: drop_h };
+    frame.render_widget(Clear, full);
 
-    // No fleet to survey → the plain single-column launcher (today's behavior).
     if !show_ws {
-        let lines = command_lines(app, &cmd_rows, palette.selected, palette.navigated, true, false, inner.height as usize);
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-        return Some(drop_rect);
+        // No fleet to survey → the plain single-column launcher (previous behaviour).
+        render_command_panel(frame, app, full, true, true);
+        return Some(full);
     }
 
-    // Two-pane board: [ Workspaces | Commands ] over an always-visible legend.
-    let inner_h = inner.height;
-    let legend_rect = Rect { x: inner.x, y: inner.y + inner_h - 1, width: inner.width, height: 1 };
-    let main_h = inner_h.saturating_sub(1).max(1);
-    let left_w = ((inner.width as u32 * 42 / 100) as u16).clamp(22, inner.width.saturating_sub(20).max(22));
-    let div_x = inner.x + left_w;
-
-    // Left column: workspace list on top, detail strip on the bottom.
-    let d_h = if main_h > 4 { detail_h.min(main_h.saturating_sub(1)) } else { 0 };
-    let ws_list_h = main_h - d_h;
-    let col_is_ws = palette.column == crate::palette::BarColumn::Workspaces;
-    let ws_lines = workspace_lines(app, &ws_rows, palette.sel_ws, col_is_ws, left_w, ws_list_h as usize);
-    frame.render_widget(Paragraph::new(Text::from(ws_lines)),
-        Rect { x: inner.x, y: inner.y, width: left_w, height: ws_list_h });
-    if d_h > 0 {
-        let dlines = detail_lines(app, ws_rows.get(palette.sel_ws), left_w);
-        frame.render_widget(Paragraph::new(Text::from(dlines)),
-            Rect { x: inner.x, y: inner.y + ws_list_h, width: left_w, height: d_h });
-    }
-
-    // Vertical divider between the two ontologies.
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(Span::styled("│", Style::default().fg(Color::DarkGray))); main_h as usize]),
-        Rect { x: div_x, y: inner.y, width: 1, height: main_h },
-    );
-
-    // Right column: commands.
-    let col_is_cmd = palette.column == crate::palette::BarColumn::Commands;
-    let cmd_lines = command_lines(app, &cmd_rows, palette.selected, palette.navigated, col_is_cmd, true, main_h as usize);
-    frame.render_widget(Paragraph::new(Text::from(cmd_lines)),
-        Rect { x: div_x + 1, y: inner.y, width: inner.width.saturating_sub(left_w + 1), height: main_h });
-
-    frame.render_widget(Paragraph::new(legend_line(app)), legend_rect);
-    Some(drop_rect)
+    // A separate WORKSPACES panel (navigator-width) beside the classic command
+    // launcher. ← focuses the panel, → the launcher.
+    let ws_w = app.tuning.tree_width.clamp(20, full.width.saturating_sub(30).max(20));
+    let ws_rect = Rect { x: full.x, y: full.y, width: ws_w, height: drop_h };
+    let cmd_rect = Rect { x: full.x + ws_w, y: full.y, width: full.width - ws_w, height: drop_h };
+    render_workspaces_panel(frame, app, ws_rect);
+    render_command_panel(frame, app, cmd_rect, false, palette.column == crate::palette::BarColumn::Commands);
+    Some(full)
 }
 
 // ── Proactive notice line (W6 watch verdicts) ────────────────────────────────
