@@ -3628,9 +3628,10 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] unified warp grammar ...... PASS");
     }
 
-    // 34c. Tier 2 — the command bar IS the board: a surface that needs you leads the
-    //      empty-query bar, pre-selected so ↵ jumps to it in the one chord you already
-    //      press. Reads the same pane_verdict seam as Tier 1; no new chord, no overlay.
+    // 34c. Tier 2 — the two-pane command board: a workspace that needs you opens the
+    //      bar focused on the Workspaces column, pre-selected so ↵ jumps to it. The
+    //      column reads the same pane_verdict/tab_status seam as the top bar; commands
+    //      live in their own column. Quiet + solo → the plain single-column launcher.
     {
         let mut app = App::new(None)?;
         app.handle_key(k(KeyCode::Char('x')))?; // dismiss splash
@@ -3640,30 +3641,35 @@ fn selfcheck() -> Result<()> {
             Some("blocked: overwrite runs/best.pt? [y/N]".into());
         app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl-Space → command bar
         assert!(app.mode == mode::Mode::Bar, "Ctrl-Space did not open the bar");
-        let rows = app.bar_rows();
-        assert!(matches!(rows.first().map(|r| &r.kind), Some(palette::ItemKind::Surface(_))),
-            "a blocked surface must LEAD the empty-query bar");
-        let p = app.palette.as_ref().unwrap();
-        assert!(p.navigated && p.selected == 0,
-            "the leading surface must be visibly pre-selected (↵ acts with no arrowing)");
-        // The dropdown renders the verdict glyph + the jump hint.
+        // A blocked workspace → the left column shows, and the bar opens focused on it.
+        assert!(app.bar_show_workspaces(), "a blocked workspace must show the Workspaces column");
+        let ws = app.bar_workspace_rows();
+        assert!(matches!(ws.first().map(|r| &r.kind), Some(palette::ItemKind::Surface(_))),
+            "the blocked workspace must lead the Workspaces column");
+        assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Workspaces,
+            "the bar must open focused on the Workspaces column when one needs you");
+        // The dropdown renders the verdict glyph, the legend, and the ↵ verb.
         let mut term = Terminal::new(TestBackend::new(100, 24))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("⏸") && t.contains("↵ jump"),
-            "the surface row must show the verdict glyph and the jump hint: {t}");
-        // ↵ jumps to the surface and closes the bar (never auto-answers the prompt).
+        assert!(t.contains("⏸") && t.contains("↵ jump") && t.contains("needs you"),
+            "the board must show the glyph, the jump verb, and the legend: {t}");
+        // ↵ on the Workspaces column jumps to the workspace and closes the bar.
         app.handle_key(k(KeyCode::Enter))?;
-        assert!(app.palette.is_none(), "↵ on a surface did not close the bar");
-        // Quiet case: with the verdict cleared, no surface leads — the bar is exactly
-        // today's launcher (top row is a command, not a Surface).
+        assert!(app.palette.is_none(), "↵ on a workspace did not close the bar");
+        // →/← cross columns: from Workspaces, → focuses Commands.
+        app.handle_key(kc(KeyCode::Char(' ')))?;
+        app.handle_key(k(KeyCode::Right))?;
+        assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Commands,
+            "→ must move focus to the Commands column");
+        app.handle_key(k(KeyCode::Esc))?; app.handle_key(k(KeyCode::Esc))?;
+        // Quiet + solo: one idle workspace → no left column, the plain launcher.
         app.watches.get_mut(&tid).unwrap().verdict = None;
         app.terms.get_mut(&tid).unwrap().exited = false;
         app.watches.get_mut(&tid).unwrap().run_started_tick = 0;
-        app.handle_key(kc(KeyCode::Char(' ')))?;
-        assert!(!matches!(app.bar_rows().first().map(|r| &r.kind), Some(palette::ItemKind::Surface(_))),
-            "quiet: no surface should lead — the bar is the plain launcher");
-        println!("[selfcheck] command-bar board (t2) .... PASS");
+        assert!(!app.bar_show_workspaces(),
+            "a solo idle workspace must NOT show the board — the plain launcher stands");
+        println!("[selfcheck] command board (two-pane) . PASS");
     }
 
     // 35. C-g cancels the command bar from every submode (doctrine §3.4).

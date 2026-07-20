@@ -627,52 +627,73 @@ impl App {
             .unwrap_or(Verdict::Context)
     }
 
-    /// The Tier-2 board: live workspace surfaces that need you, ranked needs-you
-    /// first, injected ahead of the launcher when the command bar's query is empty.
-    /// Only CURRENT, actionable states lead — Blocked/Failed/Running — never idle or
-    /// a finished-Done job (Done would silt the bar; the tab labels and the bottom
-    /// summary already carry it). Built fresh from the `pane_verdict` seam every
-    /// keystroke; no new state, the same enumeration the bottom summary runs.
-    fn bar_surface_rows(&self) -> Vec<crate::palette::PaletteRow> {
+    /// Show the Workspaces column of the command board when there is more than one
+    /// workspace, or something needs you — a solo single-tab session keeps the plain
+    /// launcher (scale prominence with fleet size).
+    pub fn bar_show_workspaces(&self) -> bool {
         use crate::briefing::Verdict;
+        self.tabs.len() >= 2
+            || self
+                .tabs
+                .iter()
+                .any(|t| matches!(self.tab_status(t), Verdict::Blocked | Verdict::Failed))
+    }
+
+    /// The Workspaces column: ONE row per workspace (tab), ranked needs-you first,
+    /// colored by the tab's aggregate status. A switcher AND a status board — it
+    /// lists ALL workspaces (jump anywhere), not only the ones that need you. The
+    /// query fuzzy-filters by workspace name, so typing narrows this column too.
+    pub fn bar_workspace_rows(&self) -> Vec<crate::palette::PaletteRow> {
         use crate::palette::{ItemKind, PaletteRow, SurfaceRef};
         let ms = self.tuning.poll_interval_ms.max(1);
         let now = self.frame_tick;
-        let mut ranked: Vec<(u8, PaletteRow)> = Vec::new();
+        let query = self.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
+        let mut ranked: Vec<(u8, usize, PaletteRow)> = Vec::new();
         for (ti, tab) in self.tabs.iter().enumerate() {
-            for pid in tab.layout.pane_ids() {
-                let v = self.pane_verdict(pid);
-                if !matches!(v, Verdict::Blocked | Verdict::Failed | Verdict::Running) {
-                    continue;
-                }
-                let (name, why, age) = self.surface_row_parts(pid, now, ms);
-                ranked.push((v.rank(), PaletteRow {
-                    label: name,
-                    kind: ItemKind::Surface(SurfaceRef {
-                        pane_id: pid,
-                        tab_index: ti,
-                        tab_name: tab.name.clone(),
-                        verdict: v,
-                        age_secs: age,
-                    }),
-                    description: why,
-                }));
+            // Use the tab's name, but fall back to the focused pane's name when the
+            // tab is unnamed or just carries its number (so it reads "1 · shell",
+            // never "1 · 1").
+            let numeric = tab.name.parse::<usize>().is_ok();
+            let name = if tab.name.is_empty() || numeric {
+                crate::ui::pane_name(self, tab.focused_pane)
+            } else {
+                tab.name.clone()
+            };
+            if !query.is_empty() && crate::palette::fuzzy_score(&query, &name).is_none() {
+                continue;
             }
+            let v = self.tab_status(tab);
+            // The tab's most-severe pane carries the why-line and the jump target.
+            let worst = tab
+                .layout
+                .pane_ids()
+                .into_iter()
+                .max_by_key(|pid| self.pane_verdict(*pid).rank())
+                .unwrap_or(tab.focused_pane);
+            let (_pname, why, age) = self.surface_row_parts(worst, now, ms);
+            ranked.push((v.rank(), ti, PaletteRow {
+                label: name,
+                kind: ItemKind::Surface(SurfaceRef {
+                    pane_id: worst,
+                    tab_index: ti,
+                    tab_name: tab.name.clone(),
+                    verdict: v,
+                    age_secs: age,
+                }),
+                description: why,
+            }));
         }
-        ranked.sort_by(|a, b| b.0.cmp(&a.0)); // needs-you first (stable within a rank)
-        ranked.into_iter().map(|(_, r)| r).collect()
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1))); // needs-you first, else index
+        ranked.into_iter().map(|(_, _, r)| r).collect()
     }
 
-    /// Name / why-snippet / age for one surface row, from its terminal + watch.
+    /// Name / why-snippet / age for one surface, from its pane + terminal + watch.
     fn surface_row_parts(&self, pid: crate::pane::PaneId, now: u64, ms: u64) -> (String, String, u64) {
-        let pane = self.panes.get(&pid);
-        let tid = match pane.map(|p| &p.content) {
+        let tid = match self.panes.get(&pid).map(|p| &p.content) {
             Some(PaneContent::Terminal(t)) => Some(*t),
             _ => None,
         };
-        let name = pane
-            .and_then(|p| p.title.clone())
-            .unwrap_or_else(|| "terminal".to_string());
+        let name = crate::ui::pane_name(self, pid);
         let w = tid.and_then(|t| self.watches.get(&t));
         let why = if let Some(v) = w.and_then(|w| w.verdict.as_ref()) {
             v.lines().next().unwrap_or("").trim().to_string()
@@ -682,8 +703,10 @@ impl App {
                     Some(c) if c != 0 => format!("exited · code {c}"),
                     _ => "done".to_string(),
                 }
-            } else {
+            } else if w.map(|w| w.run_started_tick > 0).unwrap_or(false) {
                 "working…".to_string()
+            } else {
+                "idle at a prompt".to_string()
             }
         } else {
             String::new()
@@ -696,17 +719,13 @@ impl App {
         (name, why, age)
     }
 
-    /// The full ranked row list the bar RENDERS and DISPATCHES — surfaces that need
-    /// you (empty query only) ahead of the launcher/fuzzy results. One source, so
-    /// the render and the Enter dispatch index into the identical list.
+    /// The Commands column: the launcher / fuzzy results (query-filtered). The
+    /// Workspaces column is separate — two ontologies, never interleaved.
     pub fn bar_rows(&self) -> Vec<crate::palette::PaletteRow> {
-        let Some(p) = self.palette.as_ref() else { return Vec::new() };
-        let mut rows = Vec::new();
-        if p.query.is_empty() {
-            rows.extend(self.bar_surface_rows());
-        }
-        rows.extend(p.visible_items(&self.frecency));
-        rows
+        self.palette
+            .as_ref()
+            .map(|p| p.visible_items(&self.frecency))
+            .unwrap_or_default()
     }
 
     /// `↵` (or a click) on a surface row — the safe universal verb: focus its tab +
@@ -2376,13 +2395,22 @@ impl App {
         // composer opens unengaged — typing or arrowing selects the top match
         // (registry-first Enter), and an unengaged Enter is a no-op.
         p.navigated = self.bar_return != Mode::Terminal;
-        // Tier 2: when a surface needs you, it LEADS the empty query and is visibly
-        // pre-selected (row 0), so the one chord you already press lands you on it —
-        // even from a terminal. Honest because the highlight is visible (the "no
-        // invisible Enter" rule is about unhighlighted rows). Quiet → unchanged.
-        if !self.bar_surface_rows().is_empty() {
-            p.navigated = true;
-            p.selected = 0;
+        // Two-pane board: when a workspace needs you (blocked/failed), open with the
+        // Workspaces column focused and its top (needs-you) row selected, so the one
+        // chord you already press lands you on it. Otherwise focus stays on the
+        // Commands launcher (today's behavior). The left column is only shown at all
+        // once there's a fleet to survey (bar_show_workspaces).
+        p.column = crate::palette::BarColumn::Commands;
+        p.sel_ws = 0;
+        if self.bar_show_workspaces() {
+            let needs_you = self.bar_workspace_rows().first().map(|r| {
+                matches!(&r.kind, crate::palette::ItemKind::Surface(s)
+                    if matches!(s.verdict, crate::briefing::Verdict::Blocked | crate::briefing::Verdict::Failed))
+            }).unwrap_or(false);
+            if needs_you {
+                p.column = crate::palette::BarColumn::Workspaces;
+                p.navigated = true;
+            }
         }
         self.palette = Some(p);
         self.mode = Mode::Bar;
@@ -2840,25 +2868,53 @@ impl App {
         // the transcript and is there when the bar reopens.
     }
 
+    /// Move the selection up/down within the focused board column (wrapping).
+    fn bar_nav(&mut self, up: bool, on_ws: bool, ws_len: usize, cmd_len: usize) {
+        if on_ws {
+            if let Some(p) = self.palette.as_mut() {
+                if ws_len > 0 {
+                    p.sel_ws = if up { (p.sel_ws + ws_len - 1) % ws_len } else { (p.sel_ws + 1) % ws_len };
+                }
+            }
+        } else if let Some(p) = self.palette.as_mut() {
+            if up { p.select_up(cmd_len); } else { p.select_down(cmd_len); }
+        }
+    }
+
     fn handle_bar_command(&mut self, key: KeyEvent, ctrl: bool, none: bool, shift: bool) {
-        let items_len = self.bar_rows().len();
+        use crate::palette::BarColumn;
+        // Two-pane board: ↑/↓ move within the focused column, ←/→ cross between the
+        // Workspaces board (left) and the Commands launcher (right).
+        let show_ws = self.bar_show_workspaces();
+        let cmd_len = self.bar_rows().len();
+        let ws_len = self.bar_workspace_rows().len();
+        let on_ws = show_ws
+            && self.palette.as_ref().map(|p| p.column == BarColumn::Workspaces).unwrap_or(false);
 
         match key.code {
             KeyCode::Esc => {
                 let close = if let Some(p) = self.palette.as_mut() { !p.pop() } else { true };
                 if close { self.close_bar(); }
             }
-            KeyCode::Up | KeyCode::BackTab => {
-                if let Some(p) = self.palette.as_mut() { p.select_up(items_len); }
+            KeyCode::Left if show_ws => {
+                if let Some(p) = self.palette.as_mut() { p.column = BarColumn::Workspaces; }
             }
-            KeyCode::Down => {
-                if let Some(p) = self.palette.as_mut() { p.select_down(items_len); }
+            KeyCode::Right => {
+                if let Some(p) = self.palette.as_mut() { p.column = BarColumn::Commands; }
             }
-            KeyCode::Char('p') if ctrl => {
-                if let Some(p) = self.palette.as_mut() { p.select_up(items_len); }
-            }
-            KeyCode::Char('n') if ctrl => {
-                if let Some(p) = self.palette.as_mut() { p.select_down(items_len); }
+            KeyCode::Up | KeyCode::BackTab => self.bar_nav(true, on_ws, ws_len, cmd_len),
+            KeyCode::Down => self.bar_nav(false, on_ws, ws_len, cmd_len),
+            KeyCode::Char('p') if ctrl => self.bar_nav(true, on_ws, ws_len, cmd_len),
+            KeyCode::Char('n') if ctrl => self.bar_nav(false, on_ws, ws_len, cmd_len),
+            KeyCode::Enter if on_ws => {
+                // Jump to the highlighted workspace — the safe universal verb (never
+                // auto-answers a prompt; those stay behind the confirm gate).
+                let sel = self.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
+                if let Some(crate::palette::ItemKind::Surface(s)) =
+                    self.bar_workspace_rows().into_iter().nth(sel).map(|r| r.kind)
+                {
+                    self.jump_to_surface(s);
+                }
             }
             KeyCode::Enter => {
                 let selected = self.palette.as_ref().map(|p| p.selected).unwrap_or(0);
@@ -2891,18 +2947,20 @@ impl App {
                     } else {
                         p.query.pop();
                         p.selected = 0;
+                        p.sel_ws = 0;
                         p.navigated = !p.query.is_empty();
                         false
                     }
                 } else { false };
                 if close { self.close_bar(); }
             }
-            // Search-first (Claude-Code feel): typing always filters, and the
-            // top match is selected so Enter fires it with no arrowing.
+            // Search-first (Claude-Code feel): typing always filters BOTH columns,
+            // and the top match is selected so Enter fires it with no arrowing.
             KeyCode::Char(c) if none || shift => {
                 if let Some(p) = self.palette.as_mut() {
                     p.query.push(c);
                     p.selected = 0;
+                    p.sel_ws = 0;
                     p.navigated = true;
                 }
             }

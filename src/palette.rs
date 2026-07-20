@@ -427,6 +427,15 @@ pub enum BarMode {
     Shell,
 }
 
+/// Which column of the two-pane command board holds focus. Workspaces (left) are a
+/// live status board + switcher; Commands (right) is the launcher. ←/→ cross between
+/// them, ↑/↓ move within, so panes and commands stay two separate ontologies.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BarColumn {
+    Workspaces,
+    Commands,
+}
+
 // ── Palette state ─────────────────────────────────────────────────────────────
 
 pub struct PaletteRow {
@@ -445,6 +454,12 @@ pub struct Palette {
     /// the composer is shell-first: Enter runs the query as a command UNLESS a
     /// suggestion was deliberately selected. Reset on open and on query edits.
     pub navigated: bool,
+    /// Which column of the two-pane board has focus (Enter acts on it).
+    pub column: BarColumn,
+    /// Selection index within the Workspaces column (independent of `selected`,
+    /// which is the Commands column — so the detail strip tracks the highlighted
+    /// workspace even while focus is on Commands).
+    pub sel_ws: usize,
 }
 
 impl Palette {
@@ -455,6 +470,8 @@ impl Palette {
             selected: 0,
             bar_mode: BarMode::Command,
             navigated: false,
+            column: BarColumn::Commands,
+            sel_ws: 0,
         }
     }
 
