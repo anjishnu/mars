@@ -1299,26 +1299,23 @@ fn selfcheck() -> Result<()> {
     std::fs::remove_file(&tuning_path)?; // restore defaults for any later checks
     println!("[selfcheck] tuning knobs + override .... PASS");
 
-    // 26a2. The top-right corner counter: how many surfaces of each status across
-    //       all workspaces, needs-you first; quiet shows nothing (no green "all quiet"
-    //       lie). The lone bottom-row dot is gone — the aggregate lives up here.
+    // 26a2. The top-right status counter (beacon) is REMOVED — it silted up with
+    //       finished-Done counts that never clear and rendered as a garbled aggregate
+    //       in the corner. A blocked terminal still colors its tab label with the ⏸
+    //       glyph, but there is NO "⏸1"-style counter anywhere.
     {
         let mut app = App::new(None)?;
         app.handle_key(k(KeyCode::Char('x')))?; // dismiss the splash
-        app.open_terminal(); // focused pane → a terminal surface
+        app.open_terminal();
         let tid = *app.terms.keys().next().expect("open_terminal makes a terminal");
-        let mut term = Terminal::new(TestBackend::new(100, 20))?;
-        term.draw(|f| ui::render(f, &mut app))?;
-        assert!(!screen_text(&term).contains("all quiet"),
-            "the top-right beacon must be gone — quiet shows nothing");
-        // A blocked surface counts into the bottom summary as ⏸1.
         app.watches.entry(tid).or_default().verdict =
             Some("blocked: overwrite runs/best.pt? [y/N]".into());
+        let mut term = Terminal::new(TestBackend::new(100, 20))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("⏸1"),
-            "a blocked surface must count into the bottom summary (⏸1): {t}");
-        println!("[selfcheck] workspace summary ......... PASS");
+        assert!(t.contains("⏸"), "the blocked tab label must still show the ⏸ glyph: {t}");
+        assert!(!t.contains("⏸1"), "the top-right counter/beacon must be gone (no ⏸1 aggregate): {t}");
+        println!("[selfcheck] beacon removed ............ PASS");
     }
 
     // 26a3. The surface-status seam: pane/tab verdict is the ONE source the tab

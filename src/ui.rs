@@ -268,23 +268,6 @@ pub(crate) fn pane_name(app: &App, pane_id: PaneId) -> String {
     }
 }
 
-/// Cross-workspace status counts (needs-you first) for the top-right corner counter:
-/// one entry per non-empty class. Idle panes don't count.
-fn status_counts(app: &App) -> Vec<(crate::briefing::Verdict, u32)> {
-    use crate::briefing::Verdict;
-    let mut c: std::collections::BTreeMap<Verdict, u32> = std::collections::BTreeMap::new();
-    for tab in &app.tabs {
-        for pid in tab.layout.pane_ids() {
-            let v = app.pane_verdict(pid);
-            if matches!(v, Verdict::Context) { continue; }
-            *c.entry(v).or_insert(0) += 1;
-        }
-    }
-    let mut out: Vec<_> = c.into_iter().collect();
-    out.sort_by(|a, b| b.0.rank().cmp(&a.0.rank())); // needs-you first
-    out
-}
-
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in app.tabs.iter().enumerate() {
@@ -312,20 +295,10 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
-
-    // Top-right corner counter: how many surfaces of each status across ALL
-    // workspaces, needs-you first, each in its class color. Blank when everything is
-    // idle — the honest aggregate the bottom-row dot used to fumble.
-    let counts = status_counts(app);
-    if !counts.is_empty() {
-        let mut cspans: Vec<Span> = Vec::new();
-        for (v, n) in counts {
-            if let Some((g, c)) = verdict_style(app, v) {
-                cspans.push(Span::styled(format!("{g}{n} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
-            }
-        }
-        frame.render_widget(Paragraph::new(Line::from(cspans)).alignment(Alignment::Right), area);
-    }
+    // (The top-right status counter/beacon was removed: it counted finished-Done
+    // surfaces that never clear, so it silted up into a persistent, glyph-garbled
+    // "✓N ●N" in the corner. Per-tab colors carry status until a better aggregate is
+    // designed. Status lives in the tab labels and the WORKSPACES panel.)
 }
 
 // ── Pane layout ───────────────────────────────────────────────────────────────
