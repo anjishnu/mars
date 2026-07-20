@@ -1,0 +1,39 @@
+{
+  "task_tier": {
+    "auto_name": "low",
+    "name_session": "low",
+    "mission": "low",
+    "shift_brief": "low",
+    "capture_goals": "low",
+    "watch": "mid",
+    "translate": "mid",
+    "ask": "high"
+  },
+  "tiers": {
+    "groq": {
+      "low":  ["llama-3.1-8b-instant", "openai/gpt-oss-20b"],
+      "mid":  ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"],
+      "high": ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"]
+    },
+    "anthropic": {
+      "low":  ["claude-haiku-4-5"],
+      "mid":  ["claude-sonnet-5"],
+      "high": ["claude-opus-4-8"]
+    },
+    "openai": {
+      "low":  ["gpt-4o-mini"],
+      "mid":  ["gpt-4o-mini"],
+      "high": ["gpt-4o"]
+    },
+    "gemini": {
+      "low":  ["gemini-3.1-flash-lite"],
+      "mid":  ["gemini-3.1-flash-lite"],
+      "high": ["gemini-3.1-flash"]
+    },
+    "bedrock": {
+      "low":  ["us.anthropic.claude-3-5-haiku-20241022-v1:0"],
+      "mid":  ["us.anthropic.claude-sonnet-4-20250514-v1:0"],
+      "high": ["us.anthropic.claude-opus-4-20250514-v1:0"]
+    }
+  }
+}

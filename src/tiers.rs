@@ -23,74 +23,66 @@
 
 use std::collections::BTreeMap;
 
-/// task-class → tier name, and provider → (tier name → model).
+/// task-class → tier name, and provider → (tier name → ordered model candidates).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Tiers {
     /// Which tier each agent task class runs on.
     pub task_tier: BTreeMap<String, String>,
-    /// Concrete model per (provider, tier) — so the same tier map works whichever
-    /// provider key is present.
-    pub tiers: BTreeMap<String, BTreeMap<String, String>>,
+    /// Ordered model candidates per (provider, tier). Listing more than one gives
+    /// in-tier fallback: a retired or rate-limited model falls through to the next
+    /// in its OWN tier before the call leaves the provider. A bare string is still
+    /// accepted (back-compat with single-model files).
+    #[serde(deserialize_with = "de_model_lists")]
+    pub tiers: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
-fn m(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+/// Accept either `"model"` or `["model", "fallback", …]` for a tier's value, so a
+/// tiers.json written before the list format still loads.
+fn de_model_lists<'de, D>(
+    d: D,
+) -> std::result::Result<BTreeMap<String, BTreeMap<String, Vec<String>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let raw: BTreeMap<String, BTreeMap<String, OneOrMany>> =
+        serde::Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(provider, tier_map)| {
+            let tier_map = tier_map
+                .into_iter()
+                .map(|(tier, v)| {
+                    (tier, match v {
+                        OneOrMany::One(s) => vec![s],
+                        OneOrMany::Many(list) => list,
+                    })
+                })
+                .collect();
+            (provider, tier_map)
+        })
+        .collect())
 }
+
+/// The shipped ring. Lives as DATA in `tiers_default.json` (edit that, not Rust)
+/// and is embedded at compile time — the same pattern as the model prompts. The
+/// runtime override at `~/.config/mars/tiers.json` is merged over this on load.
+/// Refresh the model lists when a provider churns models, e.g. Groq:
+///   curl -sH "Authorization: Bearer $GROQ_API_KEY" https://api.groq.com/openai/v1/models
+const DEFAULT_RING_JSON: &str = include_str!("tiers_default.json");
 
 impl Default for Tiers {
     fn default() -> Self {
-        Tiers {
-            // Trivial, high-frequency labeling → low; NL→shell → mid; open-ended
-            // reasoning/knowledge → high.
-            task_tier: m(&[
-                ("auto_name", "low"),
-                ("name_session", "low"),
-                ("mission", "low"),
-                ("watch", "mid"),
-                // The reattach situation briefing: a short plain-English summary
-                // — cheap tier is plenty, it's reading deterministic evidence.
-                ("shift_brief", "low"),
-                // Goal capture at detach: a tiny "name what's in flight" call.
-                ("capture_goals", "low"),
-                ("translate", "mid"),
-                ("ask", "high"),
-            ]),
-            tiers: [
-                // Groq free/cheap open-weight ladder (8B → 32B → 70B).
-                ("groq", m(&[
-                    ("low", "llama-3.1-8b-instant"),
-                    ("mid", "qwen/qwen3-32b"),
-                    ("high", "llama-3.3-70b-versatile"),
-                ])),
-                ("anthropic", m(&[
-                    ("low", "claude-haiku-4-5"),
-                    ("mid", "claude-sonnet-5"),
-                    ("high", "claude-opus-4-8"),
-                ])),
-                ("openai", m(&[
-                    ("low", "gpt-4o-mini"),
-                    ("mid", "gpt-4o-mini"),
-                    ("high", "gpt-4o"),
-                ])),
-                ("gemini", m(&[
-                    ("low", "gemini-3.1-flash-lite"),
-                    ("mid", "gemini-3.1-flash-lite"),
-                    ("high", "gemini-3.1-flash"),
-                ])),
-                // Bedrock cross-region inference profiles (modelIds are stable,
-                // so a real ladder works). Azure has no default block: its
-                // "models" are user-named deployments, so it falls through to the
-                // single configured deployment unless the user adds tiers.json.
-                ("bedrock", m(&[
-                    ("low", "us.anthropic.claude-3-5-haiku-20241022-v1:0"),
-                    ("mid", "us.anthropic.claude-sonnet-4-20250514-v1:0"),
-                    ("high", "us.anthropic.claude-opus-4-20250514-v1:0"),
-                ])),
-            ]
-            .into_iter()
-            .map(|(p, t)| (p.to_string(), t))
-            .collect(),
-        }
+        // Parse the embedded data file. It ships with the binary, so a parse
+        // failure is an authoring bug in tiers_default.json — pinned by the
+        // selfcheck ("tier ring" block), which fails loudly if this ever breaks.
+        serde_json::from_str(DEFAULT_RING_JSON)
+            .expect("tiers_default.json is malformed — fix the embedded ring")
     }
 }
 
@@ -101,37 +93,62 @@ fn tiers_path() -> Option<std::path::PathBuf> {
 /// Load the ring, writing annotated defaults on first run so the file is
 /// discoverable and editable. Malformed/partial files fall back to defaults.
 pub fn load() -> Tiers {
-    let Some(path) = tiers_path() else { return Tiers::default() };
+    let mut merged = Tiers::default();
+    let Some(path) = tiers_path() else { return merged };
     if let Ok(s) = std::fs::read_to_string(&path) {
         if let Ok(t) = serde_json::from_str::<Tiers>(&s) {
-            return t;
+            // Overlay the file so an operator's edits win — but a partial or stale
+            // file must never DROP a mapping the defaults added. A task missing
+            // from an old file would otherwise fall through to the provider default
+            // model, which is exactly how a retired default silently broke every
+            // unmapped task (shift_brief / mission / capture_goals) for days.
+            for (task, tier) in t.task_tier {
+                merged.task_tier.insert(task, tier);
+            }
+            for (provider, tier_map) in t.tiers {
+                let entry = merged.tiers.entry(provider).or_default();
+                for (tier, models) in tier_map {
+                    entry.insert(tier, models);
+                }
+            }
+            return merged;
         }
     }
-    let def = Tiers::default();
     if !path.exists() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(&def) {
+        if let Ok(json) = serde_json::to_string_pretty(&merged) {
             let _ = std::fs::write(&path, json);
         }
     }
-    def
+    merged
 }
 
 /// Resolve the model to use for `task` under `provider`. An explicit
 /// `MARS_LLM_MODEL`/`ARES_LLM_MODEL` overrides the ring entirely; otherwise
 /// `task → tier → model`, falling back to `default_model` when unmapped.
-pub fn model_for(provider: &str, task: &str, default_model: &str) -> String {
+pub fn models_for(provider: &str, task: &str, default_model: &str) -> Vec<String> {
     if std::env::var("MARS_LLM_MODEL").is_ok() || std::env::var("ARES_LLM_MODEL").is_ok() {
-        return default_model.to_string();
+        return vec![default_model.to_string()];
     }
     let t = load();
-    let Some(tier) = t.task_tier.get(task) else { return default_model.to_string() };
+    let Some(tier) = t.task_tier.get(task) else { return vec![default_model.to_string()] };
     t.tiers
         .get(provider)
         .and_then(|m| m.get(tier))
+        .filter(|v| !v.is_empty())
         .cloned()
+        .unwrap_or_else(|| vec![default_model.to_string()])
+}
+
+/// The single best model for `task` — the head of [`models_for`]. Kept for
+/// callers/tests that want one string; the runtime uses the whole list so a
+/// retired head falls through to the next candidate in the same tier.
+pub fn model_for(provider: &str, task: &str, default_model: &str) -> String {
+    models_for(provider, task, default_model)
+        .into_iter()
+        .next()
         .unwrap_or_else(|| default_model.to_string())
 }
 
@@ -140,12 +157,12 @@ const TIER_ORDER: [&str; 3] = ["low", "mid", "high"];
 fn model_above_in(t: &Tiers, provider: &str, task: &str) -> Option<String> {
     let tier = t.task_tier.get(task)?;
     let models = t.tiers.get(provider)?;
-    let current = models.get(tier)?;
+    let current = models.get(tier).and_then(|v| v.first())?;
     let start = TIER_ORDER.iter().position(|x| *x == tier.as_str())?;
-    // Walk past tiers repointed to the same model — escalating to the model
+    // Walk past tiers whose head model matches this one — escalating to the model
     // that just failed would be a no-op (e.g. openai's low and mid coincide).
     for next in &TIER_ORDER[start + 1..] {
-        if let Some(m) = models.get(*next) {
+        if let Some(m) = models.get(*next).and_then(|v| v.first()) {
             if m != current {
                 return Some(m.clone());
             }
@@ -184,10 +201,12 @@ pub fn tier_descriptions() -> Vec<String> {
         ));
     }
     out.push(
-        "On a provider rate limit (HTTP 429) the agent rotates the call to another \
-         configured provider's model for the same tier — set more than one API key \
-         (e.g. GROQ_API_KEY and GEMINI_API_KEY) to enable rotation; an explicit \
-         MARS_LLM_MODEL disables it."
+        "Each tier lists several models in priority order: if the first is retired \
+         (HTTP 404 / 'model does not exist') or rate-limited (HTTP 429), the agent \
+         falls through to the next model in the SAME tier, then rotates to another \
+         configured provider's tier — set more than one API key (e.g. GROQ_API_KEY \
+         and GEMINI_API_KEY) to enable cross-provider rotation. An explicit \
+         MARS_LLM_MODEL disables both."
             .to_string(),
     );
     out.push(

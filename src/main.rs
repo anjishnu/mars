@@ -2542,6 +2542,19 @@ fn selfcheck() -> Result<()> {
         // A 429 is typed so the rotation loop can tell throttling from real failures.
         let e = anyhow::Error::new(agent::RateLimited("throttled".into()));
         assert!(e.downcast_ref::<agent::RateLimited>().is_some());
+        // A retired model (404 / "does not exist") is ALSO typed and recoverable —
+        // the class of failure that silently froze every daemon task for days.
+        let e = anyhow::Error::new(agent::ModelUnavailable("gone".into()));
+        assert!(e.downcast_ref::<agent::ModelUnavailable>().is_some());
+        assert!(agent::is_retired_model(404, None), "404 = retired");
+        assert!(agent::is_retired_model(400, Some("The model foo does not exist")),
+            "'does not exist' body = retired");
+        assert!(!agent::is_retired_model(429, Some("rate limit reached")), "429 is not a retired model");
+        // Back-compat: a tiers.json written in the old single-string format still
+        // loads (deserializes each tier value as a one-element list).
+        let old = r#"{"task_tier":{"ask":"high"},"tiers":{"groq":{"high":"llama-3.3-70b-versatile"}}}"#;
+        let parsed: tiers::Tiers = serde_json::from_str(old).expect("old single-model format must still parse");
+        assert_eq!(parsed.tiers["groq"]["high"], vec!["llama-3.3-70b-versatile".to_string()]);
         println!("[selfcheck] cascade rotate+escalate .. PASS");
     }
 
@@ -2711,8 +2724,13 @@ fn selfcheck() -> Result<()> {
         for t in agent::TASKS {
             assert!(ring.task_tier.contains_key(*t), "task tag {t:?} is unmapped in tiers defaults");
         }
-        assert_eq!(tiers::model_for("groq", "translate", "x"), "qwen/qwen3-32b",
-            "translate must route to the mid tier");
+        assert_eq!(tiers::model_for("groq", "translate", "x"), "qwen/qwen3.6-27b",
+            "translate must route to the head of the mid tier");
+        // In-tier fallback: each tier is a LIST, so a retired head has a live
+        // successor before the call ever leaves the provider.
+        assert!(tiers::models_for("groq", "translate", "x").len() >= 2,
+            "groq mid tier must list fallback models, not a single point of failure");
+        assert_eq!(tiers::models_for("groq", "translate", "x")[0], "qwen/qwen3.6-27b");
         println!("[selfcheck] prompt templates ......... PASS");
     }
 

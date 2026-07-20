@@ -195,6 +195,39 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+/// The provider retired the model, or this key can't access it (HTTP 404, or a
+/// "does not exist / no access / decommissioned" body). Like [`RateLimited`] it is
+/// RECOVERABLE by trying another model — the next candidate in the tier, then
+/// another provider — rather than a hard failure to surface. Distinguishing this
+/// from a plain 4xx is what lets model churn self-heal instead of freezing a task.
+#[derive(Debug)]
+pub struct ModelUnavailable(pub String);
+
+impl std::fmt::Display for ModelUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for ModelUnavailable {}
+
+/// Does this HTTP status / provider message mean "that model is gone / off-limits"
+/// (as opposed to a transient or auth error)? Providers phrase it many ways.
+pub fn is_retired_model(code: u16, api_msg: Option<&str>) -> bool {
+    code == 404
+        || api_msg
+            .map(|m| {
+                let l = m.to_lowercase();
+                l.contains("does not exist")
+                    || l.contains("do not have access")
+                    || l.contains("decommission")
+                    || l.contains("has been deprecated")
+                    || l.contains("model_not_found")
+                    || l.contains("no longer supported")
+            })
+            .unwrap_or(false)
+}
+
 /// Every provider with a key in the ambient env, paid-first: explicit
 /// MARS_LLM_KEY wins, then a set Claude/OpenAI key (you meant it), then the
 /// free Groq/Gemini tiers. Position 0 is what `from_env` picks; the rest are
@@ -255,8 +288,10 @@ fn provider_chain() -> Vec<Provider> {
         chain.push(p(k, "openai", "https://api.openai.com/v1", "gpt-4o-mini"));
     }
     if let Ok(k) = std::env::var("GROQ_API_KEY") {
-        // Qwen3-32B: strong open model on Groq's fast free tier.
-        chain.push(p(k, "groq", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"));
+        // Llama-3.3-70B-versatile: a live, non-reasoning default on Groq's fast
+        // free tier. (This is the fallback for any task the ring doesn't map — so
+        // it must be a currently-served model; Groq retires open models often.)
+        chain.push(p(k, "groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"));
     }
     if let Ok(k) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY")) {
         // Flash-Lite: cheapest + highest free-tier limits. (Pinned dated
@@ -587,11 +622,19 @@ pub fn capture_goals(cfg: AgentConfig, evidence: String, tx: mpsc::Sender<AgentE
     std::thread::spawn(move || {
         let system = crate::prompts::CAPTURE_GOALS.trim_end().replace("{evidence}", &evidence);
         let messages = format_task_messages(&system, "What am I working on?");
-        if let Ok(text) = chat(&cfg, messages, "capture_goals") {
-            let goals = parse_goals(&text);
-            if !goals.is_empty() {
-                let _ = tx.send(AgentEvent::Goals { goals });
+        match chat(&cfg, messages, "capture_goals") {
+            Ok(text) => {
+                let goals = parse_goals(&text);
+                if !goals.is_empty() {
+                    let _ = tx.send(AgentEvent::Goals { goals });
+                }
             }
+            // Goals are a nicety (no user-facing overlay), but a silent failure here
+            // is exactly what hid a dead model for days — leave a line in the log.
+            Err(e) => eprintln!(
+                "[mars] goal capture failed (provider {}, model {}): {e}",
+                cfg.provider, cfg.model
+            ),
         }
         let _ = tx.send(AgentEvent::BgDone);
     });
@@ -634,7 +677,13 @@ pub fn shift_brief(
                 // the whole briefing as one delta so the overlay shows it.
                 let _ = tx.send(AgentEvent::ShiftDelta { text });
             }
-            _ => {} // streamed already, empty, or errored (keep the templated line)
+            Err(e) => {
+                eprintln!(
+                    "[mars] shift_brief enrichment failed (provider {}, model {}): {e}",
+                    cfg.provider, cfg.model
+                );
+            }
+            _ => {} // streamed already, or empty (keep the templated line)
         }
         let _ = tx.send(AgentEvent::ShiftDone);
         let _ = tx.send(AgentEvent::BgDone);
@@ -818,22 +867,39 @@ fn chat_inner(
         return crate::broker::chat_via_broker(sock, cfg, messages).map(|t| (t, 0));
     }
 
-    match attempt(cfg, &messages, task, retrieval, reborrow(&mut sink)) {
-        // Rotation-for-limits: each provider meters on its own counter, so a
-        // throttled call can often complete elsewhere at the same tier. Any
-        // alternate failure just moves on; exhaustion surfaces the original 429.
-        // A 429 arrives as an HTTP status BEFORE any token streams, so no
-        // partial output can precede a rotation.
-        Err(e) if e.downcast_ref::<RateLimited>().is_some() => {
-            for alt in rotation_candidates(cfg.provider) {
-                if let Ok(ok) = attempt(&alt, &messages, task, retrieval, reborrow(&mut sink)) {
-                    return Ok(ok);
+    // Ordered candidates: every model in this task's tier on the primary provider
+    // (IN-TIER fallback for a retired or throttled model — the fix for a provider
+    // silently dropping a model), then the same tier on each other keyed provider
+    // (CROSS-PROVIDER rotation for limits/outage). A retired model (404) and a
+    // rate-limit (429) both arrive as an HTTP status BEFORE any token streams, so
+    // no partial output can precede the move to the next candidate.
+    let mut candidates: Vec<AgentConfig> = Vec::new();
+    for model in crate::tiers::models_for(cfg.provider, task, &cfg.model) {
+        candidates.push(AgentConfig { model, ..cfg.clone() });
+    }
+    for alt in rotation_candidates(cfg.provider) {
+        for model in crate::tiers::models_for(alt.provider, task, &alt.model) {
+            candidates.push(AgentConfig { model, ..alt.clone() });
+        }
+    }
+    let mut last: Option<anyhow::Error> = None;
+    for c in candidates {
+        match attempt(&c, &messages, task, retrieval, reborrow(&mut sink)) {
+            Ok(ok) => return Ok(ok),
+            Err(e) => {
+                // Only churn on recoverable failures. An auth error or a malformed
+                // request will fail identically on every model — surface it, don't
+                // hammer the whole ring.
+                let recoverable = e.downcast_ref::<RateLimited>().is_some()
+                    || e.downcast_ref::<ModelUnavailable>().is_some();
+                last = Some(e);
+                if !recoverable {
+                    break;
                 }
             }
-            Err(e)
         }
-        r => r,
     }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no model candidates for task '{task}'")))
 }
 
 /// One provider attempt: tier-resolve, call, log. Split from `chat_inner` so
@@ -846,10 +912,9 @@ fn attempt(
     sink: DeltaSink,
 ) -> anyhow::Result<(String, u64)> {
     let call_id = crate::llm_log::next_call_id();
-    // Model-tier ring: route this task to its tier's model (an explicit
-    // MARS_LLM_MODEL still wins — that check lives inside model_for).
-    let resolved = crate::tiers::model_for(cfg.provider, task, &cfg.model);
-    let cfg = &AgentConfig { model: resolved, ..cfg.clone() };
+    // The model is already tier-resolved by `chat_inner`, which owns the candidate
+    // order (in-tier fallback + cross-provider rotation, MARS_LLM_MODEL honored).
+    // attempt just makes this one call and logs it as its own record.
     let start = std::time::Instant::now();
     let result = {
         // Guard the caller's sink: accumulate raw chunks, re-strip, and emit
@@ -958,6 +1023,7 @@ fn chat_openai(
                 let node = if j.is_array() { j[0].clone() } else { j };
                 node["error"]["message"].as_str().map(str::to_string)
             });
+            let retired = is_retired_model(code, api_msg.as_deref());
             let msg = match code {
                 429 => match api_msg.as_deref().and_then(retry_secs) {
                     Some(s) => format!(
@@ -978,6 +1044,9 @@ fn chat_openai(
             };
             if code == 429 {
                 return Err(anyhow::Error::new(RateLimited(msg)));
+            }
+            if retired {
+                return Err(anyhow::Error::new(ModelUnavailable(msg)));
             }
             anyhow::bail!("{msg}");
         }
@@ -1070,6 +1139,7 @@ fn chat_anthropic(
             let api_msg = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
                 .and_then(|j| j["error"]["message"].as_str().map(str::to_string));
+            let retired = is_retired_model(code, api_msg.as_deref());
             let msg = match code {
                 429 => "rate limit reached (Anthropic) — wait and retry, or switch model \
                         with MARS_LLM_MODEL."
@@ -1082,6 +1152,9 @@ fn chat_anthropic(
             };
             if code == 429 {
                 return Err(anyhow::Error::new(RateLimited(msg)));
+            }
+            if retired {
+                return Err(anyhow::Error::new(ModelUnavailable(msg)));
             }
             anyhow::bail!("{msg}");
         }
@@ -1189,6 +1262,7 @@ fn chat_bedrock(
             let api_msg = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
                 .and_then(|j| j["message"].as_str().map(str::to_string));
+            let retired = is_retired_model(code, api_msg.as_deref());
             let msg = match code {
                 429 => "rate limit / throttled (Bedrock) — wait and retry, or switch model \
                         with MARS_LLM_MODEL."
@@ -1201,6 +1275,9 @@ fn chat_bedrock(
             };
             if code == 429 {
                 return Err(anyhow::Error::new(RateLimited(msg)));
+            }
+            if retired {
+                return Err(anyhow::Error::new(ModelUnavailable(msg)));
             }
             anyhow::bail!("{msg}");
         }
