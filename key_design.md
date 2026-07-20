@@ -102,10 +102,14 @@ happens many times per minute may cost one chord, never a prefix sequence — pr
 sequences are for *operations on* containers, not travel between them.
 
 **`C-t` is the travel hub.** One chord opens a transient mode with one-char verbs and
-an always-on cheat panel (t new tab · h/l/1-9 switch/jump · H/L reorder · o pane ·
-`|`/`-` split · x move pane · q close): the discoverable, zero-recall route to every
-movement the direct chords serve. Rule inside the hub: *creation exits, navigation
-stays.* The panel is the teacher; the direct chords above are what it graduates you to.
+an always-on cheat panel: ONE directional grammar walks the whole workspace — arrows
+(or `hjkl`) move focus between split panes by real geometry and spill into the adjacent
+tab at the pane-grid edge, so panes and tabs are two *views* of one space, not two
+movement models. Then `1-9` jump to a tab · `⇧`-arrows / `H`/`L` reorder the focused
+tab · `z`/`Space` zoom (toggle) · `d`/`⌫` close the focused view (the pane, or the whole
+tab when it is the tab's last pane) · `t`/`T` new tab / terminal tab · `|`/`-` split ·
+`x` swap pane. Rule inside the hub: *creation exits, navigation stays.* The panel is
+the teacher; the direct chords above are what it graduates you to.
 
 **Terminal-capability tiering.** Legacy byte encoding cannot express Ctrl+shifted-
 punctuation (`C-[` *is* Esc) or the Cmd key (Mac terminals keep ⌘ for themselves).

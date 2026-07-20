@@ -1753,6 +1753,30 @@ impl App {
         tab.zoomed = if tab.zoomed == Some(focused) { None } else { Some(focused) };
     }
 
+    /// Space-warp movement — one directional grammar over the whole workspace.
+    /// Steps to the nearest pane in a screen direction (real geometry); when there
+    /// is no pane that way, a horizontal move spills into the adjacent tab. Panes
+    /// and tabs are just views of one space, so one set of keys walks all of it.
+    fn warp_move(&mut self, dx: i32, dy: i32) {
+        let before = self.focused_pane_id();
+        self.focus_direction(dx, dy);
+        if self.focused_pane_id() == before && dx != 0 {
+            if dx < 0 { self.prev_tab(); } else { self.next_tab(); }
+        }
+    }
+
+    /// Space-warp delete — one key closes the focused view: the pane, or the whole
+    /// tab when it is the tab's last pane. Behind the motor-slip confirm because the
+    /// key sits right beside the navigation arrows.
+    fn close_focused(&mut self) {
+        self.force_close_confirm = true;
+        if self.tab().layout.count() > 1 {
+            self.close_pane();
+        } else {
+            self.close_tab();
+        }
+    }
+
     /// C-x x — move this pane's content into the next pane slot (swap).
     fn swap_pane(&mut self) {
         let a = self.focused_pane_id();
@@ -2517,42 +2541,16 @@ impl App {
         }
 
         match key.code {
-            // ── Tabs ──
+            // ── Create (creation exits — you'll want to type) ──
             KeyCode::Char('t') | KeyCode::Char('n') => {
                 self.new_tab();
-                self.mode = Mode::Edit; // creation exits — you'll want to type
-            }
-            // Destructive warp verbs sit beside navigation keys (d~h/l, 0~1-9) —
-            // a motor slip must cost a prompt, not a tab. force_close_confirm
-            // makes the close gate always fire here (even with no live terminal).
-            KeyCode::Char('d') => {
-                self.force_close_confirm = true;
-                self.close_tab();
+                self.mode = Mode::Edit;
             }
             KeyCode::Char('T') => {
-                // Open a terminal in a NEW tab (non-destructive; creation exits).
+                // Open a terminal in a NEW tab.
                 self.new_tab();
                 self.open_terminal(); // converts the new tab's pane; sets Mode::Terminal
             }
-            KeyCode::Char('r') => self.run_action(Action::RenameTab), // → prompt, exits mode
-            KeyCode::Char('?') => self.run_action(Action::ExplainFailure), // triage → Ask
-            KeyCode::Char('w') => self.toggle_watch_pane(), // W6: watch this pane
-            KeyCode::Char('h') | KeyCode::Left if !shift => self.prev_tab(),
-            KeyCode::Char('l') | KeyCode::Right if !shift => self.next_tab(),
-            KeyCode::Char('H') => self.move_tab(-1),
-            KeyCode::Char('L') => self.move_tab(1),
-            KeyCode::Left  if shift => self.move_tab(-1),
-            KeyCode::Right if shift => self.move_tab(1),
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                self.goto_tab((c as u8 - b'0') as usize);
-                self.mode = self.mode_for_focused_pane(); // land ready to use
-            }
-            // ── Panes ──
-            KeyCode::Char('o') | KeyCode::Tab => self.focus_next_pane(),
-            KeyCode::Char('x') => self.swap_pane(),
-            KeyCode::Char('z') => self.toggle_zoom(),
-            KeyCode::Char('>') | KeyCode::Char('+') | KeyCode::Char('=') => self.resize_pane(6),
-            KeyCode::Char('<') => self.resize_pane(-6),
             KeyCode::Char('|') | KeyCode::Char('\\') | KeyCode::Char('v') => {
                 self.split_vertical();
                 self.mode = Mode::Edit;
@@ -2561,10 +2559,42 @@ impl App {
                 self.split_horizontal();
                 self.mode = Mode::Edit;
             }
-            KeyCode::Char('q') | KeyCode::Char('0') => {
-                self.force_close_confirm = true; // motor-slip guard (0 ~ digit row)
-                self.close_pane();
+
+            // ── Move: ONE directional grammar over the whole workspace. Arrows (or
+            //    hjkl) step between panes by real geometry; at the horizontal edge
+            //    of the pane grid, focus spills into the adjacent tab — panes and
+            //    tabs are just views of one space, so one set of keys walks it all.
+            KeyCode::Left  | KeyCode::Char('h') if !shift => self.warp_move(-1, 0),
+            KeyCode::Right | KeyCode::Char('l') if !shift => self.warp_move(1, 0),
+            KeyCode::Up    | KeyCode::Char('k') => self.warp_move(0, -1),
+            KeyCode::Down  | KeyCode::Char('j') => self.warp_move(0, 1),
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                self.goto_tab((c as u8 - b'0') as usize);
+                self.mode = self.mode_for_focused_pane(); // land ready to use
             }
+
+            // ── Reorder the focused tab (moves the view itself, not the focus) ──
+            KeyCode::Char('H') => self.move_tab(-1),
+            KeyCode::Char('L') => self.move_tab(1),
+            KeyCode::Left  if shift => self.move_tab(-1),
+            KeyCode::Right if shift => self.move_tab(1),
+
+            // ── Toggle: zoom (maximize) the focused pane; press again to restore ──
+            KeyCode::Char('z') | KeyCode::Char(' ') => self.toggle_zoom(),
+
+            // ── Delete: ONE key closes the focused view — the pane, or the whole
+            //    tab when it is the tab's last pane. Behind a motor-slip prompt
+            //    because it sits next to the navigation keys.
+            KeyCode::Char('d') | KeyCode::Backspace | KeyCode::Delete => self.close_focused(),
+
+            // ── Act on the focused pane ──
+            KeyCode::Char('x') => self.swap_pane(),
+            KeyCode::Char('>') | KeyCode::Char('+') | KeyCode::Char('=') => self.resize_pane(6),
+            KeyCode::Char('<') => self.resize_pane(-6),
+            KeyCode::Char('r') => self.run_action(Action::RenameTab), // → prompt, exits mode
+            KeyCode::Char('?') => self.run_action(Action::ExplainFailure), // triage → Ask
+            KeyCode::Char('w') => self.toggle_watch_pane(), // watch this pane
+
             // ── Session ──
             KeyCode::Char('D') => {
                 self.run_action(Action::Detach);

@@ -3576,6 +3576,45 @@ fn selfcheck() -> Result<()> {
     assert_eq!(app.tabs.len(), 2, "declined warp 'd' still closed the tab");
     println!("[selfcheck] warp keys motor-slip gate . PASS");
 
+    // 34b. Unified space-warp grammar: ONE directional set (arrows) walks the whole
+    //      workspace — between split panes by geometry, spilling into the adjacent
+    //      tab at the pane-grid edge; z/Space zoom the focused pane; d closes the
+    //      focused view (pane, or tab when it's the last pane).
+    {
+        let mut app = App::new(None)?;
+        app.new_tab(); // two single-pane tabs; focus tab 1
+        app.handle_key(kc(KeyCode::Char('t')))?; // C-t → warp
+        // Single pane → no pane to the side → horizontal move spills to the tab.
+        app.handle_key(k(KeyCode::Left))?;
+        assert_eq!(app.active_tab, 0, "warp ← at the pane edge did not spill to prev tab");
+        app.handle_key(k(KeyCode::Right))?;
+        assert_eq!(app.active_tab, 1, "warp → at the pane edge did not spill to next tab");
+        // Split → two panes; now arrows move BETWEEN panes (geometry), no spill.
+        app.handle_key(k(KeyCode::Esc))?; // leave warp to split
+        app.handle_key(kc(KeyCode::Char('\\')))?; // C-\ → split right
+        assert_eq!(app.tab().layout.count(), 2, "C-\\ did not split");
+        app.handle_key(kc(KeyCode::Char('t')))?; // C-t → warp again
+        let mut term = Terminal::new(TestBackend::new(80, 20))?;
+        term.draw(|f| ui::render(f, &mut app))?; // populate pane geometry
+        let right = app.focused_pane_id();
+        app.handle_key(k(KeyCode::Left))?;
+        let left = app.focused_pane_id();
+        assert_ne!(left, right, "warp ← did not move between split panes");
+        assert_eq!(app.active_tab, 1, "warp ← between panes must NOT spill tabs");
+        // z zooms the focused pane; Space toggles it back (same verb, unified).
+        app.handle_key(k(KeyCode::Char('z')))?;
+        assert_eq!(app.tab().zoomed, Some(left), "warp z did not zoom the focused pane");
+        app.handle_key(k(KeyCode::Char(' ')))?;
+        assert_eq!(app.tab().zoomed, None, "warp Space did not un-zoom");
+        // d closes the focused view: in a 2-pane split it closes the pane (behind
+        // the motor-slip gate; y completes).
+        app.handle_key(k(KeyCode::Char('d')))?;
+        assert!(app.mode == mode::Mode::Prompt, "warp d did not gate the close");
+        app.handle_key(k(KeyCode::Char('y')))?;
+        assert_eq!(app.tab().layout.count(), 1, "warp d did not close the focused pane");
+        println!("[selfcheck] unified warp grammar ...... PASS");
+    }
+
     // 35. C-g cancels the command bar from every submode (doctrine §3.4).
     let mut app = App::new(None)?;
     app.handle_key(kc(KeyCode::Char(' ')))?; // → Bar (Command)
