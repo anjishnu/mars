@@ -998,41 +998,28 @@ fn render_terminal_pane(
 
     let exited = app.terms.get(&term_id).map(|t| t.exited).unwrap_or(true);
     let offset = app.terms.get(&term_id).map(|t| t.view_offset()).unwrap_or(0);
-    // Per-pane status: the surface's own verdict colors the glyph (shown even on the
-    // focused pane — the eyes are here) and, when this pane is NOT focused, its
-    // border, so a job that needs you glows warm across a split without stealing the
-    // focus color from the pane you're actually in.
-    let (glyph, vcolor) = verdict_style(app, app.pane_verdict(pane_id)).unwrap_or(("", Color::DarkGray));
-    let border_style = if focused {
-        Style::default().fg(rgb(app.tuning.theme_terminal))
-    } else if !glyph.is_empty() {
-        Style::default().fg(vcolor)
-    } else if exited {
+    // The pane border/title carry NO status glyph — status lives in the tab bar, so
+    // the divider line stays uncluttered. Border color is focus/exited only.
+    let border_style = if exited {
         Style::default().fg(rgb(app.tuning.theme_accent_dark))
+    } else if focused {
+        Style::default().fg(rgb(app.tuning.theme_terminal))
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let base = pane.title.as_deref().unwrap_or("terminal");
-    let suffix = if exited {
-        " · exited".to_string()
+    let title = if exited {
+        format!(" {base} · exited ")
     } else if offset > 0 {
-        format!(" ↑{offset}")
+        format!(" {base} ↑{offset} ")
     } else {
-        String::new()
+        format!(" {base} ")
     };
-    let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
-    let mut title_spans: Vec<Span> = Vec::new();
-    if !glyph.is_empty() {
-        title_spans.push(Span::styled(
-            format!(" {glyph} "),
-            Style::default().fg(vcolor).add_modifier(Modifier::BOLD),
-        ));
-        title_spans.push(Span::styled(format!("{base}{suffix} "), Style::default().add_modifier(title_mod)));
-    } else {
-        title_spans.push(Span::styled(format!(" {base}{suffix} "), Style::default().add_modifier(title_mod)));
-    }
     let block = Block::default()
-        .title(Line::from(title_spans))
+        .title(Span::styled(
+            title,
+            Style::default().add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(rect);
