@@ -3931,8 +3931,11 @@ fn selfcheck() -> Result<()> {
         assert!(t.contains("▎"), "manifest severity stripe missing");
         assert!(t.contains("★"), "good-news ★ on the long success missing");
         app.shift_report = None;
-        // Fail-hide: the briefing call finishing with NO model output (error /
-        // timeout / tunnel down) dismisses the overlay — no bare stub is shown.
+        // Fail-KEEP: the enrichment call finishing with NO model output (error /
+        // timeout / no key reachable from a detached daemon) must KEEP the
+        // deterministic briefing and render it. The mission board (clock, manifest,
+        // greeting) IS the briefing; dismissing it was the "flashes then vanishes"
+        // bug that hid the briefing on every reattach a daemon couldn't reach a model.
         app.shift_report = Some(briefing::ShiftReport {
             away_secs: 60, mission: None, rows: vec![], suggestion: None,
             narrative: "Welcome back — all quiet.".into(),
@@ -3941,7 +3944,15 @@ fn selfcheck() -> Result<()> {
         });
         app.agent_tx.send(agent::AgentEvent::ShiftDone)?; // no delta preceded it → failed call
         app.tick();
-        assert!(app.shift_report.is_none(), "a failed briefing call must dismiss the overlay");
+        let rep = app.shift_report.as_ref()
+            .expect("a failed enrichment call must KEEP the deterministic briefing");
+        assert!(!rep.narrative_streaming, "ShiftDone must settle the stream even when the call failed");
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.to_lowercase().contains("welcome back") || t.contains("all quiet"),
+            "the deterministic briefing must render after a failed enrichment call");
+        app.shift_report = None;
         // Boot polish (animate=1): while the call is in flight a mission-control word
         // flashes in place of the deterministic backup line, so the prose never
         // visibly swaps a stub; and the model text types in behind a cursor rather

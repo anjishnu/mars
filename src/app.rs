@@ -4188,17 +4188,19 @@ impl App {
                     }
                 }
                 AgentEvent::ShiftDone => {
-                    // The briefing call finished. If the model produced nothing —
-                    // it errored, timed out, or the tunnel was down — dismiss the
-                    // overlay entirely rather than show a bare deterministic stub.
-                    // (Keyless sessions never fire the call, so ShiftDone never
-                    // arrives for them and their deterministic briefing stands.)
+                    // The enrichment call finished. If the model produced tokens, log
+                    // the finalized briefing for continuity (the next return reports
+                    // progress against it). If it produced nothing — errored, timed
+                    // out, no key or tunnel reachable from the daemon — KEEP the
+                    // deterministic briefing: the mission board (clock, manifest,
+                    // greeting) IS the briefing, not a throwaway stub. Yanking it out
+                    // from under the user was the "it flashes then vanishes" bug —
+                    // and a detached daemon that can't reach the model hit it every
+                    // reattach. Just settle the streaming state so the final frame
+                    // renders stably. (Keyless sessions never fire the call; their
+                    // deterministic briefing already stands.)
                     if let Some(rep) = self.shift_report.as_ref() {
-                        if !rep.narrative_from_model {
-                            self.shift_report = None;
-                        } else {
-                            // Log the finalized briefing for continuity (the next
-                            // return reports progress against it).
+                        if rep.narrative_from_model {
                             let ts = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
@@ -4206,11 +4208,12 @@ impl App {
                             crate::worklog::log_briefing(
                                 &self.session_label(), &rep.narrative, &rep.facts, rep.away_secs, ts,
                             );
-                            if let Some(rep) = self.shift_report.as_mut() {
-                                rep.narrative_streaming = false;
-                            }
                         }
                     }
+                    if let Some(rep) = self.shift_report.as_mut() {
+                        rep.narrative_streaming = false;
+                    }
+                    self.needs_redraw = true;
                 }
                 AgentEvent::Goals { goals } => {
                     self.bg_busy = false;
