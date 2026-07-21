@@ -1711,12 +1711,9 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
         };
         let _ = id;
         let marker = if cur { "‹" } else { " " };
-        let age = match &row.kind {
-            ItemKind::Surface(sr) if sr.age_secs > 0 => crate::briefing::fmt_secs(sr.age_secs),
-            _ => String::new(),
-        };
-        // Budget: marker(1) glyph(2) age( ) — the (self-identifying) name gets the rest.
-        let name_budget = (width as usize).saturating_sub(3 + age.chars().count() + 2);
+        // Age no longer trails the row — it lives in the summary box for the
+        // highlighted workspace. The selected row carries only the ↵ verb.
+        let name_budget = (width as usize).saturating_sub(3 + 3);
         let mut spans = vec![
             Span::styled(marker.to_string(), Style::default().fg(if s { sel_fg } else { rgb(app.tuning.theme_accent_bright) }).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{glyph} "), Style::default().fg(if s { sel_fg } else { vcolor }).bg(bg).add_modifier(Modifier::BOLD)),
@@ -1726,25 +1723,54 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
                     .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
             ),
         ];
-        // The selected row carries the ↵ verb (a single actionable icon), right of
-        // the age — no separate "↵ jump" line.
-        let right = if s {
-            if age.is_empty() { "↵ ".to_string() } else { format!("{age}  ↵ ") }
-        } else {
-            format!("{age} ")
-        };
+        let right = if s { "↵ " } else { "  " };
         let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
         let pad = (width as usize).saturating_sub(lw + right.chars().count());
         spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        spans.push(Span::styled(right, Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg).add_modifier(if s { Modifier::BOLD } else { Modifier::empty() })));
+        spans.push(Span::styled(right.to_string(), Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg).add_modifier(if s { Modifier::BOLD } else { Modifier::empty() })));
         out.push(Line::from(spans));
     }
     out
 }
 
-/// The detail strip: the highlighted workspace in full — a rule separator, then
-/// name · status · age, its why-line (ellipsized), and the ↵ verb. Detail follows
-/// focus (no expand key), so moving the selection updates it in place.
+/// Word-wrap `text` to `width`, at most `max_lines` (the last ellipsized if the text
+/// overruns). A long single word is hard-broken so it can't overflow the box.
+fn wrap_summary(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let word: String = if word.chars().count() > width { word.chars().take(width).collect() } else { word.to_string() };
+        if cur.is_empty() {
+            cur = word;
+        } else if cur.chars().count() + 1 + word.chars().count() <= width {
+            cur.push(' ');
+            cur.push_str(&word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = word;
+            if lines.len() >= max_lines { break; }
+        }
+    }
+    if !cur.is_empty() && lines.len() < max_lines { lines.push(cur); }
+    if lines.len() > max_lines { lines.truncate(max_lines); }
+    // If we ran out of room mid-text, ellipsize the last visible line.
+    if lines.len() == max_lines {
+        let more = text.split_whitespace().count()
+            > lines.iter().map(|l| l.split_whitespace().count()).sum::<usize>();
+        if more {
+            if let Some(last) = lines.last_mut() {
+                *last = ellip(&format!("{last} …"), width);
+            }
+        }
+    }
+    lines
+}
+
+/// The summary box for the highlighted workspace: a rule, "status: <state> · <age>"
+/// in bold, then the generated summary WRAPPED across the box (not trailing off), and
+/// a dim `s` hint. A teal left rail ties it to the teal-highlighted selection. The ↵
+/// verb lives on the selected row, not here.
 fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16) -> Vec<Line<'static>> {
     use crate::briefing::Verdict;
     let w = width as usize;
@@ -1758,39 +1784,76 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
         Verdict::Blocked => "blocked", Verdict::Failed => "failed",
         Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
     };
-    // The status section is indented and padded on both sides, with a teal left rail
-    // that ties it to the teal-highlighted selection. "status: WHATEVER" leads in
-    // bold; the detailed summary sits below in a softer italic. The ↵ verb lives on
-    // the selected row, not here.
     let teal = rgb(app.tuning.theme_terminal);
     let rail = || Span::styled(" ▌ ", Style::default().fg(teal));
     let content_w = w.saturating_sub(5); // " ▌ " + right padding
+    // Status + age (the time count now lives here, not inline on the row).
+    let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
     out.push(Line::from(vec![
         rail(),
         Span::styled("status: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::styled(vlabel.to_string(), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+        Span::styled(age, Style::default().fg(Color::DarkGray)),
     ]));
+    // The generated summary, wrapped to fill the box (up to 4 lines).
     let why = row.map(|r| r.description.clone()).unwrap_or_default();
-    if !why.is_empty() {
+    for line in wrap_summary(&why, content_w, 4) {
         out.push(Line::from(vec![
             rail(),
-            Span::styled(ellip(&why, content_w), Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+            Span::styled(line, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
         ]));
     }
-    // A dim hint: `s` pulls a fresh LLM summary for this surface.
     out.push(Line::from(Span::styled(" s  summarize", Style::default().fg(Color::DarkGray))));
     out
 }
 
-/// The Workspaces board — a separate, static bordered panel with a teal border (the
-/// terminal's color, marking it as a live surface board rather than a scratch list),
-/// reached from the command bar with the ← arrow. Its own title and a rule separator
-/// before the detail; no legend clutter.
+/// A tiny deterministic hash for star placement + twinkle phase — stable across
+/// frames so stars never jump; only brightness moves.
+fn star_hash(x: usize, y: usize) -> u64 {
+    let mut h = (x as u64).wrapping_mul(73856093) ^ (y as u64).wrapping_mul(19349663);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x9E37_79B1);
+    h ^ (h >> 16)
+}
+
+/// An elegant, minimal starfield for the workspaces panel's empty space: a sparse,
+/// mostly-dim field of `·` with a rare `✦`/`⋆`, a few stars slowly twinkling brighter
+/// on a ~slow cadence driven by `tick`, and the odd warm (teal) star. Deterministic
+/// in position; nothing drifts, only brightness breathes.
+fn starfield(app: &App, width: u16, height: u16, tick: u64) -> Vec<Line<'static>> {
+    let w = width as usize;
+    let teal = rgb(app.tuning.theme_terminal);
+    let mut lines = Vec::with_capacity(height as usize);
+    for y in 0..height as usize {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut run = String::new();
+        for x in 0..w {
+            let seed = star_hash(x, y);
+            if seed % 29 == 0 {
+                if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
+                let glyph = match seed % 11 { 0 => "✦", 1 => "⋆", _ => "·" };
+                let lit = (seed / 29).wrapping_add(tick / 8) % 6 == 0; // a few lit at a time
+                let color = if seed % 97 == 0 { teal }
+                    else if lit { Color::Gray }
+                    else { Color::DarkGray };
+                spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
+            } else {
+                run.push(' ');
+            }
+        }
+        if !run.is_empty() { spans.push(Span::raw(run)); }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// The Workspaces board — a separate teal box, reached from the command bar with ←.
+/// Opens as tall as the command box (same height by default); its list + summary sit
+/// at the top and the empty bottom fills with an ambient starfield.
 fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let active = app.palette.as_ref().map(|p| p.column == crate::palette::BarColumn::Workspaces).unwrap_or(false);
     let sel = app.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
     let teal = rgb(app.tuning.theme_terminal);
-    // Always a teal box (its terminal-surface identity); bold when focused.
     let mut bstyle = Style::default().fg(teal);
     if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
@@ -1799,15 +1862,24 @@ fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
         .title(Span::styled(" WORKSPACES ", Style::default().fg(teal).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+
     let rows = app.bar_workspace_rows();
     let ih = inner.height as usize;
-    let detail_h = if ih > 4 { 4 } else { 0 };
-    let list_h = ih.saturating_sub(detail_h);
+    // Summary box for the highlighted workspace; the list gets what's left above it.
+    let dlines = detail_lines(app, rows.get(sel), inner.width);
+    let summ_h = dlines.len().min(ih);
+    let list_h = rows.len().min(ih.saturating_sub(summ_h));
     frame.render_widget(Paragraph::new(Text::from(workspace_lines(app, &rows, sel, active, inner.width, list_h))),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: list_h as u16 });
-    if detail_h > 0 {
-        frame.render_widget(Paragraph::new(Text::from(detail_lines(app, rows.get(sel), inner.width))),
-            Rect { x: inner.x, y: inner.y + list_h as u16, width: inner.width, height: detail_h as u16 });
+    frame.render_widget(Paragraph::new(Text::from(dlines)),
+        Rect { x: inner.x, y: inner.y + list_h as u16, width: inner.width, height: summ_h as u16 });
+    // The empty bottom is the sky.
+    let used = list_h + summ_h;
+    if ih > used {
+        frame.render_widget(
+            Paragraph::new(Text::from(starfield(app, inner.width, (ih - used) as u16, app.frame_tick))),
+            Rect { x: inner.x, y: inner.y + used as u16, width: inner.width, height: (ih - used) as u16 },
+        );
     }
 }
 
@@ -1820,11 +1892,13 @@ fn render_command_panel(frame: &mut Frame, app: &App, rect: Rect, left_border: b
     // The command box always keeps its accent (orange) border — a fully-boxed panel —
     // and just bolds when it holds focus; the selection highlight inside carries the
     // rest of the focus signal.
-    let mut bstyle = Style::default().fg(rgb(app.tuning.theme_accent));
+    let accent = rgb(app.tuning.theme_accent);
+    let mut bstyle = Style::default().fg(accent);
     if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
         .borders(borders)
-        .border_style(bstyle);
+        .border_style(bstyle)
+        .title(Span::styled(" COMMANDS ", Style::default().fg(accent).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let rows = app.bar_rows();
@@ -1858,12 +1932,12 @@ fn render_bar_dropdown(
         return Some(full);
     }
 
-    // A separate, STATIC WORKSPACES box beside the command launcher. Its height is
-    // fixed by its own content (all workspaces + detail + border), independent of the
-    // query — so it stays put while the command box shrinks as you type. Both boxes
-    // are bottom-anchored; ← focuses the panel, → the launcher.
-    let ws_count = app.bar_workspace_rows().len().max(1) as u16;
-    let ws_h = (ws_count + 4 + 2).min(max_height).max(4); // rows + detail(4) + top/bottom border
+    // A separate, STATIC WORKSPACES box beside the command launcher. It opens as tall
+    // as the command box's ceiling (same height by default on invocation) and stays
+    // put while the command box shrinks as you type; its content sits at the top and
+    // the empty bottom fills with the starfield. Both boxes are bottom-anchored; ←
+    // focuses the panel, → the launcher.
+    let ws_h = max_height.max(4);
     let ws_w = app.tuning.tree_width.clamp(20, bar_area.width.saturating_sub(30).max(20));
     let ws_rect = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(ws_h), width: ws_w, height: ws_h };
     let cmd_rect = Rect {

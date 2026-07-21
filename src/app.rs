@@ -4215,6 +4215,14 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
 
+        // Starfield twinkle: while the command bar is open, repaint on a slow cadence
+        // (~every 8 ticks, a few fps — a drift, not a strobe) so the ambient stars in
+        // the workspaces panel's empty space stay alive. Self-terminating: the bar
+        // closes, the redraws stop.
+        if matches!(self.mode, Mode::Bar) && self.frame_tick % 8 == 0 {
+            self.needs_redraw = true;
+        }
+
         for term in self.terms.values_mut() {
             term.flush_startup_input();
         }
