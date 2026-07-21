@@ -163,13 +163,12 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         height: panel_h,
     };
     frame.render_widget(Clear, rect);
-    // A full box with " WARP " on the accent line — matching the WORKSPACES / COMMANDS
-    // boxes' titled borders.
-    let accent = rgb(app.tuning.theme_accent);
+    // A full box with " WARP " on a teal line — matching the WORKSPACES box's border.
+    let teal = rgb(app.tuning.theme_terminal);
     let block = Block::default()
-        .title(Span::styled(" WARP ", Style::default().fg(accent).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" WARP ", Style::default().fg(teal).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(accent));
+        .border_style(Style::default().fg(teal));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
