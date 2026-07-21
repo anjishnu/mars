@@ -1815,26 +1815,49 @@ fn star_hash(x: usize, y: usize) -> u64 {
     h ^ (h >> 16)
 }
 
-/// An elegant, minimal starfield for the workspaces panel's empty space: a sparse,
-/// mostly-dim field of `·` with a rare `✦`/`⋆`, a few stars slowly twinkling brighter
-/// on a ~slow cadence driven by `tick`, and the odd warm (teal) star. Deterministic
-/// in position; nothing drifts, only brightness breathes.
+/// A calm night sky for the workspaces panel's empty space: a STILL, sparse field of
+/// dim stars (no twinkle — the flicker was too stimulating), with an occasional slow
+/// meteor drifting diagonally across and fading. Deterministic in position; the field
+/// never moves, and only a meteor's brief, gentle pass animates.
 fn starfield(app: &App, width: u16, height: u16, tick: u64) -> Vec<Line<'static>> {
-    let w = width as usize;
+    let (w, h) = (width as usize, height as usize);
     let teal = rgb(app.tuning.theme_terminal);
-    let mut lines = Vec::with_capacity(height as usize);
-    for y in 0..height as usize {
+    // At most one meteor, only during a short window of a long cycle — so the sky is
+    // still most of the time and a streak is a rare, calming event.
+    const PERIOD: u64 = 340;
+    const DURATION: u64 = 70;
+    let meteor: Option<(i32, i32)> = if w > 8 && h > 2 && tick % PERIOD < DURATION {
+        let p = (tick % PERIOD) as f32 / DURATION as f32; // 0..1 across the field
+        Some(((p * (w as f32 + 8.0)) as i32 - 4, (p * (h as f32 - 1.0)) as i32))
+    } else {
+        None
+    };
+
+    let mut lines = Vec::with_capacity(h);
+    for y in 0..h {
         let mut spans: Vec<Span> = Vec::new();
         let mut run = String::new();
         for x in 0..w {
-            let seed = star_hash(x, y);
-            if seed % 29 == 0 {
+            // A meteor (head + a short up-left diagonal tail) overrides a static star.
+            let mtr = meteor.and_then(|(hx, hy)| {
+                let (dx, dy) = (hx - x as i32, hy - y as i32);
+                (dx >= 0 && dx <= 3 && dy == dx).then_some(dx)
+            });
+            if let Some(off) = mtr {
                 if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
-                let glyph = match seed % 11 { 0 => "✦", 1 => "⋆", _ => "·" };
-                let lit = (seed / 29).wrapping_add(tick / 8) % 6 == 0; // a few lit at a time
-                let color = if seed % 97 == 0 { teal }
-                    else if lit { Color::Gray }
-                    else { Color::DarkGray };
+                let (g, c) = match off {
+                    0 => ("✦", Color::Gray),      // head — as bright as it gets (still gentle)
+                    1 => ("·", Color::Gray),
+                    _ => ("·", Color::DarkGray),  // fading tail
+                };
+                spans.push(Span::styled(g.to_string(), Style::default().fg(c)));
+                continue;
+            }
+            let seed = star_hash(x, y);
+            if seed % 31 == 0 {
+                if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
+                let glyph = match seed % 13 { 0 => "✦", 1 => "⋆", _ => "·" };
+                let color = if seed % 101 == 0 { teal } else { Color::DarkGray }; // still, dim
                 spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
             } else {
                 run.push(' ');
