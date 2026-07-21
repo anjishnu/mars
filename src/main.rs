@@ -3919,6 +3919,7 @@ fn selfcheck() -> Result<()> {
     //      blocks buffer edits until it is toggled back off.
     {
         let mut app = App::new(None)?;
+        app.tuning.markdown_engine = 0; // pin the hand-rolled engine for these asserts
         let mut term = Terminal::new(TestBackend::new(120, 40))?;
         for line in ["# Heading", "- bullet", "**bold**", "```", "code", "```"] {
             typ(&mut app, line)?;
@@ -3928,6 +3929,7 @@ fn selfcheck() -> Result<()> {
 
         app.run_action(palette::Action::ToggleMarkdown);
         assert!(app.focused_pane().md_view, "md_view flag did not set");
+        assert!(!app.focused_pane().md_termimad, "engine should be hand-rolled here");
         app.run_action(palette::Action::GoTop);
         term.draw(|f| ui::render(f, &mut app))?;
         let md = screen_text(&term);
@@ -3954,6 +3956,35 @@ fn selfcheck() -> Result<()> {
         typ(&mut app, "EDITS")?;
         assert!(app.focused_buf().rope.to_string().contains("EDITS"), "editing broken after md_view off");
         println!("[selfcheck] markdown view toggle ...... PASS");
+    }
+
+    // 40c. Markdown termimad reading-mode (prototype): the same toggle with the
+    //      termimad engine reflows the buffer into a rendered document (no cursor;
+    //      arrows scroll it), and `m` switches engines live.
+    {
+        let mut app = App::new(None)?;
+        app.tuning.markdown_engine = 1; // termimad engine
+        let mut term = Terminal::new(TestBackend::new(100, 30))?;
+        for line in ["# Title", "", "some **bold** and *italic* text", "", "| a | b |", "|---|---|", "| 1 | 2 |"] {
+            typ(&mut app, line)?;
+            app.handle_key(k(KeyCode::Enter))?;
+        }
+        app.run_action(palette::Action::ToggleMarkdown);
+        assert!(app.focused_pane().md_view && app.focused_pane().md_termimad, "termimad engine did not engage");
+        term.draw(|f| ui::render(f, &mut app))?;
+        let t = screen_text(&term);
+        assert!(t.contains("termimad"), "title should mark the termimad engine: {t}");
+        assert!(t.contains("Title"), "termimad did not render the heading text");
+        // Arrows scroll the document (md_scroll), and must NOT move the cursor.
+        let s0 = app.focused_pane().md_scroll;
+        let cr0 = app.focused_pane().cursor_row;
+        app.handle_key(k(KeyCode::Down))?;
+        assert_eq!(app.focused_pane().md_scroll, s0 + 1, "arrow did not scroll the termimad document");
+        assert_eq!(app.focused_pane().cursor_row, cr0, "termimad mode must not move the cursor");
+        // `m` switches back to the hand-rolled engine live.
+        app.handle_key(k(KeyCode::Char('m')))?;
+        assert!(!app.focused_pane().md_termimad, "m did not switch the engine");
+        println!("[selfcheck] markdown termimad (proto) . PASS");
     }
 
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,

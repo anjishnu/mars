@@ -760,6 +760,65 @@ fn md_line_spans(
     md_inline(out, trimmed, tuning);
 }
 
+/// Prototype: render the buffer's Markdown with termimad (reflow, tables, wrapping),
+/// windowed by `md_scroll`. termimad renders to ANSI; we re-parse it with vt100 into
+/// a cell grid and convert to ratatui spans, so its full output lands in our frame.
+fn render_markdown_termimad(frame: &mut Frame, buf: &crate::buffer::Buffer, inner: Rect, md_scroll: usize) {
+    if inner.width == 0 || inner.height == 0 { return; }
+    let width = inner.width;
+    let mut text = String::with_capacity(buf.line_count() * 40);
+    for i in 0..buf.line_count() {
+        if i > 0 { text.push('\n'); }
+        text.push_str(&buf.line_str(i));
+    }
+    let skin = termimad::MadSkin::default();
+    let fmt = skin.text(&text, Some(width as usize));
+    let total = fmt.lines.len().max(1);
+    // termimad emits bare `\n` (relying on the terminal's ONLCR); vt100 has none, so
+    // each line would inherit the previous line's end column. Force CRLF so every
+    // line starts at column 0. +headroom rows so the trailing newline can't scroll.
+    let ansi = fmt.to_string().replace('\n', "\r\n");
+    let mut parser = vt100::Parser::new((total + 8) as u16, width, 0);
+    parser.process(ansi.as_bytes());
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let vw = cols.min(width);
+
+    let start = md_scroll.min(total.saturating_sub(1));
+    let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
+    for r in 0..inner.height as usize {
+        let row = (start + r) as u16;
+        if row >= rows { lines.push(Line::from(Span::raw(""))); continue; }
+        let mut spans: Vec<Span> = Vec::new();
+        let mut run = String::new();
+        let mut run_style: Option<Style> = None;
+        for col in 0..vw {
+            let (ch, style) = match screen.cell(row, col) {
+                Some(cell) => {
+                    let c = cell.contents();
+                    let ch = if c.is_empty() { " ".to_string() } else { c };
+                    let mut st = Style::default().fg(conv_color(cell.fgcolor())).bg(conv_color(cell.bgcolor()));
+                    if cell.bold() { st = st.add_modifier(Modifier::BOLD); }
+                    if cell.italic() { st = st.add_modifier(Modifier::ITALIC); }
+                    if cell.underline() { st = st.add_modifier(Modifier::UNDERLINED); }
+                    (ch, st)
+                }
+                None => (" ".to_string(), Style::default()),
+            };
+            if run_style == Some(style) {
+                run.push_str(&ch);
+            } else {
+                if let Some(s) = run_style { spans.push(Span::styled(std::mem::take(&mut run), s)); }
+                run = ch;
+                run_style = Some(style);
+            }
+        }
+        if let Some(s) = run_style { spans.push(Span::styled(run, s)); }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
 fn render_markdown_pane(
     frame: &mut Frame,
     app: &App,
@@ -775,7 +834,8 @@ fn render_markdown_pane(
     };
     let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
     let shown = pane.title.as_deref().unwrap_or(&buf.name);
-    let title = format!(" {} — markdown ", shown);
+    let engine = if pane.md_termimad { " · termimad" } else { "" };
+    let title = format!(" {} — markdown{engine} ", shown);
 
     let block = Block::default()
         .title(Span::styled(title, Style::default().add_modifier(title_mod)))
@@ -783,6 +843,13 @@ fn render_markdown_pane(
         .border_style(border_style);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+
+    // termimad reading-mode: reflow the whole buffer into a rendered document,
+    // windowed by the document scroll. No cursor (columns don't map after reflow).
+    if pane.md_termimad {
+        render_markdown_termimad(frame, buf, inner, pane.md_scroll);
+        return None;
+    }
 
     let vp_h = inner.height as usize;
     let inner_w = inner.width as usize;

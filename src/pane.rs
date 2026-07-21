@@ -27,6 +27,11 @@ pub struct Pane {
     pub title: Option<String>,
     /// Read-only rendered-Markdown view (cursor + scroll live; editing disabled).
     pub md_view: bool,
+    /// Which Markdown engine the view uses: `false` = hand-rolled (line-aligned,
+    /// cursor), `true` = termimad reading-mode (reflow/tables, document scroll).
+    pub md_termimad: bool,
+    /// Document-scroll offset (rendered lines) for the termimad reading-mode.
+    pub md_scroll: usize,
 }
 
 impl Pane {
@@ -42,6 +47,8 @@ impl Pane {
             view_h: 0,
             title: None,
             md_view: false,
+            md_termimad: false,
+            md_scroll: 0,
         }
     }
 

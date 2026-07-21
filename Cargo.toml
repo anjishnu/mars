@@ -48,6 +48,7 @@ portable-pty = "0.8"
 vt100 = "0.15"
 arboard = "3"
 base64 = "0.22"
+termimad = "0.35"
 
 # Platform-specific: reached ONLY through `src/sys/` (the platform abstraction
 # layer). `libc` backs the Unix adapter; `getrandom` plus HMAC-SHA256 provide

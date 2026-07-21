@@ -2155,9 +2155,37 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let cmd   = key.modifiers.contains(KeyModifiers::SUPER);
 
-        // Read-only Markdown view: swallow every buffer-mutating key, but let
-        // cursor motion and scrolling fall through to the normal handling below.
+        // Read-only Markdown view.
         if self.md_view_active() {
+            // `m` switches the render engine live (hand-rolled ⇄ termimad), for A/B.
+            if matches!(key.code, KeyCode::Char('m')) && !ctrl && !alt {
+                let p = self.focused_pane_mut();
+                p.md_termimad = !p.md_termimad;
+                p.md_scroll = 0;
+                let t = p.md_termimad;
+                self.status_msg = Some(if t { "Markdown engine: termimad".into() } else { "Markdown engine: hand-rolled".into() });
+                return;
+            }
+            // termimad reading-mode: no cursor — arrows/page scroll the document.
+            if self.focused_pane().md_termimad {
+                let vh = self.focused_pane().view_h.max(1);
+                // Loose cap so scrolling past the end doesn't run away (reflow can
+                // roughly double the source line count).
+                let cap = self.buffers.get(&self.focused_buf_id()).map(|b| b.line_count() * 3 + 20).unwrap_or(0);
+                let p = self.focused_pane_mut();
+                match key.code {
+                    KeyCode::Down => p.md_scroll = (p.md_scroll + 1).min(cap),
+                    KeyCode::Up => p.md_scroll = p.md_scroll.saturating_sub(1),
+                    KeyCode::Char('n') if ctrl => p.md_scroll = (p.md_scroll + 1).min(cap),
+                    KeyCode::Char('p') if ctrl => p.md_scroll = p.md_scroll.saturating_sub(1),
+                    KeyCode::PageDown => p.md_scroll = (p.md_scroll + vh).min(cap),
+                    KeyCode::PageUp => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                    _ => {}
+                }
+                return; // read-only document: swallow everything else
+            }
+            // Hand-rolled view: swallow buffer-mutating keys; cursor motion + scroll
+            // fall through to the normal handling below.
             let mutates = matches!(
                 key.code,
                 KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab
@@ -3786,11 +3814,15 @@ impl App {
             self.status_msg = Some("Markdown view applies to editor panes only".into());
             return;
         }
+        let engine_termimad = self.tuning.markdown_engine == 1;
         let p = self.focused_pane_mut();
         p.md_view = !p.md_view;
+        p.md_termimad = engine_termimad;
+        p.md_scroll = 0;
         let on = p.md_view;
         self.status_msg = Some(if on {
-            "Markdown view on (read-only) — toggle again to edit".into()
+            if engine_termimad { "Markdown view on (termimad) — m: switch engine, toggle to edit".into() }
+            else { "Markdown view on (read-only) — m: switch engine, toggle to edit".into() }
         } else {
             "Markdown view off".into()
         });
