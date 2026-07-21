@@ -52,7 +52,6 @@ pub struct Tuning {
     pub project_ignore: Vec<String>,
     pub tree_width: u16,
     pub tree_show_dotfiles: u64,
-    pub markdown_engine: u64,
     pub watch_quiet_secs: u64,
     pub agent_scrollback_context: usize,
     pub memory_cwd_boost: f64,
@@ -112,7 +111,6 @@ impl Default for Tuning {
                 .collect(),
             tree_width: 30,
             tree_show_dotfiles: 0,
-            markdown_engine: 1,
             watch_quiet_secs: 20,
             agent_scrollback_context: 200,
             memory_cwd_boost: 0.25,
@@ -265,9 +263,6 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("tree_show_dotfiles", knob(json!(d.tree_show_dotfiles),
             "Show dotfiles in the navigator by default (0/1). `.` toggles at runtime; \
              the project_ignore list (.git, .venv, …) stays hidden regardless.")),
-        ("markdown_engine", knob(json!(d.markdown_engine),
-            "Markdown view engine: 0 = hand-rolled (line-aligned, live cursor), 1 = \
-             termimad reading-mode (reflow/tables, document scroll). `m` toggles live.")),
         ("watch_quiet_secs", knob(json!(d.watch_quiet_secs),
             "Seconds a watched terminal (C-t w) must be silent before Mars summarizes it \
              (W6). Also fires immediately on process exit. Generous by design — a false \
@@ -424,7 +419,6 @@ pub fn load() -> Tuning {
         t.project_index_max = get_u64(&map, "project_index_max", t.project_index_max as u64) as usize;
         t.tree_width = get_u64(&map, "tree_width", t.tree_width as u64) as u16;
         t.tree_show_dotfiles = get_u64(&map, "tree_show_dotfiles", t.tree_show_dotfiles);
-        t.markdown_engine = get_u64(&map, "markdown_engine", t.markdown_engine);
         t.watch_quiet_secs = get_u64(&map, "watch_quiet_secs", t.watch_quiet_secs);
         t.agent_scrollback_context =
             get_u64(&map, "agent_scrollback_context", t.agent_scrollback_context as u64) as usize;

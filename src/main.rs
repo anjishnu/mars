@@ -3913,36 +3913,42 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] orphan actions now in menu PASS");
     }
 
-    // 40b. Markdown view: the toggle repaints the focused editor pane as a
-    //      read-only rendered view (heading marker stripped, bullet glyph,
-    //      inline bold markers gone) with the cursor + scroll still live, and
-    //      blocks buffer edits until it is toggled back off.
+    // 40b. Markdown reading-mode: the toggle repaints the focused editor pane as a
+    //      read-only, reflowed document (termimad → tables/wrapping). No cursor; the
+    //      document scrolls with the editor's own motion grammar (↑/↓ · ⌥↑/⌥↓ ·
+    //      M-</M->), clamps exactly to the measured length, and blocks buffer edits
+    //      until it is toggled back off.
     {
         let mut app = App::new(None)?;
-        app.tuning.markdown_engine = 0; // pin the hand-rolled engine for these asserts
-        let mut term = Terminal::new(TestBackend::new(120, 40))?;
-        for line in ["# Heading", "- bullet", "**bold**", "```", "code", "```"] {
-            typ(&mut app, line)?;
-            app.handle_key(k(KeyCode::Enter))?;
-        }
+        // A short viewport + a doc taller than it, so there is something to scroll.
+        let mut term = Terminal::new(TestBackend::new(100, 12))?;
+        typ(&mut app, "# Title")?; app.handle_key(k(KeyCode::Enter))?;
+        app.handle_key(k(KeyCode::Enter))?;
+        for i in 0..40 { typ(&mut app, &format!("paragraph line number {i} with some words"))?; app.handle_key(k(KeyCode::Enter))?; }
         let before = app.focused_buf().rope.to_string();
 
         app.run_action(palette::Action::ToggleMarkdown);
         assert!(app.focused_pane().md_view, "md_view flag did not set");
-        assert!(!app.focused_pane().md_termimad, "engine should be hand-rolled here");
-        app.run_action(palette::Action::GoTop);
         term.draw(|f| ui::render(f, &mut app))?;
-        let md = screen_text(&term);
-        assert!(md.contains("Heading") && !md.contains("# Heading"), "heading marker not stripped");
-        assert!(md.contains("•"), "bullet glyph not rendered");
-        assert!(md.contains("bold") && !md.contains("**bold**"), "inline bold markers not stripped");
-        assert!(md.contains("— markdown"), "markdown view title missing");
+        let t = screen_text(&term);
+        assert!(t.contains("— markdown"), "markdown view title missing: {t}");
+        assert!(t.contains("Title"), "reading-mode did not render the heading text");
+        assert!(app.focused_pane().md_rendered_total.get() > 12, "render should measure a doc taller than the viewport");
 
-        // Cursor is line-level and live: arrows move it (scroll reuses ensure_scroll).
-        assert_eq!(app.focused_pane().cursor_row, 0, "GoTop did not land on line 0");
+        // Down scrolls the document (md_scroll) and must NOT move the cursor.
+        let cr0 = app.focused_pane().cursor_row;
         app.handle_key(k(KeyCode::Down))?;
+        assert_eq!(app.focused_pane().md_scroll, 1, "arrow did not scroll the document");
+        assert_eq!(app.focused_pane().cursor_row, cr0, "reading-mode must not move the cursor");
+        // M-> (editor's bottom-of-file) jumps to the exact cap; M-< returns to top.
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::ALT))?;
+        let cap = app.focused_pane().md_rendered_total.get().saturating_sub(app.focused_pane().view_h.max(1));
+        assert_eq!(app.focused_pane().md_scroll, cap, "M-> did not jump to the bottom");
+        // Clamp holds: another Down at the bottom does not run past the cap.
         app.handle_key(k(KeyCode::Down))?;
-        assert_eq!(app.focused_pane().cursor_row, 2, "arrows did not move the cursor in md_view");
+        assert_eq!(app.focused_pane().md_scroll, cap, "scroll ran past the measured end");
+        app.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT))?;
+        assert_eq!(app.focused_pane().md_scroll, 0, "M-< did not jump to the top");
 
         // Read-only: typing / Enter / paste leave the buffer byte-for-byte identical.
         typ(&mut app, "SHOULD_NOT_APPEAR")?;
@@ -3955,46 +3961,7 @@ fn selfcheck() -> Result<()> {
         assert!(!app.focused_pane().md_view, "md_view flag did not clear");
         typ(&mut app, "EDITS")?;
         assert!(app.focused_buf().rope.to_string().contains("EDITS"), "editing broken after md_view off");
-        println!("[selfcheck] markdown view toggle ...... PASS");
-    }
-
-    // 40c. Markdown termimad reading-mode (prototype): the same toggle with the
-    //      termimad engine reflows the buffer into a rendered document (no cursor;
-    //      editor-consistent motion scrolls it), `m` switches engines live, and the
-    //      scroll clamps exactly to the measured length (no running off the end).
-    {
-        let mut app = App::new(None)?;
-        app.tuning.markdown_engine = 1; // termimad engine
-        // A short viewport + a doc taller than it, so there is something to scroll.
-        let mut term = Terminal::new(TestBackend::new(100, 12))?;
-        typ(&mut app, "# Title")?; app.handle_key(k(KeyCode::Enter))?;
-        app.handle_key(k(KeyCode::Enter))?;
-        for i in 0..40 { typ(&mut app, &format!("paragraph line number {i} with some words"))?; app.handle_key(k(KeyCode::Enter))?; }
-        app.run_action(palette::Action::ToggleMarkdown);
-        assert!(app.focused_pane().md_view && app.focused_pane().md_termimad, "termimad engine did not engage");
-        term.draw(|f| ui::render(f, &mut app))?;
-        let t = screen_text(&term);
-        assert!(t.contains("termimad"), "title should mark the termimad engine: {t}");
-        assert!(t.contains("Title"), "termimad did not render the heading text");
-        assert!(app.focused_pane().md_rendered_total.get() > 12, "render should measure a doc taller than the viewport");
-        // Arrows scroll the document (md_scroll), and must NOT move the cursor.
-        let cr0 = app.focused_pane().cursor_row;
-        app.handle_key(k(KeyCode::Down))?;
-        assert_eq!(app.focused_pane().md_scroll, 1, "arrow did not scroll the termimad document");
-        assert_eq!(app.focused_pane().cursor_row, cr0, "termimad mode must not move the cursor");
-        // M-> (editor's bottom-of-file) jumps to the exact cap; M-< returns to top.
-        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::ALT))?;
-        let cap = app.focused_pane().md_rendered_total.get().saturating_sub(app.focused_pane().view_h.max(1));
-        assert_eq!(app.focused_pane().md_scroll, cap, "M-> did not jump to the bottom");
-        // Clamp holds: another Down at the bottom does not run past the cap.
-        app.handle_key(k(KeyCode::Down))?;
-        assert_eq!(app.focused_pane().md_scroll, cap, "scroll ran past the measured end");
-        app.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT))?;
-        assert_eq!(app.focused_pane().md_scroll, 0, "M-< did not jump to the top");
-        // `m` switches back to the hand-rolled engine live.
-        app.handle_key(k(KeyCode::Char('m')))?;
-        assert!(!app.focused_pane().md_termimad, "m did not switch the engine");
-        println!("[selfcheck] markdown termimad (proto) . PASS");
+        println!("[selfcheck] markdown reading-mode ...... PASS");
     }
 
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,

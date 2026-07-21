@@ -585,185 +585,10 @@ fn render_editor_pane(
 
 // ── Markdown view (read-only rendered) ────────────────────────────────────────
 
-/// A fence line — ``` or ~~~ (with optional language/indent).
-fn md_is_fence(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("```") || t.starts_with("~~~")
-}
-
-/// A horizontal rule — three or more of the same -, *, or _ (spaces ignored).
-fn md_is_hr(t: &str) -> bool {
-    let s: String = t.chars().filter(|c| !c.is_whitespace()).collect();
-    s.len() >= 3
-        && (s.chars().all(|c| c == '-') || s.chars().all(|c| c == '*') || s.chars().all(|c| c == '_'))
-}
-
-/// `#`-style heading → (level, text after the markers), only with a space (ATX).
-fn md_heading(t: &str) -> Option<(usize, &str)> {
-    if !t.starts_with('#') {
-        return None;
-    }
-    let hashes = t.chars().take_while(|&c| c == '#').count();
-    if hashes == 0 || hashes > 6 {
-        return None;
-    }
-    let rest = &t[hashes..];
-    if rest.is_empty() {
-        Some((hashes, ""))
-    } else {
-        rest.strip_prefix(' ').map(|r| (hashes, r))
-    }
-}
-
-fn md_bullet(t: &str) -> Option<&str> {
-    ["- ", "* ", "+ "].iter().find_map(|p| t.strip_prefix(p))
-}
-
-/// `N.`/`N)` ordered item → (number slice, text after the marker).
-fn md_numbered(t: &str) -> Option<(&str, &str)> {
-    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digits == 0 {
-        return None;
-    }
-    let after = &t[digits..];
-    let rest = after.strip_prefix(". ").or_else(|| after.strip_prefix(") "))?;
-    Some((&t[..digits], rest))
-}
-
-/// Lenient one-pass inline splitter: `**bold**`, `*italic*`, `` `code` ``.
-/// Unmatched markers are emitted literally — never panics, never drops text.
-fn md_inline(out: &mut Vec<Span<'static>>, text: &str, tuning: &crate::tuning::Tuning) {
-    // Code: a LIGHTENED teal (the raw theme teal is near-black on a dark bg).
-    let code_style = Style::default().fg(lighten(tuning.theme_terminal, 110));
-    let bold_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-    // Italic also carries a warm color, so emphasis reads even on terminals that
-    // don't render the italic modifier at all.
-    let italic_style = Style::default().fg(rgb(tuning.theme_accent_bright)).add_modifier(Modifier::ITALIC);
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    let find = |from: usize, ch: char| -> Option<usize> { (from..n).find(|&j| chars[j] == ch) };
-    let find_pair = |from: usize| -> Option<usize> {
-        (from..n.saturating_sub(1)).find(|&j| chars[j] == '*' && chars[j + 1] == '*')
-    };
-
-    let mut plain = String::new();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        if c == '`' {
-            if let Some(close) = find(i + 1, '`') {
-                if !plain.is_empty() {
-                    out.push(Span::raw(std::mem::take(&mut plain)));
-                }
-                out.push(Span::styled(chars[i + 1..close].iter().collect::<String>(), code_style));
-                i = close + 1;
-                continue;
-            }
-        } else if c == '*' && i + 1 < n && chars[i + 1] == '*' {
-            if let Some(close) = find_pair(i + 2) {
-                if !plain.is_empty() {
-                    out.push(Span::raw(std::mem::take(&mut plain)));
-                }
-                out.push(Span::styled(chars[i + 2..close].iter().collect::<String>(), bold_style));
-                i = close + 2;
-                continue;
-            }
-        } else if c == '*' {
-            if let Some(close) = find(i + 1, '*') {
-                if close > i + 1 {
-                    if !plain.is_empty() {
-                        out.push(Span::raw(std::mem::take(&mut plain)));
-                    }
-                    out.push(Span::styled(chars[i + 1..close].iter().collect::<String>(), italic_style));
-                    i = close + 1;
-                    continue;
-                }
-            }
-        }
-        plain.push(c);
-        i += 1;
-    }
-    if !plain.is_empty() {
-        out.push(Span::raw(plain));
-    }
-}
-
-/// Style one source line of Markdown into `out` (which already holds the gutter).
-/// `content_w` is the width available after the gutter (for the rule fill).
-fn md_line_spans(
-    out: &mut Vec<Span<'static>>,
-    content: &str,
-    in_fence: bool,
-    is_fence: bool,
-    content_w: usize,
-    tuning: &crate::tuning::Tuning,
-) {
-    let dim = Style::default().fg(Color::DarkGray);
-    let accent = rgb(tuning.theme_accent);
-    let accent_bright = rgb(tuning.theme_accent_bright);
-
-    if is_fence {
-        out.push(Span::styled(content.to_string(), dim));
-        return;
-    }
-    if in_fence {
-        out.push(Span::styled(content.to_string(), Style::default().fg(lighten(tuning.theme_terminal, 110))));
-        return;
-    }
-
-    let trimmed = content.trim_start();
-    let indent = &content[..content.len() - trimmed.len()];
-
-    if md_is_hr(trimmed) {
-        out.push(Span::styled("─".repeat(content_w), dim));
-        return;
-    }
-    if let Some((level, text)) = md_heading(trimmed) {
-        let style = match level {
-            1 => Style::default().fg(accent_bright).add_modifier(Modifier::BOLD),
-            2 => Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            _ => Style::default().fg(accent),
-        };
-        if !indent.is_empty() {
-            out.push(Span::raw(indent.to_string()));
-        }
-        out.push(Span::styled(text.to_string(), style));
-        return;
-    }
-    if let Some(rest) = trimmed.strip_prefix("> ").or_else(|| trimmed.strip_prefix(">")) {
-        if !indent.is_empty() {
-            out.push(Span::raw(indent.to_string()));
-        }
-        out.push(Span::styled("▏ ", dim));
-        out.push(Span::styled(rest.to_string(), dim.add_modifier(Modifier::ITALIC)));
-        return;
-    }
-    if let Some(rest) = md_bullet(trimmed) {
-        if !indent.is_empty() {
-            out.push(Span::raw(indent.to_string()));
-        }
-        out.push(Span::styled("• ", Style::default().fg(accent)));
-        md_inline(out, rest, tuning);
-        return;
-    }
-    if let Some((num, rest)) = md_numbered(trimmed) {
-        if !indent.is_empty() {
-            out.push(Span::raw(indent.to_string()));
-        }
-        out.push(Span::styled(format!("{}. ", num), Style::default().fg(accent)));
-        md_inline(out, rest, tuning);
-        return;
-    }
-    if !indent.is_empty() {
-        out.push(Span::raw(indent.to_string()));
-    }
-    md_inline(out, trimmed, tuning);
-}
-
 /// A termimad skin dressed in MARS's palette so reading-mode reads as *ours*, not a
 /// generic renderer: teal headings + table rules, accent bullets/quotes, a lightened
-/// teal for code, white bold, accent italic (mirroring the hand-rolled engine's inline
-/// choices). termimad rides crossterm 0.29, so colors use `termimad::crossterm`.
+/// teal for code, white bold, accent italic. termimad rides crossterm 0.29, so colors
+/// use `termimad::crossterm`.
 fn mars_md_skin(app: &App) -> termimad::MadSkin {
     use termimad::crossterm::style::Color as TColor;
     let ct = |c: [u8; 3]| TColor::Rgb { r: c[0], g: c[1], b: c[2] };
@@ -864,10 +689,9 @@ fn render_markdown_pane(
     };
     let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
     let shown = pane.title.as_deref().unwrap_or(&buf.name);
-    let engine = if pane.md_termimad { " · termimad" } else { "" };
-    // Position % (termimad reading-mode only): how far through the reflowed document.
-    // Reads the last frame's measured total — a static doc never changes it.
-    let pos = if pane.md_termimad {
+    // Position %: how far through the reflowed document. Reads the last frame's
+    // measured total — a static doc never changes it.
+    let pos = {
         let total = pane.md_rendered_total.get();
         let vh = pane.view_h.max(1);
         if total > vh {
@@ -875,8 +699,8 @@ fn render_markdown_pane(
             let pct = (pane.md_scroll.min(cap) * 100) / cap.max(1);
             format!(" · {pct}%")
         } else { String::new() }
-    } else { String::new() };
-    let title = format!(" {} — markdown{engine}{pos} ", shown);
+    };
+    let title = format!(" {} — markdown{pos} ", shown);
 
     let block = Block::default()
         .title(Span::styled(title, Style::default().add_modifier(title_mod)))
@@ -885,77 +709,9 @@ fn render_markdown_pane(
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    // termimad reading-mode: reflow the whole buffer into a rendered document,
-    // windowed by the document scroll. No cursor (columns don't map after reflow).
-    if pane.md_termimad {
-        render_markdown_termimad(frame, app, buf, pane, inner);
-        return None;
-    }
-
-    let vp_h = inner.height as usize;
-    let inner_w = inner.width as usize;
-    let gw = gutter_width(&app.tuning) as usize;
-    let content_w = inner_w.saturating_sub(gw);
-    let line_count = buf.line_count();
-    let numbers = app.tuning.line_numbers;
-
-    // Seed the in-fence state: a fence can open above the viewport.
-    let mut in_fence = false;
-    for row in 0..pane.scroll_row.min(line_count) {
-        if md_is_fence(&buf.line_str(row)) {
-            in_fence = !in_fence;
-        }
-    }
-
-    let [sr, sg, sb] = app.tuning.selection_bg;
-    let cursor_bg = Color::Rgb(sr, sg, sb);
-
-    let mut lines: Vec<Line> = Vec::with_capacity(vp_h);
-    for row_off in 0..vp_h {
-        let row = pane.scroll_row + row_off;
-        let on_cursor = focused && row == pane.cursor_row;
-
-        let mut spans: Vec<Span> = Vec::new();
-        if numbers {
-            let num_style = if on_cursor {
-                Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let label = if row < line_count { format!("{:>4}│ ", row + 1) } else { "     │ ".to_string() };
-            spans.push(Span::styled(label, num_style));
-        } else {
-            let (glyph, style) = if on_cursor {
-                ("▸ ", Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD))
-            } else {
-                ("  ", Style::default())
-            };
-            spans.push(Span::styled(glyph, style));
-        }
-
-        if row < line_count {
-            let content = buf.line_str(row);
-            let is_fence = md_is_fence(&content);
-            let fence_before = in_fence;
-            if is_fence {
-                in_fence = !in_fence;
-            }
-            md_line_spans(&mut spans, &content, fence_before, is_fence, content_w, &app.tuning);
-        }
-
-        if on_cursor {
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            if used < inner_w {
-                spans.push(Span::raw(" ".repeat(inner_w - used)));
-            }
-            for s in spans.iter_mut() {
-                s.style = s.style.bg(cursor_bg);
-            }
-        }
-        lines.push(Line::from(spans));
-    }
-
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    // Reflow the whole buffer into a rendered document, windowed by the document
+    // scroll. No cursor (columns don't map after reflow), so no on-screen cursor.
+    render_markdown_termimad(frame, app, buf, pane, inner);
     None
 }
 

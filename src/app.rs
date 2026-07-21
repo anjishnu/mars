@@ -2155,54 +2155,32 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let cmd   = key.modifiers.contains(KeyModifiers::SUPER);
 
-        // Read-only Markdown view.
+        // Read-only Markdown reading-mode: no cursor — the document scrolls. Keys mirror
+        // the editor's own motion grammar so it's muscle-memory-consistent: C-n/C-p and
+        // ↑/↓ step a line, ⌥↑/⌥↓ · ⌥v · PgUp/PgDn page, M-< / M-> jump to the ends. Every
+        // other key is swallowed (the view is read-only).
         if self.md_view_active() {
-            // `m` switches the render engine live (hand-rolled ⇄ termimad), for A/B.
-            if matches!(key.code, KeyCode::Char('m')) && !ctrl && !alt {
-                let p = self.focused_pane_mut();
-                p.md_termimad = !p.md_termimad;
-                p.md_scroll = 0;
-                let t = p.md_termimad;
-                self.status_msg = Some(if t { "Markdown engine: termimad".into() } else { "Markdown engine: hand-rolled".into() });
-                return;
+            let vh = self.focused_pane().view_h.max(1);
+            // Exact cap from the last render's measured length: the last page stays
+            // visible at the bottom, and you can't scroll off into a blank void.
+            let cap = self.focused_pane().md_rendered_total.get().saturating_sub(vh);
+            let p = self.focused_pane_mut();
+            match key.code {
+                // page (editor: ⌥↑/⌥↓, ⌥v, PageUp/PageDown)
+                KeyCode::Down if alt => p.md_scroll = (p.md_scroll + vh).min(cap),
+                KeyCode::Up   if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                KeyCode::Char('v') if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                KeyCode::PageDown => p.md_scroll = (p.md_scroll + vh).min(cap),
+                KeyCode::PageUp   => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                // ends (M-< / M->) are bound to GoTop/GoBottom → handled in run_action.
+                // line (editor: ↑/↓, C-n/C-p)
+                KeyCode::Down => p.md_scroll = (p.md_scroll + 1).min(cap),
+                KeyCode::Up   => p.md_scroll = p.md_scroll.saturating_sub(1),
+                KeyCode::Char('n') if ctrl => p.md_scroll = (p.md_scroll + 1).min(cap),
+                KeyCode::Char('p') if ctrl => p.md_scroll = p.md_scroll.saturating_sub(1),
+                _ => {}
             }
-            // termimad reading-mode: no cursor — the document scrolls. Keys mirror the
-            // editor's own motion grammar so it's muscle-memory-consistent: C-n/C-p and
-            // ↑/↓ step a line, ⌥↑/⌥↓ · ⌥v · PgUp/PgDn page, M-< / M-> jump to the ends.
-            if self.focused_pane().md_termimad {
-                let vh = self.focused_pane().view_h.max(1);
-                // Exact cap from the last render's measured length: the last page stays
-                // visible at the bottom, and you can't scroll off into a blank void.
-                let cap = self.focused_pane().md_rendered_total.get().saturating_sub(vh);
-                let p = self.focused_pane_mut();
-                match key.code {
-                    // page (editor: ⌥↑/⌥↓, ⌥v, PageUp/PageDown)
-                    KeyCode::Down if alt => p.md_scroll = (p.md_scroll + vh).min(cap),
-                    KeyCode::Up   if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
-                    KeyCode::Char('v') if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
-                    KeyCode::PageDown => p.md_scroll = (p.md_scroll + vh).min(cap),
-                    KeyCode::PageUp   => p.md_scroll = p.md_scroll.saturating_sub(vh),
-                    // ends (M-< / M->) are bound to GoTop/GoBottom → handled in run_action.
-                    // line (editor: ↑/↓, C-n/C-p)
-                    KeyCode::Down => p.md_scroll = (p.md_scroll + 1).min(cap),
-                    KeyCode::Up   => p.md_scroll = p.md_scroll.saturating_sub(1),
-                    KeyCode::Char('n') if ctrl => p.md_scroll = (p.md_scroll + 1).min(cap),
-                    KeyCode::Char('p') if ctrl => p.md_scroll = p.md_scroll.saturating_sub(1),
-                    _ => {}
-                }
-                return; // read-only document: swallow everything else
-            }
-            // Hand-rolled view: swallow buffer-mutating keys; cursor motion + scroll
-            // fall through to the normal handling below.
-            let mutates = matches!(
-                key.code,
-                KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab
-            ) || (matches!(key.code, KeyCode::Char('d')) && ctrl)
-              || (matches!(key.code, KeyCode::Char(_)) && !ctrl && !alt);
-            if mutates {
-                self.status_msg = Some("Markdown view is read-only — toggle it off to edit".into());
-                return;
-            }
+            return; // read-only document: swallow everything else
         }
 
         self.last_yank = None; // any primitive key breaks a C-y / M-y chain
@@ -3823,15 +3801,12 @@ impl App {
             self.status_msg = Some("Markdown view applies to editor panes only".into());
             return;
         }
-        let engine_termimad = self.tuning.markdown_engine == 1;
         let p = self.focused_pane_mut();
         p.md_view = !p.md_view;
-        p.md_termimad = engine_termimad;
         p.md_scroll = 0;
         let on = p.md_view;
         self.status_msg = Some(if on {
-            if engine_termimad { "Markdown view on (termimad) — m: switch engine, toggle to edit".into() }
-            else { "Markdown view on (read-only) — m: switch engine, toggle to edit".into() }
+            "Markdown view on (read-only) — toggle again to edit".into()
         } else {
             "Markdown view off".into()
         });
@@ -3941,10 +3916,10 @@ impl App {
             Action::KillWordForward    => self.kill_word(true),
             Action::KillWordBackward   => self.kill_word(false),
             Action::SelectAll          => self.select_all(),
-            // In termimad reading-mode there's no cursor — the editor's top/bottom
+            // In the Markdown reading-mode there's no cursor — the editor's top/bottom
             // motions scroll the document to its ends instead (same chord, M-< / M->).
-            Action::GoTop if self.focused_pane().md_termimad => self.focused_pane_mut().md_scroll = 0,
-            Action::GoBottom if self.focused_pane().md_termimad => {
+            Action::GoTop if self.md_view_active() => self.focused_pane_mut().md_scroll = 0,
+            Action::GoBottom if self.md_view_active() => {
                 let cap = self.focused_pane().md_rendered_total.get()
                     .saturating_sub(self.focused_pane().view_h.max(1));
                 self.focused_pane_mut().md_scroll = cap;
