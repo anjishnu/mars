@@ -229,18 +229,18 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
 /// pane borders, and the workspace summary all read this, so a status means the
 /// same thing everywhere it shows. Returns None for idle (Context) — each caller
 /// picks its own recede (a readable label, a dim border, or nothing at all).
-fn verdict_style(app: &App, v: crate::briefing::Verdict) -> Option<(&'static str, Color)> {
+/// The status bubble color for a verdict. ONE shape everywhere — a filled dot in a
+/// fixed position — with color the only varying dimension, so status always reads in
+/// the same place: amber=blocked, red=failed, green=running, teal=done, grey=idle.
+fn verdict_color(app: &App, v: crate::briefing::Verdict) -> Color {
     use crate::briefing::Verdict;
-    // Conventional semantic palette (obvious at a glance): amber=blocked/waiting,
-    // red=failed, green=running, teal=done, gray=idle. Colorblind-safe because the
-    // glyph disambiguates the hue.
-    Some(match v {
-        Verdict::Blocked => ("⏸", rgb(app.tuning.theme_status_blocked)), // needs you (amber)
-        Verdict::Failed  => ("✗", rgb(app.tuning.theme_status_failed)),  // failed (red)
-        Verdict::Running => ("●", rgb(app.tuning.theme_healthy)),        // working (green)
-        Verdict::Done    => ("✓", rgb(app.tuning.theme_terminal)),       // done (teal)
-        Verdict::Context => return None,                                // idle (gray)
-    })
+    match v {
+        Verdict::Blocked => rgb(app.tuning.theme_status_blocked), // amber
+        Verdict::Failed  => rgb(app.tuning.theme_status_failed),  // red
+        Verdict::Running => rgb(app.tuning.theme_healthy),        // green
+        Verdict::Done    => rgb(app.tuning.theme_terminal),       // teal
+        Verdict::Context => Color::Gray,                          // idle
+    }
 }
 
 /// A pane's display name for the top bar and the board: an editor's filename (with a
@@ -279,9 +279,9 @@ pub(crate) fn workspace_name(app: &App, tab: &crate::tab::Tab, num: usize) -> St
     }
     match app.panes.get(&tab.focused_pane).map(|p| &p.content) {
         Some(PaneContent::Editor(buf_id)) => {
-            let b = app.buffers.get(buf_id);
-            let name = b.map(|b| b.name.clone()).unwrap_or_else(|| "buffer".to_string());
-            if b.map(|b| b.modified).unwrap_or(false) { format!("{name} ●") } else { name }
+            // Just the filename — no trailing dirty dot; the one status bubble before
+            // the name is the only status marker, in a consistent position.
+            app.buffers.get(buf_id).map(|b| b.name.clone()).unwrap_or_else(|| "buffer".to_string())
         }
         _ => app
             .panes
@@ -294,27 +294,21 @@ pub(crate) fn workspace_name(app: &App, tab: &crate::tab::Tab, num: usize) -> St
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in app.tabs.iter().enumerate() {
-        // The tab's worst-pane verdict colors the whole label with a colorblind-safe
-        // glyph; an idle tab recedes to plain grey (not a warm accent that reads as a
-        // status it doesn't have).
-        let (glyph, status_color) = match verdict_style(app, app.tab_status(tab)) {
-            Some((g, c)) => (format!("{g} "), c),
-            None => (String::new(), Color::Gray),
-        };
+        // Every tab: a status BUBBLE in the same position (colored by the worst-pane
+        // verdict; grey = idle) then the name. Consistent shape + position, colour the
+        // only varying dimension.
+        let bubble = verdict_color(app, app.tab_status(tab));
         let name = workspace_name(app, tab, i + 1);
-        let label = format!(" {glyph}{name} ");
         if i == app.active_tab {
-            // The active tab keeps the chrome highlight (you're looking at it); the
-            // glyph still hints its worst-pane status.
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .fg(rgb(app.tuning.theme_chip_fg))
-                    .bg(rgb(app.tuning.theme_accent))
-                    .add_modifier(Modifier::BOLD),
-            ));
+            // The active tab is inverted chrome (you're looking at it); its bubble
+            // recedes into the chip color, but stays in the same slot.
+            let chip = rgb(app.tuning.theme_chip_fg);
+            let accent = rgb(app.tuning.theme_accent);
+            spans.push(Span::styled(format!(" ● {name} "),
+                Style::default().fg(chip).bg(accent).add_modifier(Modifier::BOLD)));
         } else {
-            spans.push(Span::styled(label, Style::default().fg(status_color)));
+            spans.push(Span::styled(" ● ", Style::default().fg(bubble)));
+            spans.push(Span::styled(format!("{name} "), Style::default().fg(Color::Gray)));
         }
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
@@ -1442,10 +1436,9 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
         let sel_fg = rgb(app.tuning.theme_chip_fg);
         let (glyph, vcolor, id, cur) = match &row.kind {
             ItemKind::Surface(sr) => {
-                let (g, c) = verdict_style(app, sr.verdict).unwrap_or(("·", Color::DarkGray));
-                (if g.is_empty() { "·" } else { g }, c, sr.tab_index + 1, sr.tab_index == app.active_tab)
+                ("●", verdict_color(app, sr.verdict), sr.tab_index + 1, sr.tab_index == app.active_tab)
             }
-            _ => ("·", Color::DarkGray, 0, false),
+            _ => ("●", Color::Gray, 0, false),
         };
         let _ = id;
         let marker = if cur { "‹" } else { " " };
@@ -1464,10 +1457,17 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
                     .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
             ),
         ];
+        // The selected row carries the ↵ verb (a single actionable icon), right of
+        // the age — no separate "↵ jump" line.
+        let right = if s {
+            if age.is_empty() { "↵ ".to_string() } else { format!("{age}  ↵ ") }
+        } else {
+            format!("{age} ")
+        };
         let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
-        let pad = (width as usize).saturating_sub(lw + age.chars().count() + 1);
+        let pad = (width as usize).saturating_sub(lw + right.chars().count());
         spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        spans.push(Span::styled(format!("{age} "), Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg)));
+        spans.push(Span::styled(right, Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg).add_modifier(if s { Modifier::BOLD } else { Modifier::empty() })));
         out.push(Line::from(spans));
     }
     out
@@ -1481,23 +1481,25 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
     let w = width as usize;
     let mut out = vec![Line::from(Span::styled("─".repeat(w), Style::default().fg(Color::DarkGray)))];
     let Some(ItemKind::Surface(s)) = row.map(|r| &r.kind) else { return out };
-    let (glyph, vcolor) = verdict_style(app, s.verdict).unwrap_or(("·", Color::DarkGray));
+    let vcolor = verdict_color(app, s.verdict);
     let vlabel = match s.verdict {
         Verdict::Blocked => "blocked", Verdict::Failed => "failed",
         Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
     };
-    let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
-    let wsname = row.map(|r| r.label.clone()).unwrap_or_default();
-    let head = ellip(&format!("{wsname} · {vlabel}{age}"), w.saturating_sub(2));
+    // "status: WHATEVER" in bold (bubble + label), then the detailed summary below in
+    // a softer italic. The ↵ verb lives on the selected row, not here.
     out.push(Line::from(vec![
-        Span::styled(format!("{glyph} "), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
-        Span::styled(head, Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+        Span::styled("● ", Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+        Span::styled("status: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(vlabel.to_string(), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
     ]));
     let why = row.map(|r| r.description.clone()).unwrap_or_default();
     if !why.is_empty() {
-        out.push(Line::from(Span::styled(ellip(&why, w), Style::default().fg(Color::White))));
+        out.push(Line::from(Span::styled(
+            ellip(&why, w),
+            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+        )));
     }
-    out.push(Line::from(Span::styled("↵ jump", Style::default().fg(rgb(app.tuning.theme_accent_bright)))));
     out
 }
 
