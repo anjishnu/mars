@@ -135,10 +135,46 @@ MORE
   Config: ~/.config/mars/keys.json (bindings), tuning.json (behavior knobs)
   Session logs: ~/.local/state/mars/<name>.log";
 
+/// Apply a project-local `.mars` rc file (JSON) if present in the cwd — a
+/// per-project config, like `.zshrc` for a shell. Currently supports an `env`
+/// object whose entries are exported into the process environment (so a spawned
+/// session daemon inherits them too), but ONLY when the variable isn't already
+/// set — the real environment and explicit flags always win. A malformed file
+/// warns and is ignored; a bad rc must never block startup.
+fn apply_project_config(path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let val: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("mars: ignoring {} — not valid JSON", path.display());
+            return;
+        }
+    };
+    if let Some(env) = val.get("env").and_then(|e| e.as_object()) {
+        for (k, v) in env {
+            if std::env::var_os(k).is_some() {
+                continue; // the real environment wins over the file
+            }
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => (if *b { "1" } else { "0" }).to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue, // ignore arrays/objects/null — env values are scalars
+            };
+            std::env::set_var(k, s);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // A previously killed client may have left this TTY in raw mode — repair
     // it before printing anything (and before crossterm snapshots "original").
     session::sanitize_tty();
+
+    // A project-local `.mars` rc (JSON) in the cwd can export env overrides — e.g.
+    // {"env": {"MARS_LLM_DEBUG": "1"}} to turn on LLM call logging for this project.
+    // Applied before anything reads the environment; the real env still wins.
+    apply_project_config(std::path::Path::new(".mars"));
 
     // `--llm-debug` is a global flag (any position): turn on LLM call logging and
     // strip it out so it isn't mistaken for a filename/unknown command. It sets
@@ -4006,6 +4042,37 @@ fn selfcheck() -> Result<()> {
         let _ = std::fs::remove_dir_all(&sc_dir);
         std::env::remove_var("MARS_LLM_LOG_DIR");
         println!("[selfcheck] llm debug log + stats ..... PASS");
+    }
+
+    // 41b. Project-local `.mars` rc: an `env` map is exported into the process
+    //      environment, but the real environment wins, and a malformed file is a
+    //      no-op (never blocks startup).
+    {
+        let dir = std::env::temp_dir().join(format!("mars-projcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let rc = dir.join(".mars");
+
+        // A fresh var is exported from the file.
+        std::env::remove_var("MARS_TEST_PROJCFG");
+        std::fs::write(&rc, r#"{"env":{"MARS_TEST_PROJCFG":"from_file","MARS_TEST_PROJCFG_HELD":"file"}}"#)?;
+        apply_project_config(&rc);
+        assert_eq!(std::env::var("MARS_TEST_PROJCFG").as_deref(), Ok("from_file"), "rc env not exported");
+
+        // The real environment wins over the file.
+        std::env::set_var("MARS_TEST_PROJCFG_HELD", "real");
+        apply_project_config(&rc);
+        assert_eq!(std::env::var("MARS_TEST_PROJCFG_HELD").as_deref(), Ok("real"), "file clobbered the real env");
+
+        // A malformed rc is ignored without panicking or setting anything.
+        std::fs::write(&rc, "{ not json")?;
+        apply_project_config(&rc); // must not panic
+        // A missing file is a clean no-op.
+        apply_project_config(&dir.join("nope.mars"));
+
+        std::env::remove_var("MARS_TEST_PROJCFG");
+        std::env::remove_var("MARS_TEST_PROJCFG_HELD");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[selfcheck] project .mars rc ........... PASS");
     }
 
     // 42. Retrieval: BM25 ranks the relevant doc first; memory-mode parsing
