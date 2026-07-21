@@ -1509,10 +1509,12 @@ fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let active = app.palette.as_ref().map(|p| p.column == crate::palette::BarColumn::Workspaces).unwrap_or(false);
     let sel = app.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
     let teal = rgb(app.tuning.theme_terminal);
-    let border = if active { teal } else { Color::DarkGray };
+    // Always a teal box (its terminal-surface identity); bold when focused.
+    let mut bstyle = Style::default().fg(teal);
+    if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
+        .border_style(bstyle)
         .title(Span::styled(" WORKSPACES ", Style::default().fg(teal).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -1534,10 +1536,14 @@ fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
 fn render_command_panel(frame: &mut Frame, app: &App, rect: Rect, left_border: bool, active: bool) {
     let palette = match app.palette.as_ref() { Some(p) => p, None => return };
     let borders = if left_border { Borders::TOP | Borders::LEFT | Borders::RIGHT } else { Borders::TOP | Borders::RIGHT };
-    let border = if active { rgb(app.tuning.theme_accent) } else { Color::DarkGray };
+    // The command box always keeps its accent (orange) border — a fully-boxed panel —
+    // and just bolds when it holds focus; the selection highlight inside carries the
+    // rest of the focus signal.
+    let mut bstyle = Style::default().fg(rgb(app.tuning.theme_accent));
+    if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
         .borders(borders)
-        .border_style(Style::default().fg(border));
+        .border_style(bstyle);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let rows = app.bar_rows();
