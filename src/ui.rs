@@ -1508,6 +1508,8 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
             Span::styled(ellip(&why, content_w), Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
         ]));
     }
+    // A dim hint: `s` pulls a fresh LLM summary for this surface.
+    out.push(Line::from(Span::styled(" s  summarize", Style::default().fg(Color::DarkGray))));
     out
 }
 

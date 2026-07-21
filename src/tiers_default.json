@@ -5,6 +5,7 @@
     "mission": "low",
     "shift_brief": "low",
     "capture_goals": "low",
+    "summarize": "low",
     "watch": "mid",
     "translate": "mid",
     "ask": "high"

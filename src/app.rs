@@ -110,6 +110,12 @@ pub struct WatchState {
     /// under the LLM verdict (redacted tail excerpt) and the PTY exit code.
     pub fired_excerpt: Option<String>,
     pub fired_exit: Option<i32>,
+    /// On-demand summary (workspaces-panel `s`) is in flight — the anti-excess-fire
+    /// guard: one at a time per surface.
+    pub summ_inflight: bool,
+    /// `last_output_tick` captured at the last on-demand summary. A re-summary only
+    /// fires once new output has arrived past this point (freshness guard).
+    pub summ_output_tick: u64,
 }
 
 /// Why a watch fired.
@@ -690,7 +696,9 @@ impl App {
         // status doesn't. The LLM verdict when present; else the exit outcome, the
         // running command, or NOTHING for an idle prompt (never "working…").
         let cmd = w.and_then(|w| w.last_command.as_ref()).map(|c| c.trim().to_string());
-        let why = if let Some(v) = w.and_then(|w| w.verdict.as_ref()) {
+        let why = if w.map(|w| w.summ_inflight).unwrap_or(false) {
+            "summarizing…".to_string()
+        } else if let Some(v) = w.and_then(|w| w.verdict.as_ref()) {
             v.lines().next().unwrap_or("").trim().to_string()
         } else if let Some(t) = tid.and_then(|t| self.terms.get(&t)) {
             if t.exited {
@@ -2937,9 +2945,14 @@ impl App {
                 } else { false };
                 if close { self.close_bar(); }
             }
-            // Search-first (Claude-Code feel): typing always filters BOTH columns,
-            // and the top match is selected so Enter fires it with no arrowing.
-            KeyCode::Char(c) if none || shift => {
+            // On the Workspaces column, `s` pulls an on-demand summary for the
+            // highlighted surface (not query input — workspaces are navigated, not
+            // typed into).
+            KeyCode::Char('s') if on_ws => self.request_summary_for_selected(),
+            // Search-first (Claude-Code feel): typing filters the command list. Only
+            // when the Commands column has focus — on Workspaces, letters are inert
+            // (navigation mode) so `s` etc. stay shortcuts.
+            KeyCode::Char(c) if (none || shift) && !on_ws => {
                 if let Some(p) = self.palette.as_mut() {
                     p.query.push(c);
                     p.selected = 0;
@@ -4301,6 +4314,17 @@ impl App {
                 AgentEvent::BgDone => {
                     self.bg_busy = false;
                 }
+                AgentEvent::SurfaceSummary { term_id, text } => {
+                    // On-demand summary: set the surface's verdict/summary (the panel
+                    // shows it) and clear the in-flight + freshness guards. No notice
+                    // side-effects — the user pulled it and is looking at it.
+                    if let Some(w) = self.watches.get_mut(&term_id) {
+                        w.verdict = Some(text);
+                        w.summ_inflight = false;
+                        w.summ_output_tick = w.last_output_tick;
+                    }
+                    self.needs_redraw = true;
+                }
                 AgentEvent::WatchSummary { term_id, verdict } => {
                     // NOT bg-done: a batched shift call emits several of these
                     // before its own BgDone; individual watch calls send BgDone
@@ -5179,6 +5203,53 @@ impl App {
         }
         self.bg_busy = true;
         agent::watch_summary(cfg, id, reason, tail, self.agent_tx.clone());
+    }
+
+    /// Workspaces-panel `s`: pull an on-demand summary for the highlighted surface.
+    fn request_summary_for_selected(&mut self) {
+        let sel = self.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
+        let tid = match self.bar_workspace_rows().into_iter().nth(sel).map(|r| r.kind) {
+            Some(crate::palette::ItemKind::Surface(s)) => {
+                match self.panes.get(&s.pane_id).map(|p| &p.content) {
+                    Some(PaneContent::Terminal(t)) => *t,
+                    _ => { self.status_msg = Some("nothing to summarize — not a terminal".into()); return; }
+                }
+            }
+            _ => return,
+        };
+        self.request_summary(tid);
+    }
+
+    /// Fire an on-demand LLM summary (low tier) for a terminal — the classifier, run
+    /// manually. Guards against excessive firing: at most one in flight per surface,
+    /// and no re-fire unless new output has arrived since the last summary.
+    pub(crate) fn request_summary(&mut self, tid: TermId) {
+        let last_out = self.watches.get(&tid).map(|w| w.last_output_tick).unwrap_or(0);
+        let (inflight, fresh) = self
+            .watches
+            .get(&tid)
+            .map(|w| (w.summ_inflight, w.verdict.is_some() && last_out <= w.summ_output_tick))
+            .unwrap_or((false, false));
+        if inflight { self.status_msg = Some("summarizing…".into()); return; }
+        if fresh { self.status_msg = Some("summary is current".into()); return; } // freshness guard
+        let tail = self.terminal_tail(tid, self.tuning.agent_scrollback_context);
+        if tail.trim().is_empty() { self.status_msg = Some("nothing to summarize yet".into()); return; }
+        let cfg = agent::AgentConfig::from_env();
+        if !cfg.is_configured() {
+            // Keyless: a deterministic triage line stands in for the LLM summary.
+            let exited = self.terms.get(&tid).map(|t| t.exited).unwrap_or(false);
+            let exit = self.terms.get(&tid).and_then(|t| t.exit_code());
+            let tri = crate::briefing::triage(&tail, exit, !exited);
+            let _ = self.agent_tx.send(agent::AgentEvent::SurfaceSummary { term_id: tid, text: tri.text });
+            return;
+        }
+        if let Some(w) = self.watches.get_mut(&tid) {
+            w.summ_inflight = true;
+            w.summ_output_tick = last_out;
+        }
+        self.bg_busy = true;
+        self.status_msg = Some("summarizing…".into());
+        agent::summarize_surface(cfg, tid, tail, self.agent_tx.clone());
     }
 
     /// The last `lines` of a terminal pane's visible screen, for a watch summary.

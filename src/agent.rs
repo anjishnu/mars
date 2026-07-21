@@ -59,6 +59,10 @@ pub enum AgentEvent {
     SessionName { name: String },
     /// W6: one-line verdict on a watched terminal (term id, verdict).
     WatchSummary { term_id: usize, verdict: String },
+    /// On-demand summary (workspaces-panel `s`): one line for a surface, term id +
+    /// text. Sets the surface's verdict/summary WITHOUT the notice side-effects a
+    /// watch fire has (the user asked for it; it's already on screen).
+    SurfaceSummary { term_id: usize, text: String },
     /// Background mission inference over the work journal (one line: what the
     /// user is working on). Persisted for `mars ls`.
     Mission { text: String },
@@ -520,6 +524,29 @@ pub fn watch_summary(
             }
         }
         let _ = tx.send(AgentEvent::BgDone); // always release the gate
+    });
+}
+
+/// On-demand summary of a surface — a LOW-tier LLM call (task "summarize"),
+/// user-initiated from the workspaces panel `s`. Same classifier as the watch,
+/// just triggered manually for a live/idle surface that hasn't auto-fired. Emits
+/// SurfaceSummary (no notice side-effects).
+pub fn summarize_surface(cfg: AgentConfig, term_id: usize, tail: String, tx: mpsc::Sender<AgentEvent>) {
+    std::thread::spawn(move || {
+        let messages = build_watch_messages(crate::app::WatchReason::Quiet, &tail);
+        match chat(&cfg, messages, "summarize") {
+            Ok(text) => {
+                let line = text.trim().lines().next().unwrap_or("").trim().to_string();
+                let _ = tx.send(AgentEvent::SurfaceSummary {
+                    term_id,
+                    text: if line.is_empty() { "(nothing to summarize)".to_string() } else { line },
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(AgentEvent::SurfaceSummary { term_id, text: format!("⚠ couldn't summarize — {e}") });
+            }
+        }
+        let _ = tx.send(AgentEvent::BgDone); // release the gate
     });
 }
 

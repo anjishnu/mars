@@ -438,6 +438,7 @@ fn ask_cli(question: String) -> Result<()> {
             agent::AgentEvent::AutoName { .. }
             | agent::AgentEvent::SessionName { .. }
             | agent::AgentEvent::WatchSummary { .. }
+            | agent::AgentEvent::SurfaceSummary { .. }
             | agent::AgentEvent::Mission { .. }
             | agent::AgentEvent::BgDone
             | agent::AgentEvent::ShiftDelta { .. }
@@ -3672,6 +3673,39 @@ fn selfcheck() -> Result<()> {
         assert!(!app.bar_show_workspaces(),
             "a solo idle workspace must NOT show the panel — the plain launcher stands");
         println!("[selfcheck] workspaces panel + bar .. PASS");
+    }
+
+    // 34d. On-demand summary heuristics (the anti-excess-fire guards): at most one
+    //      pull in flight per surface, and no re-pull unless new output has arrived
+    //      since the last summary.
+    {
+        let mut app = App::new(None)?;
+        app.open_terminal();
+        let tid = *app.terms.keys().next().expect("open_terminal makes a terminal");
+        {
+            let w = app.watches.entry(tid).or_default();
+            w.verdict = Some("done: build green".into());
+            w.summ_output_tick = 10;
+            w.last_output_tick = 10; // no new output since the last summary
+        }
+        // Freshness guard: a re-pull with no new output is dropped.
+        app.status_msg = None;
+        app.request_summary(tid);
+        assert_eq!(app.status_msg.as_deref(), Some("summary is current"),
+            "freshness guard: no new output must NOT re-fire");
+        // New output releases the guard.
+        app.watches.get_mut(&tid).unwrap().last_output_tick = 99;
+        app.status_msg = None;
+        app.request_summary(tid);
+        assert_ne!(app.status_msg.as_deref(), Some("summary is current"),
+            "new output must release the freshness guard");
+        // In-flight guard: a pull while one is running is dropped.
+        app.watches.get_mut(&tid).unwrap().summ_inflight = true;
+        app.status_msg = None;
+        app.request_summary(tid);
+        assert_eq!(app.status_msg.as_deref(), Some("summarizing…"),
+            "in-flight guard: only one pull at a time per surface");
+        println!("[selfcheck] on-demand summary guards . PASS");
     }
 
     // 35. C-g cancels the command bar from every submode (doctrine §3.4).
