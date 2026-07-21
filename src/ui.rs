@@ -1831,15 +1831,15 @@ fn star_hash(x: usize, y: usize) -> u64 {
 fn starfield(app: &App, width: u16, height: u16, tick: u64) -> Vec<Line<'static>> {
     let (w, h) = (width as usize, height as usize);
     let teal = rgb(app.tuning.theme_terminal);
-    // At most one meteor, only during a short window of a long cycle — so the sky is
-    // still most of the time and a streak is a rare, calming event.
-    const PERIOD: u64 = 340;
-    const DURATION: u64 = 70;
-    let meteor: Option<(i32, i32)> = if w > 8 && h > 2 && tick % PERIOD < DURATION {
-        let p = (tick % PERIOD) as f32 / DURATION as f32; // 0..1 across the field
-        Some(((p * (w as f32 + 8.0)) as i32 - 4, (p * (h as f32 - 1.0)) as i32))
+    // A single comet drifts PERPETUALLY across the sky on a slow, looping diagonal —
+    // always present, steady and soothing (never a sudden flash). When it slides off
+    // one corner it re-enters from the other; the loop never ends.
+    const CYCLE: u64 = 260;
+    let (chx, chy) = if w > 8 && h > 2 {
+        let f = (tick % CYCLE) as f32 / CYCLE as f32; // 0..1, wraps forever
+        ((f * (w as f32 + 12.0)) as i32 - 6, (f * (h as f32 - 1.0)) as i32)
     } else {
-        None
+        (-100, -100)
     };
 
     let mut lines = Vec::with_capacity(h);
@@ -1847,12 +1847,13 @@ fn starfield(app: &App, width: u16, height: u16, tick: u64) -> Vec<Line<'static>
         let mut spans: Vec<Span> = Vec::new();
         let mut run = String::new();
         for x in 0..w {
-            // A meteor (head + a short up-left diagonal tail) overrides a static star.
-            let mtr = meteor.and_then(|(hx, hy)| {
-                let (dx, dy) = (hx - x as i32, hy - y as i32);
-                (dx >= 0 && dx <= 3 && dy == dx).then_some(dx)
-            });
-            if let Some(off) = mtr {
+            // The comet: a soft head with a fading tail trailing up-left along its
+            // path. Overrides a static star where they coincide.
+            let cmt = {
+                let (dx, dy) = (chx - x as i32, chy - y as i32);
+                (dx >= 0 && dx <= 4 && dy == dx).then_some(dx)
+            };
+            if let Some(off) = cmt {
                 if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
                 let (g, c) = match off {
                     0 => ("✦", Color::Gray),      // head — as bright as it gets (still gentle)

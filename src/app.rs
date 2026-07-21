@@ -4232,11 +4232,10 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
 
-        // Starfield: the sky is STILL (no idle redraws). Only an occasional meteor's
-        // brief pass animates — repaint just while one is crossing (its window is
-        // tick % 340 < 70; +a few frames to clear it), so most of the time the panel
-        // costs nothing. Self-terminating: the bar closes, the redraws stop.
-        if matches!(self.mode, Mode::Bar) && self.frame_tick % 340 < 74 && self.frame_tick % 2 == 0 {
+        // Starfield: a comet drifts perpetually, so repaint on a slow, steady cadence
+        // (~every 3 ticks) while the command bar is open. The stars themselves are
+        // still — only the comet moves. Self-terminating: the bar closes, redraws stop.
+        if matches!(self.mode, Mode::Bar) && self.frame_tick % 3 == 0 {
             self.needs_redraw = true;
         }
 
