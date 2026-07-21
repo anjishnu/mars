@@ -41,6 +41,10 @@ pub struct FileTree {
     pub selected: usize,
     /// Type-to-filter query; non-empty switches the sidebar to a fuzzy shortlist.
     pub filter: String,
+    /// Show dotfiles (`.env`, `.github`, …). Toggled with `.` on an empty filter;
+    /// initial value from `tuning.tree_show_dotfiles`. The `project_ignore` list
+    /// (`.git`, `.venv`, `node_modules`, …) stays hidden either way.
+    pub show_dotfiles: bool,
 }
 
 /// One flattened, visible line in the tree sidebar.
@@ -3174,6 +3178,7 @@ impl App {
                     expanded: std::collections::HashSet::new(),
                     selected: 0,
                     filter: String::new(),
+                    show_dotfiles: self.tuning.tree_show_dotfiles == 1,
                 });
             }
             self.tree_open = true;
@@ -3283,14 +3288,18 @@ impl App {
         }
     }
 
-    /// One directory's entries (dotdirs + the ignore-list skipped), dirs first.
+    /// One directory's entries, dirs first. Dotfiles are skipped unless the tree's
+    /// `show_dotfiles` toggle is on; the `project_ignore` list is always skipped.
     fn read_dir_entries(&self, dir: &std::path::Path) -> Vec<(String, bool)> {
         let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let show_dot = self.file_tree.as_ref().map(|t| t.show_dotfiles).unwrap_or(false);
         let mut entries: Vec<(String, bool)> = rd
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || self.tuning.project_ignore.iter().any(|i| i == &name) {
+                if (name.starts_with('.') && !show_dot)
+                    || self.tuning.project_ignore.iter().any(|i| i == &name)
+                {
                     return None;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -3306,7 +3315,15 @@ impl App {
         let none = key.modifiers.is_empty();
         let shift = key.modifiers == KeyModifiers::SHIFT;
         let len = self.tree_rows.len();
+        let filter_empty = self.file_tree.as_ref().map(|t| t.filter.is_empty()).unwrap_or(true);
         match key.code {
+            // `.` on an empty filter toggles dotfiles (`.env`, `.github`, …); with a
+            // filter active it falls through to type-to-filter below.
+            KeyCode::Char('.') if none && filter_empty => {
+                let now = self.file_tree.as_mut().map(|t| { t.show_dotfiles = !t.show_dotfiles; t.selected = 0; t.show_dotfiles }).unwrap_or(false);
+                self.refresh_tree_rows();
+                self.status_msg = Some(if now { "dotfiles shown".into() } else { "dotfiles hidden".into() });
+            }
             KeyCode::Esc | KeyCode::Char('g') if key.code == KeyCode::Esc || ctrl => {
                 // Esc / C-g: clear an active filter, else close the sidebar.
                 let cleared = self.file_tree.as_mut().map(|t| {

@@ -51,6 +51,7 @@ pub struct Tuning {
     pub project_index_max: usize,
     pub project_ignore: Vec<String>,
     pub tree_width: u16,
+    pub tree_show_dotfiles: u64,
     pub watch_quiet_secs: u64,
     pub agent_scrollback_context: usize,
     pub memory_cwd_boost: f64,
@@ -109,6 +110,7 @@ impl Default for Tuning {
                 .map(|s| s.to_string())
                 .collect(),
             tree_width: 30,
+            tree_show_dotfiles: 0,
             watch_quiet_secs: 20,
             agent_scrollback_context: 200,
             memory_cwd_boost: 0.25,
