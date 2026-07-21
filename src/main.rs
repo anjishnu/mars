@@ -1300,9 +1300,8 @@ fn selfcheck() -> Result<()> {
     println!("[selfcheck] tuning knobs + override .... PASS");
 
     // 26a2. The top-right status counter (beacon) is REMOVED — it silted up with
-    //       finished-Done counts that never clear and rendered as a garbled aggregate
-    //       in the corner. A blocked terminal still colors its tab label with the ⏸
-    //       glyph, but there is NO "⏸1"-style counter anywhere.
+    //       finished-Done counts that never clear. Status renders as a single colored
+    //       bubble (●) in a consistent position — no per-status glyphs (⏸/✗/✓).
     {
         let mut app = App::new(None)?;
         app.handle_key(k(KeyCode::Char('x')))?; // dismiss the splash
@@ -1313,9 +1312,10 @@ fn selfcheck() -> Result<()> {
         let mut term = Terminal::new(TestBackend::new(100, 20))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("⏸"), "the blocked tab label must still show the ⏸ glyph: {t}");
-        assert!(!t.contains("⏸1"), "the top-right counter/beacon must be gone (no ⏸1 aggregate): {t}");
-        println!("[selfcheck] beacon removed ............ PASS");
+        assert!(t.contains("●"), "the tab label must show a status bubble: {t}");
+        assert!(!t.contains("⏸") && !t.contains("✗") && !t.contains("✓"),
+            "status must be bubbles only — no per-status glyphs: {t}");
+        println!("[selfcheck] status bubbles ............ PASS");
     }
 
     // 26a3. The surface-status seam: pane/tab verdict is the ONE source the tab
@@ -1348,11 +1348,11 @@ fn selfcheck() -> Result<()> {
             Some("blocked: overwrite runs/best.pt? [y/N]".into());
         assert_eq!(app.pane_verdict(app.focused_pane_id()), briefing::Verdict::Blocked);
         assert_eq!(app.tab_status(app.tab()), briefing::Verdict::Blocked);
-        // …and the tab bar renders its colorblind-safe glyph.
+        // …and the tab bar renders a status bubble for it.
         let mut term = Terminal::new(TestBackend::new(80, 20))?;
         term.draw(|f| ui::render(f, &mut app))?;
-        assert!(screen_text(&term).contains("⏸"),
-            "a blocked tab must render the ⏸ glyph in the tab bar");
+        assert!(screen_text(&term).contains("●"),
+            "a blocked tab must render a status bubble in the tab bar");
         println!("[selfcheck] surface status seam ...... PASS");
     }
 
@@ -3651,12 +3651,13 @@ fn selfcheck() -> Result<()> {
         app.handle_key(k(KeyCode::Left))?;
         assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Workspaces,
             "← must move focus into the WORKSPACES panel");
-        // The panel renders its title, verdict glyph, the ↵ verb, and the legend.
+        // The panel renders its title, the ↵ verb on the selected row, and the
+        // "status: …" summary.
         let mut term = Terminal::new(TestBackend::new(110, 24))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("WORKSPACES") && t.contains("↵ jump") && t.contains("blocked"),
-            "the panel must show its title, the jump verb, and the legend: {t}");
+        assert!(t.contains("WORKSPACES") && t.contains("↵") && t.contains("status:") && t.contains("blocked"),
+            "the panel must show its title, the ↵ verb, and the 'status: …' summary: {t}");
         app.handle_key(k(KeyCode::Right))?;
         assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Commands,
             "→ must move focus back to the Commands launcher");
