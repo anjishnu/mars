@@ -1479,26 +1479,34 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
 fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16) -> Vec<Line<'static>> {
     use crate::briefing::Verdict;
     let w = width as usize;
-    let mut out = vec![Line::from(Span::styled("─".repeat(w), Style::default().fg(Color::DarkGray)))];
+    let mut out = vec![Line::from(Span::styled(
+        format!(" {} ", "─".repeat(w.saturating_sub(2))),
+        Style::default().fg(Color::DarkGray),
+    ))];
     let Some(ItemKind::Surface(s)) = row.map(|r| &r.kind) else { return out };
     let vcolor = verdict_color(app, s.verdict);
     let vlabel = match s.verdict {
         Verdict::Blocked => "blocked", Verdict::Failed => "failed",
         Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
     };
-    // "status: WHATEVER" in bold (bubble + label), then the detailed summary below in
-    // a softer italic. The ↵ verb lives on the selected row, not here.
+    // The status section is indented and padded on both sides, with a teal left rail
+    // that ties it to the teal-highlighted selection. "status: WHATEVER" leads in
+    // bold; the detailed summary sits below in a softer italic. The ↵ verb lives on
+    // the selected row, not here.
+    let teal = rgb(app.tuning.theme_terminal);
+    let rail = || Span::styled(" ▌ ", Style::default().fg(teal));
+    let content_w = w.saturating_sub(5); // " ▌ " + right padding
     out.push(Line::from(vec![
-        Span::styled("● ", Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
+        rail(),
         Span::styled("status: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::styled(vlabel.to_string(), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
     ]));
     let why = row.map(|r| r.description.clone()).unwrap_or_default();
     if !why.is_empty() {
-        out.push(Line::from(Span::styled(
-            ellip(&why, w),
-            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
-        )));
+        out.push(Line::from(vec![
+            rail(),
+            Span::styled(ellip(&why, content_w), Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+        ]));
     }
     out
 }

@@ -686,18 +686,22 @@ impl App {
         };
         let name = crate::ui::pane_name(self, pid);
         let w = tid.and_then(|t| self.watches.get(&t));
+        // Honest content: a summary earns its line only when it says something the
+        // status doesn't. The LLM verdict when present; else the exit outcome, the
+        // running command, or NOTHING for an idle prompt (never "working…").
+        let cmd = w.and_then(|w| w.last_command.as_ref()).map(|c| c.trim().to_string());
         let why = if let Some(v) = w.and_then(|w| w.verdict.as_ref()) {
             v.lines().next().unwrap_or("").trim().to_string()
         } else if let Some(t) = tid.and_then(|t| self.terms.get(&t)) {
             if t.exited {
                 match t.exit_code() {
                     Some(c) if c != 0 => format!("exited · code {c}"),
-                    _ => "done".to_string(),
+                    _ => cmd.clone().unwrap_or_default(),
                 }
             } else if w.map(|w| w.run_started_tick > 0).unwrap_or(false) {
-                "working…".to_string()
+                cmd.clone().unwrap_or_default() // running → the command, not "working…"
             } else {
-                "idle at a prompt".to_string()
+                String::new() // idle at a prompt → no summary line
             }
         } else {
             String::new()
