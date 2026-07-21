@@ -268,27 +268,40 @@ pub(crate) fn pane_name(app: &App, pane_id: PaneId) -> String {
     }
 }
 
-/// The informative name for a workspace (tab): the tab's own name, unless that's
-/// empty or just its number — then fall back to the focused pane's name, so the tab
-/// bar and the board read "trainer" / "main.rs" / "shell", never a bare "1".
-pub(crate) fn workspace_name(app: &App, tab: &crate::tab::Tab) -> String {
-    if tab.name.is_empty() || tab.name.parse::<usize>().is_ok() {
-        pane_name(app, tab.focused_pane)
-    } else {
-        tab.name.clone()
+/// The informative name for a workspace (tab), given its 1-based number. A real
+/// custom name wins; otherwise the focused pane names it — an editor by filename, a
+/// terminal by its title or a consistent "terminal N" default (never a bare number,
+/// and numbered the same way for every terminal so two shells read "terminal 1" /
+/// "terminal 2").
+pub(crate) fn workspace_name(app: &App, tab: &crate::tab::Tab, num: usize) -> String {
+    if !tab.name.is_empty() && tab.name.parse::<usize>().is_err() {
+        return tab.name.clone();
+    }
+    match app.panes.get(&tab.focused_pane).map(|p| &p.content) {
+        Some(PaneContent::Editor(buf_id)) => {
+            let b = app.buffers.get(buf_id);
+            let name = b.map(|b| b.name.clone()).unwrap_or_else(|| "buffer".to_string());
+            if b.map(|b| b.modified).unwrap_or(false) { format!("{name} ●") } else { name }
+        }
+        _ => app
+            .panes
+            .get(&tab.focused_pane)
+            .and_then(|p| p.title.clone())
+            .unwrap_or_else(|| format!("terminal {num}")),
     }
 }
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in app.tabs.iter().enumerate() {
-        // The tab's worst-pane verdict colors the whole label (one pop-out dimension,
-        // no dot to hunt) with a colorblind-safe glyph; idle stays a readable default.
+        // The tab's worst-pane verdict colors the whole label with a colorblind-safe
+        // glyph; an idle tab recedes to plain grey (not a warm accent that reads as a
+        // status it doesn't have).
         let (glyph, status_color) = match verdict_style(app, app.tab_status(tab)) {
             Some((g, c)) => (format!("{g} "), c),
-            None => (String::new(), rgb(app.tuning.theme_accent_bright)),
+            None => (String::new(), Color::Gray),
         };
-        let name = workspace_name(app, tab);
+        let name = workspace_name(app, tab, i + 1);
         let label = format!(" {glyph}{name} ");
         if i == app.active_tab {
             // The active tab keeps the chrome highlight (you're looking at it); the
@@ -1423,7 +1436,10 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
     let scroll = if sel >= body_max { sel + 1 - body_max } else { 0 };
     for (idx, row) in rows.iter().enumerate().skip(scroll).take(body_max) {
         let s = active && idx == sel;
-        let bg = if s { Color::DarkGray } else { Color::Reset };
+        // Selected row: inverted teal (dark text on a teal bar) so it's clearly
+        // visible — the old DarkGray highlight vanished against the dark ground.
+        let bg = if s { rgb(app.tuning.theme_terminal) } else { Color::Reset };
+        let sel_fg = rgb(app.tuning.theme_chip_fg);
         let (glyph, vcolor, id, cur) = match &row.kind {
             ItemKind::Surface(sr) => {
                 let (g, c) = verdict_style(app, sr.verdict).unwrap_or(("·", Color::DarkGray));
@@ -1431,26 +1447,27 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
             }
             _ => ("·", Color::DarkGray, 0, false),
         };
+        let _ = id;
         let marker = if cur { "‹" } else { " " };
         let age = match &row.kind {
             ItemKind::Surface(sr) if sr.age_secs > 0 => crate::briefing::fmt_secs(sr.age_secs),
             _ => String::new(),
         };
-        // Budget: marker(1) glyph(2) "id · " age( ) — the name gets what's left.
-        let name_budget = (width as usize).saturating_sub(3 + format!("{id} · ").len() + age.chars().count() + 2);
+        // Budget: marker(1) glyph(2) age( ) — the (self-identifying) name gets the rest.
+        let name_budget = (width as usize).saturating_sub(3 + age.chars().count() + 2);
         let mut spans = vec![
-            Span::styled(marker.to_string(), Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(bg).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{glyph} "), Style::default().fg(vcolor).bg(bg).add_modifier(Modifier::BOLD)),
+            Span::styled(marker.to_string(), Style::default().fg(if s { sel_fg } else { rgb(app.tuning.theme_accent_bright) }).bg(bg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{glyph} "), Style::default().fg(if s { sel_fg } else { vcolor }).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("{id} · {}", ellip(&row.label, name_budget)),
-                Style::default().fg(if s { vcolor } else { Color::White }).bg(bg)
+                ellip(&row.label, name_budget),
+                Style::default().fg(if s { sel_fg } else { Color::White }).bg(bg)
                     .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
             ),
         ];
         let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
         let pad = (width as usize).saturating_sub(lw + age.chars().count() + 1);
         spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        spans.push(Span::styled(format!("{age} "), Style::default().fg(Color::DarkGray).bg(bg)));
+        spans.push(Span::styled(format!("{age} "), Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg)));
         out.push(Line::from(spans));
     }
     out
@@ -1484,52 +1501,30 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
     out
 }
 
-/// The legend — the status class taxonomy + its colors, so the scheme is obvious
-/// rather than remembered. Two compact lines to fit the navigator-width panel.
-fn legend_lines(app: &App) -> Vec<Line<'static>> {
-    use crate::briefing::Verdict;
-    let chip = |v: Verdict, label: &str| -> Vec<Span<'static>> {
-        match verdict_style(app, v) {
-            Some((g, c)) => vec![
-                Span::styled(format!("{g} "), Style::default().fg(c).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{label}  "), Style::default().fg(Color::DarkGray)),
-            ],
-            None => vec![],
-        }
-    };
-    let mut l1 = vec![Span::raw(" ")]; l1.extend(chip(Verdict::Blocked, "blocked")); l1.extend(chip(Verdict::Failed, "failed"));
-    let mut l2 = vec![Span::raw(" ")]; l2.extend(chip(Verdict::Running, "running")); l2.extend(chip(Verdict::Done, "done"));
-    l2.push(Span::styled("· idle", Style::default().fg(Color::DarkGray)));
-    vec![Line::from(l1), Line::from(l2)]
-}
-
-/// The Workspaces board — a separate bordered panel (navigator-width), reached from
-/// the command bar with the ← arrow. Its own title, a rule separator before the
-/// detail, and the legend pinned to the bottom.
+/// The Workspaces board — a separate, static bordered panel with a teal border (the
+/// terminal's color, marking it as a live surface board rather than a scratch list),
+/// reached from the command bar with the ← arrow. Its own title and a rule separator
+/// before the detail; no legend clutter.
 fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let active = app.palette.as_ref().map(|p| p.column == crate::palette::BarColumn::Workspaces).unwrap_or(false);
     let sel = app.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
-    let border = if active { rgb(app.tuning.theme_accent) } else { Color::DarkGray };
+    let teal = rgb(app.tuning.theme_terminal);
+    let border = if active { teal } else { Color::DarkGray };
     let block = Block::default()
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .borders(Borders::ALL)
         .border_style(Style::default().fg(border))
-        .title(Span::styled(" WORKSPACES ", Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" WORKSPACES ", Style::default().fg(teal).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let rows = app.bar_workspace_rows();
     let ih = inner.height as usize;
-    let legend_h = 2.min(ih);
-    let detail_h = if ih > legend_h + 3 { 4 } else { 0 };
-    let list_h = ih.saturating_sub(legend_h + detail_h);
+    let detail_h = if ih > 4 { 4 } else { 0 };
+    let list_h = ih.saturating_sub(detail_h);
     frame.render_widget(Paragraph::new(Text::from(workspace_lines(app, &rows, sel, active, inner.width, list_h))),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: list_h as u16 });
     if detail_h > 0 {
         frame.render_widget(Paragraph::new(Text::from(detail_lines(app, rows.get(sel), inner.width))),
             Rect { x: inner.x, y: inner.y + list_h as u16, width: inner.width, height: detail_h as u16 });
-    }
-    if legend_h > 0 {
-        frame.render_widget(Paragraph::new(Text::from(legend_lines(app))),
-            Rect { x: inner.x, y: inner.y + inner.height - legend_h as u16, width: inner.width, height: legend_h as u16 });
     }
 }
 
@@ -1565,28 +1560,41 @@ fn render_bar_dropdown(
 
     let max_height = ((pane_area.height * app.tuning.panel_max_height_pct / 100) as usize)
         .min(app.tuning.dropdown_max_rows as usize) as u16;
-    // The command list drives the height; the workspaces panel needs room for a few
-    // rows + its detail(4) + legend(2). +1 for the top border.
-    let cmd_need = cmd_rows.len() as u16 + 1;
-    let ws_need = if show_ws { app.bar_workspace_rows().len().max(3) as u16 + 4 + 2 + 1 } else { 0 };
-    let drop_h = cmd_need.max(ws_need).min(max_height).max(2);
-    let full = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(drop_h), width: bar_area.width, height: drop_h };
-    frame.render_widget(Clear, full);
+    // The command box height tracks the (filtering) command list.
+    let cmd_h = (cmd_rows.len() as u16 + 1).min(max_height).max(2);
 
     if !show_ws {
         // No fleet to survey → the plain single-column launcher (previous behaviour).
+        let full = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(cmd_h), width: bar_area.width, height: cmd_h };
+        frame.render_widget(Clear, full);
         render_command_panel(frame, app, full, true, true);
         return Some(full);
     }
 
-    // A separate WORKSPACES panel (navigator-width) beside the classic command
-    // launcher. ← focuses the panel, → the launcher.
-    let ws_w = app.tuning.tree_width.clamp(20, full.width.saturating_sub(30).max(20));
-    let ws_rect = Rect { x: full.x, y: full.y, width: ws_w, height: drop_h };
-    let cmd_rect = Rect { x: full.x + ws_w, y: full.y, width: full.width - ws_w, height: drop_h };
+    // A separate, STATIC WORKSPACES box beside the command launcher. Its height is
+    // fixed by its own content (all workspaces + detail + border), independent of the
+    // query — so it stays put while the command box shrinks as you type. Both boxes
+    // are bottom-anchored; ← focuses the panel, → the launcher.
+    let ws_count = app.bar_workspace_rows().len().max(1) as u16;
+    let ws_h = (ws_count + 4 + 2).min(max_height).max(4); // rows + detail(4) + top/bottom border
+    let ws_w = app.tuning.tree_width.clamp(20, bar_area.width.saturating_sub(30).max(20));
+    let ws_rect = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(ws_h), width: ws_w, height: ws_h };
+    let cmd_rect = Rect {
+        x: bar_area.x + ws_w,
+        y: bar_area.y.saturating_sub(cmd_h),
+        width: bar_area.width.saturating_sub(ws_w),
+        height: cmd_h,
+    };
+    frame.render_widget(Clear, ws_rect);
+    frame.render_widget(Clear, cmd_rect);
     render_workspaces_panel(frame, app, ws_rect);
-    render_command_panel(frame, app, cmd_rect, false, palette.column == crate::palette::BarColumn::Commands);
-    Some(full)
+    render_command_panel(frame, app, cmd_rect, true, palette.column == crate::palette::BarColumn::Commands);
+    Some(Rect {
+        x: bar_area.x,
+        y: bar_area.y.saturating_sub(ws_h.max(cmd_h)),
+        width: bar_area.width,
+        height: ws_h.max(cmd_h),
+    })
 }
 
 // ── Proactive notice line (W6 watch verdicts) ────────────────────────────────

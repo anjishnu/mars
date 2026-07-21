@@ -641,21 +641,18 @@ impl App {
 
     /// The Workspaces column: ONE row per workspace (tab), ranked needs-you first,
     /// colored by the tab's aggregate status. A switcher AND a status board — it
-    /// lists ALL workspaces (jump anywhere), not only the ones that need you. The
-    /// query fuzzy-filters by workspace name, so typing narrows this column too.
+    /// lists ALL workspaces (jump anywhere). Deliberately NOT filtered by the query,
+    /// so the panel stays a static, fixed-height box while the command list filters.
     pub fn bar_workspace_rows(&self) -> Vec<crate::palette::PaletteRow> {
         use crate::palette::{ItemKind, PaletteRow, SurfaceRef};
         let ms = self.tuning.poll_interval_ms.max(1);
         let now = self.frame_tick;
-        let query = self.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
         let mut ranked: Vec<(u8, usize, PaletteRow)> = Vec::new();
         for (ti, tab) in self.tabs.iter().enumerate() {
-            // The informative workspace name (falls back to the pane name for unnamed
-            // or numeric tabs), so it reads "shell" / "main.rs", never "1".
-            let name = crate::ui::workspace_name(self, tab);
-            if !query.is_empty() && crate::palette::fuzzy_score(&query, &name).is_none() {
-                continue;
-            }
+            // The informative workspace name (falls back to a numbered terminal /
+            // filename for unnamed or numeric tabs), so it reads "terminal 2" /
+            // "main.rs", never a bare "1".
+            let name = crate::ui::workspace_name(self, tab, ti + 1);
             let v = self.tab_status(tab);
             // The tab's most-severe pane carries the why-line and the jump target.
             let worst = tab
