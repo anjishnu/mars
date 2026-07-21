@@ -31,6 +31,12 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+/// Brighten an RGB theme color by `amt` per channel — for readable variants of dark
+/// theme hues (e.g. the dark teal used for code, which is near-invisible on a dark bg).
+fn lighten(c: [u8; 3], amt: u8) -> Color {
+    Color::Rgb(c[0].saturating_add(amt), c[1].saturating_add(amt), c[2].saturating_add(amt))
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -627,9 +633,12 @@ fn md_numbered(t: &str) -> Option<(&str, &str)> {
 /// Lenient one-pass inline splitter: `**bold**`, `*italic*`, `` `code` ``.
 /// Unmatched markers are emitted literally — never panics, never drops text.
 fn md_inline(out: &mut Vec<Span<'static>>, text: &str, tuning: &crate::tuning::Tuning) {
-    let code_style = Style::default().fg(rgb(tuning.theme_terminal));
-    let bold_style = Style::default().add_modifier(Modifier::BOLD);
-    let italic_style = Style::default().add_modifier(Modifier::ITALIC);
+    // Code: a LIGHTENED teal (the raw theme teal is near-black on a dark bg).
+    let code_style = Style::default().fg(lighten(tuning.theme_terminal, 110));
+    let bold_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    // Italic also carries a warm color, so emphasis reads even on terminals that
+    // don't render the italic modifier at all.
+    let italic_style = Style::default().fg(rgb(tuning.theme_accent_bright)).add_modifier(Modifier::ITALIC);
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let find = |from: usize, ch: char| -> Option<usize> { (from..n).find(|&j| chars[j] == ch) };
@@ -698,7 +707,7 @@ fn md_line_spans(
         return;
     }
     if in_fence {
-        out.push(Span::styled(content.to_string(), Style::default().fg(rgb(tuning.theme_terminal))));
+        out.push(Span::styled(content.to_string(), Style::default().fg(lighten(tuning.theme_terminal, 110))));
         return;
     }
 
