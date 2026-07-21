@@ -154,7 +154,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         ]));
     }
 
-    let panel_h = (lines.len() as u16 + 1).min(pane_area.height.saturating_sub(1));
+    let panel_h = (lines.len() as u16 + 2).min(pane_area.height.saturating_sub(1)); // + top/bottom border
     let width = panel_width.min(status_area.width);
     let rect = Rect {
         x: status_area.x + status_area.width.saturating_sub(width),
@@ -163,13 +163,13 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         height: panel_h,
     };
     frame.render_widget(Clear, rect);
+    // A full box with " WARP " on the accent line — matching the WORKSPACES / COMMANDS
+    // boxes' titled borders.
+    let accent = rgb(app.tuning.theme_accent);
     let block = Block::default()
-        .title(Span::styled(
-            " C-t · space warp ",
-            Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::TOP | Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .title(Span::styled(" WARP ", Style::default().fg(accent).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);

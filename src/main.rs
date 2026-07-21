@@ -1207,7 +1207,7 @@ fn selfcheck() -> Result<()> {
     app.handle_key(kc(KeyCode::Char('t')))?; // enter travel mode
     term.draw(|f| ui::render(f, &mut app))?;
     let t21 = screen_text(&term);
-    assert!(t21.contains("space warp"), "space-warp cheat panel missing");
+    assert!(t21.contains("WARP"), "space-warp cheat panel (WARP box) missing");
     assert!(t21.contains("split right"), "cheat panel missing split hint");
     app.handle_key(k(KeyCode::Char('-')))?; // split below, exits
     assert_eq!(app.tab().layout.count(), 2, "travel '-' did not split");
