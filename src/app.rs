@@ -2166,20 +2166,28 @@ impl App {
                 self.status_msg = Some(if t { "Markdown engine: termimad".into() } else { "Markdown engine: hand-rolled".into() });
                 return;
             }
-            // termimad reading-mode: no cursor — arrows/page scroll the document.
+            // termimad reading-mode: no cursor — the document scrolls. Keys mirror the
+            // editor's own motion grammar so it's muscle-memory-consistent: C-n/C-p and
+            // ↑/↓ step a line, ⌥↑/⌥↓ · ⌥v · PgUp/PgDn page, M-< / M-> jump to the ends.
             if self.focused_pane().md_termimad {
                 let vh = self.focused_pane().view_h.max(1);
-                // Loose cap so scrolling past the end doesn't run away (reflow can
-                // roughly double the source line count).
-                let cap = self.buffers.get(&self.focused_buf_id()).map(|b| b.line_count() * 3 + 20).unwrap_or(0);
+                // Exact cap from the last render's measured length: the last page stays
+                // visible at the bottom, and you can't scroll off into a blank void.
+                let cap = self.focused_pane().md_rendered_total.get().saturating_sub(vh);
                 let p = self.focused_pane_mut();
                 match key.code {
+                    // page (editor: ⌥↑/⌥↓, ⌥v, PageUp/PageDown)
+                    KeyCode::Down if alt => p.md_scroll = (p.md_scroll + vh).min(cap),
+                    KeyCode::Up   if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                    KeyCode::Char('v') if alt => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                    KeyCode::PageDown => p.md_scroll = (p.md_scroll + vh).min(cap),
+                    KeyCode::PageUp   => p.md_scroll = p.md_scroll.saturating_sub(vh),
+                    // ends (M-< / M->) are bound to GoTop/GoBottom → handled in run_action.
+                    // line (editor: ↑/↓, C-n/C-p)
                     KeyCode::Down => p.md_scroll = (p.md_scroll + 1).min(cap),
-                    KeyCode::Up => p.md_scroll = p.md_scroll.saturating_sub(1),
+                    KeyCode::Up   => p.md_scroll = p.md_scroll.saturating_sub(1),
                     KeyCode::Char('n') if ctrl => p.md_scroll = (p.md_scroll + 1).min(cap),
                     KeyCode::Char('p') if ctrl => p.md_scroll = p.md_scroll.saturating_sub(1),
-                    KeyCode::PageDown => p.md_scroll = (p.md_scroll + vh).min(cap),
-                    KeyCode::PageUp => p.md_scroll = p.md_scroll.saturating_sub(vh),
                     _ => {}
                 }
                 return; // read-only document: swallow everything else
@@ -2773,6 +2781,7 @@ impl App {
             KeyCode::Char('r') => self.run_action(Action::RenameTab), // → prompt, exits mode
             KeyCode::Char('?') => self.run_action(Action::ExplainFailure), // triage → Ask
             KeyCode::Char('w') => self.toggle_watch_pane(), // watch this pane
+            KeyCode::Char('@') => self.toggle_file_tree(), // `@` opens/focuses the navigator
 
             // ── Session ──
             KeyCode::Char('D') => {
@@ -3932,6 +3941,14 @@ impl App {
             Action::KillWordForward    => self.kill_word(true),
             Action::KillWordBackward   => self.kill_word(false),
             Action::SelectAll          => self.select_all(),
+            // In termimad reading-mode there's no cursor — the editor's top/bottom
+            // motions scroll the document to its ends instead (same chord, M-< / M->).
+            Action::GoTop if self.focused_pane().md_termimad => self.focused_pane_mut().md_scroll = 0,
+            Action::GoBottom if self.focused_pane().md_termimad => {
+                let cap = self.focused_pane().md_rendered_total.get()
+                    .saturating_sub(self.focused_pane().view_h.max(1));
+                self.focused_pane_mut().md_scroll = cap;
+            }
             Action::GoTop              => self.move_file_start(),
             Action::GoBottom           => self.move_file_end(),
             Action::GotoLine           => self.start_prompt(PromptKind::GotoLine, "Go to line: "),
@@ -4263,13 +4280,6 @@ impl App {
     /// Called every loop iteration whether or not a client is attached.
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
-
-        // Starfield: a comet drifts perpetually, so repaint on a slow, steady cadence
-        // (~every 3 ticks) while the command bar is open. The stars themselves are
-        // still — only the comet moves. Self-terminating: the bar closes, redraws stop.
-        if matches!(self.mode, Mode::Bar) && self.frame_tick % 3 == 0 {
-            self.needs_redraw = true;
-        }
 
         for term in self.terms.values_mut() {
             term.flush_startup_input();

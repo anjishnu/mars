@@ -156,7 +156,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
                 format!(" {:<9}", keys),
                 Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", what), Style::default().fg(Color::White)),
+            Span::styled(format!(" {}", what), Style::default().fg(lighten(app.tuning.theme_terminal, 90))),
         ]));
     }
 
@@ -760,20 +760,50 @@ fn md_line_spans(
     md_inline(out, trimmed, tuning);
 }
 
+/// A termimad skin dressed in MARS's palette so reading-mode reads as *ours*, not a
+/// generic renderer: teal headings + table rules, accent bullets/quotes, a lightened
+/// teal for code, white bold, accent italic (mirroring the hand-rolled engine's inline
+/// choices). termimad rides crossterm 0.29, so colors use `termimad::crossterm`.
+fn mars_md_skin(app: &App) -> termimad::MadSkin {
+    use termimad::crossterm::style::Color as TColor;
+    let ct = |c: [u8; 3]| TColor::Rgb { r: c[0], g: c[1], b: c[2] };
+    let lite = |c: [u8; 3], a: u8| TColor::Rgb {
+        r: c[0].saturating_add(a), g: c[1].saturating_add(a), b: c[2].saturating_add(a),
+    };
+    let teal = ct(app.tuning.theme_terminal);
+    let accent = ct(app.tuning.theme_accent_bright);
+    let code = lite(app.tuning.theme_terminal, 110);
+
+    let mut s = termimad::MadSkin::default();
+    s.set_headers_fg(teal);
+    s.bold.set_fg(TColor::White);
+    s.italic.set_fg(accent);
+    s.inline_code.set_fg(code);
+    s.code_block.compound_style.set_fg(code);
+    s.bullet.set_fg(accent);
+    s.quote_mark.set_fg(accent);
+    s.table.set_fg(teal);
+    s
+}
+
 /// Prototype: render the buffer's Markdown with termimad (reflow, tables, wrapping),
 /// windowed by `md_scroll`. termimad renders to ANSI; we re-parse it with vt100 into
 /// a cell grid and convert to ratatui spans, so its full output lands in our frame.
-fn render_markdown_termimad(frame: &mut Frame, buf: &crate::buffer::Buffer, inner: Rect, md_scroll: usize) {
+fn render_markdown_termimad(frame: &mut Frame, app: &App, buf: &crate::buffer::Buffer, pane: &crate::pane::Pane, inner: Rect) {
     if inner.width == 0 || inner.height == 0 { return; }
     let width = inner.width;
+    let md_scroll = pane.md_scroll;
     let mut text = String::with_capacity(buf.line_count() * 40);
     for i in 0..buf.line_count() {
         if i > 0 { text.push('\n'); }
         text.push_str(&buf.line_str(i));
     }
-    let skin = termimad::MadSkin::default();
+    let skin = mars_md_skin(app);
     let fmt = skin.text(&text, Some(width as usize));
     let total = fmt.lines.len().max(1);
+    // Record the true rendered length so the scroll handler clamps exactly (no
+    // running off into a blank void) and the title can show a position %.
+    pane.md_rendered_total.set(total);
     // termimad emits bare `\n` (relying on the terminal's ONLCR); vt100 has none, so
     // each line would inherit the previous line's end column. Force CRLF so every
     // line starts at column 0. +headroom rows so the trailing newline can't scroll.
@@ -835,7 +865,18 @@ fn render_markdown_pane(
     let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
     let shown = pane.title.as_deref().unwrap_or(&buf.name);
     let engine = if pane.md_termimad { " · termimad" } else { "" };
-    let title = format!(" {} — markdown{engine} ", shown);
+    // Position % (termimad reading-mode only): how far through the reflowed document.
+    // Reads the last frame's measured total — a static doc never changes it.
+    let pos = if pane.md_termimad {
+        let total = pane.md_rendered_total.get();
+        let vh = pane.view_h.max(1);
+        if total > vh {
+            let cap = total - vh;
+            let pct = (pane.md_scroll.min(cap) * 100) / cap.max(1);
+            format!(" · {pct}%")
+        } else { String::new() }
+    } else { String::new() };
+    let title = format!(" {} — markdown{engine}{pos} ", shown);
 
     let block = Block::default()
         .title(Span::styled(title, Style::default().add_modifier(title_mod)))
@@ -847,7 +888,7 @@ fn render_markdown_pane(
     // termimad reading-mode: reflow the whole buffer into a rendered document,
     // windowed by the document scroll. No cursor (columns don't map after reflow).
     if pane.md_termimad {
-        render_markdown_termimad(frame, buf, inner, pane.md_scroll);
+        render_markdown_termimad(frame, app, buf, pane, inner);
         return None;
     }
 
@@ -1895,41 +1936,16 @@ fn star_hash(x: usize, y: usize) -> u64 {
 /// dim stars (no twinkle — the flicker was too stimulating), with an occasional slow
 /// meteor drifting diagonally across and fading. Deterministic in position; the field
 /// never moves, and only a meteor's brief, gentle pass animates.
-fn starfield(app: &App, width: u16, height: u16, tick: u64) -> Vec<Line<'static>> {
+fn starfield(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     let (w, h) = (width as usize, height as usize);
     let teal = rgb(app.tuning.theme_terminal);
-    // A single comet drifts PERPETUALLY across the sky on a slow, looping diagonal —
-    // always present, steady and soothing (never a sudden flash). When it slides off
-    // one corner it re-enters from the other; the loop never ends.
-    const CYCLE: u64 = 260;
-    let (chx, chy) = if w > 8 && h > 2 {
-        let f = (tick % CYCLE) as f32 / CYCLE as f32; // 0..1, wraps forever
-        ((f * (w as f32 + 12.0)) as i32 - 6, (f * (h as f32 - 1.0)) as i32)
-    } else {
-        (-100, -100)
-    };
-
+    // A still, dim scatter of stars — no motion. Quiet by design (the "no idle
+    // frames" doctrine): a static field costs zero repaints and never distracts.
     let mut lines = Vec::with_capacity(h);
     for y in 0..h {
         let mut spans: Vec<Span> = Vec::new();
         let mut run = String::new();
         for x in 0..w {
-            // The comet: a soft head with a fading tail trailing up-left along its
-            // path. Overrides a static star where they coincide.
-            let cmt = {
-                let (dx, dy) = (chx - x as i32, chy - y as i32);
-                (dx >= 0 && dx <= 4 && dy == dx).then_some(dx)
-            };
-            if let Some(off) = cmt {
-                if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
-                let (g, c) = match off {
-                    0 => ("✦", Color::Gray),      // head — as bright as it gets (still gentle)
-                    1 => ("·", Color::Gray),
-                    _ => ("·", Color::DarkGray),  // fading tail
-                };
-                spans.push(Span::styled(g.to_string(), Style::default().fg(c)));
-                continue;
-            }
             let seed = star_hash(x, y);
             if seed % 31 == 0 {
                 if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
@@ -1958,7 +1974,7 @@ fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(bstyle)
-        .title(Span::styled(" WORKSPACES ", Style::default().fg(teal).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" SPACES ", Style::default().fg(teal).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -1976,7 +1992,7 @@ fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let used = list_h + summ_h;
     if ih > used {
         frame.render_widget(
-            Paragraph::new(Text::from(starfield(app, inner.width, (ih - used) as u16, app.frame_tick))),
+            Paragraph::new(Text::from(starfield(app, inner.width, (ih - used) as u16))),
             Rect { x: inner.x, y: inner.y + used as u16, width: inner.width, height: (ih - used) as u16 },
         );
     }

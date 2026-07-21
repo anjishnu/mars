@@ -3657,7 +3657,7 @@ fn selfcheck() -> Result<()> {
         let mut term = Terminal::new(TestBackend::new(110, 24))?;
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
-        assert!(t.contains("WORKSPACES") && t.contains("↵") && t.contains("status:") && t.contains("blocked"),
+        assert!(t.contains("SPACES") && t.contains("↵") && t.contains("status:") && t.contains("blocked"),
             "the panel must show its title, the ↵ verb, and the 'status: …' summary: {t}");
         app.handle_key(k(KeyCode::Right))?;
         assert_eq!(app.palette.as_ref().unwrap().column, palette::BarColumn::Commands,
@@ -3960,27 +3960,37 @@ fn selfcheck() -> Result<()> {
 
     // 40c. Markdown termimad reading-mode (prototype): the same toggle with the
     //      termimad engine reflows the buffer into a rendered document (no cursor;
-    //      arrows scroll it), and `m` switches engines live.
+    //      editor-consistent motion scrolls it), `m` switches engines live, and the
+    //      scroll clamps exactly to the measured length (no running off the end).
     {
         let mut app = App::new(None)?;
         app.tuning.markdown_engine = 1; // termimad engine
-        let mut term = Terminal::new(TestBackend::new(100, 30))?;
-        for line in ["# Title", "", "some **bold** and *italic* text", "", "| a | b |", "|---|---|", "| 1 | 2 |"] {
-            typ(&mut app, line)?;
-            app.handle_key(k(KeyCode::Enter))?;
-        }
+        // A short viewport + a doc taller than it, so there is something to scroll.
+        let mut term = Terminal::new(TestBackend::new(100, 12))?;
+        typ(&mut app, "# Title")?; app.handle_key(k(KeyCode::Enter))?;
+        app.handle_key(k(KeyCode::Enter))?;
+        for i in 0..40 { typ(&mut app, &format!("paragraph line number {i} with some words"))?; app.handle_key(k(KeyCode::Enter))?; }
         app.run_action(palette::Action::ToggleMarkdown);
         assert!(app.focused_pane().md_view && app.focused_pane().md_termimad, "termimad engine did not engage");
         term.draw(|f| ui::render(f, &mut app))?;
         let t = screen_text(&term);
         assert!(t.contains("termimad"), "title should mark the termimad engine: {t}");
         assert!(t.contains("Title"), "termimad did not render the heading text");
+        assert!(app.focused_pane().md_rendered_total.get() > 12, "render should measure a doc taller than the viewport");
         // Arrows scroll the document (md_scroll), and must NOT move the cursor.
-        let s0 = app.focused_pane().md_scroll;
         let cr0 = app.focused_pane().cursor_row;
         app.handle_key(k(KeyCode::Down))?;
-        assert_eq!(app.focused_pane().md_scroll, s0 + 1, "arrow did not scroll the termimad document");
+        assert_eq!(app.focused_pane().md_scroll, 1, "arrow did not scroll the termimad document");
         assert_eq!(app.focused_pane().cursor_row, cr0, "termimad mode must not move the cursor");
+        // M-> (editor's bottom-of-file) jumps to the exact cap; M-< returns to top.
+        app.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::ALT))?;
+        let cap = app.focused_pane().md_rendered_total.get().saturating_sub(app.focused_pane().view_h.max(1));
+        assert_eq!(app.focused_pane().md_scroll, cap, "M-> did not jump to the bottom");
+        // Clamp holds: another Down at the bottom does not run past the cap.
+        app.handle_key(k(KeyCode::Down))?;
+        assert_eq!(app.focused_pane().md_scroll, cap, "scroll ran past the measured end");
+        app.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT))?;
+        assert_eq!(app.focused_pane().md_scroll, 0, "M-< did not jump to the top");
         // `m` switches back to the hand-rolled engine live.
         app.handle_key(k(KeyCode::Char('m')))?;
         assert!(!app.focused_pane().md_termimad, "m did not switch the engine");

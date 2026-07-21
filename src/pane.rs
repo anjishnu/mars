@@ -32,6 +32,9 @@ pub struct Pane {
     pub md_termimad: bool,
     /// Document-scroll offset (rendered lines) for the termimad reading-mode.
     pub md_scroll: usize,
+    /// Total rendered (reflowed) line count from the last termimad draw — set by
+    /// render, read by the scroll handler to clamp exactly and show a position %.
+    pub md_rendered_total: std::cell::Cell<usize>,
 }
 
 impl Pane {
@@ -49,6 +52,7 @@ impl Pane {
             md_view: false,
             md_termimad: false,
             md_scroll: 0,
+            md_rendered_total: std::cell::Cell::new(0),
         }
     }
 
