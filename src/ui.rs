@@ -268,6 +268,17 @@ pub(crate) fn pane_name(app: &App, pane_id: PaneId) -> String {
     }
 }
 
+/// The informative name for a workspace (tab): the tab's own name, unless that's
+/// empty or just its number — then fall back to the focused pane's name, so the tab
+/// bar and the board read "trainer" / "main.rs" / "shell", never a bare "1".
+pub(crate) fn workspace_name(app: &App, tab: &crate::tab::Tab) -> String {
+    if tab.name.is_empty() || tab.name.parse::<usize>().is_ok() {
+        pane_name(app, tab.focused_pane)
+    } else {
+        tab.name.clone()
+    }
+}
+
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in app.tabs.iter().enumerate() {
@@ -277,7 +288,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             Some((g, c)) => (format!("{g} "), c),
             None => (String::new(), rgb(app.tuning.theme_accent_bright)),
         };
-        let name = if tab.name.is_empty() { pane_name(app, tab.focused_pane) } else { tab.name.clone() };
+        let name = workspace_name(app, tab);
         let label = format!(" {glyph}{name} ");
         if i == app.active_tab {
             // The active tab keeps the chrome highlight (you're looking at it); the

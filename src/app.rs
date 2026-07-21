@@ -650,15 +650,9 @@ impl App {
         let query = self.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
         let mut ranked: Vec<(u8, usize, PaletteRow)> = Vec::new();
         for (ti, tab) in self.tabs.iter().enumerate() {
-            // Use the tab's name, but fall back to the focused pane's name when the
-            // tab is unnamed or just carries its number (so it reads "1 · shell",
-            // never "1 · 1").
-            let numeric = tab.name.parse::<usize>().is_ok();
-            let name = if tab.name.is_empty() || numeric {
-                crate::ui::pane_name(self, tab.focused_pane)
-            } else {
-                tab.name.clone()
-            };
+            // The informative workspace name (falls back to the pane name for unnamed
+            // or numeric tabs), so it reads "shell" / "main.rs", never "1".
+            let name = crate::ui::workspace_name(self, tab);
             if !query.is_empty() && crate::palette::fuzzy_score(&query, &name).is_none() {
                 continue;
             }
