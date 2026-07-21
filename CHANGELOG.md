@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.5.0
+
+The monitoring release: MARS watches the whole fleet and tells you what needs
+you. A workspace ledger records every command's outcome, an ambient monitor
+turns that into a needs-you-first board, and the command bar becomes mission
+control — a workspaces board beside the launcher, one status bubble per
+workstream, a plain-English summary on demand. Plus a termimad-powered Markdown
+reading-mode, a unified space-warp navigation grammar, and a calmer, quieter UI.
+
+### Added
+- **Workspace ledger (Movement 1)**: OSC-133 command-boundary capture records an
+  exact per-command entry — cwd, the command that ran, its exit code — into a
+  Notice-shaped ledger, and a tier-0 deterministic engine reaches verdicts from
+  it with zero model calls. This is the substrate the monitor reads.
+- **Ambient workspace monitor**: the fleet's state surfaces without arming
+  anything. Every workstream is ranked needs-you-first — blocked ⏸ and failed ✗
+  at the top, then running, done, idle — so "anything need me?" is answerable at
+  a glance.
+- **Workspaces board in the command bar**: the bar splits into a workspaces
+  board (reach it with ←) beside the commands launcher (→). The board is a
+  full-height titled box; the empty sky below the list fills with a still,
+  dim starfield, and each workstream carries a wrapped, plain-English status
+  line with a teal rail.
+- **On-demand summary** (`s`): select a workstream and pull a one-line "what is
+  this doing?" — a single low-tier model call, guarded against excess firing
+  (one in-flight at a time + a freshness gate), with a deterministic fallback
+  when no API key is set.
+- **Consistent status bubbles**: one ● bubble per surface, colored by state
+  (amber = blocked, red = failed, green = running, teal = done, grey = idle),
+  in both the tab bar and the board — position and color, never glyph soup.
+- **Space-warp navigation** (`C-t`): one directional grammar walks the whole
+  workspace — arrows / `hjkl` step between panes and spill into the adjacent tab
+  at the edges, `1`–`9` jump to a tab, `z`/space zoom, `|`/`-` split, `d` close,
+  `x` swap, `@` jumps to the navigator. Inside travel mode every verb is a bare
+  key. A titled, teal-bordered WARP box shows the live grammar.
+- **Markdown reading-mode**: toggle any editor pane into a read-only, reflowed
+  document — real wrapping, tables, nested lists (via termimad) — dressed in the
+  MARS palette (teal headings, accent bullets, lightened-teal code). The title
+  shows a position %, and the document scrolls with the editor's own motion
+  grammar (↑/↓ and `C-n`/`C-p` by line, `⌥↑`/`⌥↓`/`⌥v`/PgUp/PgDn by page,
+  `M-<`/`M->` to the ends), clamped exactly to the rendered length.
+- **Navigator dotfiles**: `.` toggles hidden files in the navigator so the
+  important things in hidden folders are reachable (knob `tree_show_dotfiles`).
+
+### Changed
+- **The command bar is a board, not a list**: needs-you-first ranking, honest
+  per-row content (verdict · command · exit; "summarizing…" while a summary
+  runs), and a padded, teal-railed summary section.
+- **Informative workspace names**: the tab bar shows "terminal N" and filenames
+  instead of bare numbers, and idle tabs recede to grey.
+- **A calmer sky**: the workspaces starfield is a still, dim scatter — no
+  twinkle, no drifting comet, and therefore zero idle repaints while the bar is
+  open.
+
+### Removed
+- **The hand-rolled Markdown prototype**: termimad reading-mode won the A/B, so
+  the older line-aligned renderer and its `markdown_engine` knob / `m` engine
+  toggle are gone.
+- **The top-right status counter (beacon)**: status now lives in the tab labels
+  and the board, not a corner tally.
+
+### Fixed
+- Idle terminals no longer render green (Running) — the verdict gates on recent
+  output, so a quiet shell reads as idle.
+- Markdown code color lightened (dark teal was near-invisible on a dark
+  background); emphasis carries a warm color so italics read even on terminals
+  that don't render the italic attribute.
+- The reattach briefing keeps its deterministic report when the LLM enrichment
+  call fails, instead of blanking.
+- Resilient model-tier ring: tiers hold a list of models and rotate off retired
+  ones, so a decommissioned model name no longer stalls a tier.
+
 ## 0.4.0
 
 The mission-aware release: reattaching becomes a save-state restore narrated by
