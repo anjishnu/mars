@@ -29,6 +29,7 @@ pub enum Action {
     // files / buffers
     Save,
     ToggleFileTree,
+    ToggleMarkdown,
     RefreshIndex,
     RestoreKeybindings,
     KillBuffer,
@@ -115,6 +116,7 @@ impl Action {
             Action::TabMode            => "space warp (tabs/panes)",
             Action::Save               => "save",
             Action::ToggleFileTree     => "navigator (browse & jump to files)",
+            Action::ToggleMarkdown     => "markdown view",
             Action::RefreshIndex       => "refresh file index",
             Action::RestoreKeybindings => "restore default keybindings",
             Action::KillBuffer         => "kill buffer",
@@ -239,6 +241,7 @@ fn root_menu() -> Vec<MenuItem> {
     vec![
         MenuItem::run_desc("Save",          Action::Save,           "Save the current buffer"),
         MenuItem::run_desc("Navigator — browse & jump to files", Action::ToggleFileTree, "Open the file sidebar; type to filter, Enter to jump (also @)"),
+        MenuItem::run_desc("Markdown view", Action::ToggleMarkdown, "Toggle a richly-rendered read-only view of this Markdown buffer"),
         MenuItem::run_desc("Search",        Action::Search,       "Incremental search in this buffer"),
         MenuItem::run_desc("Search & replace…", Action::QueryReplace, "Find and replace, stepping y/n through each match"),
         MenuItem::run_desc("Undo",          Action::Undo,         "Undo the last edit"),

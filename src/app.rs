@@ -2151,6 +2151,20 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let cmd   = key.modifiers.contains(KeyModifiers::SUPER);
 
+        // Read-only Markdown view: swallow every buffer-mutating key, but let
+        // cursor motion and scrolling fall through to the normal handling below.
+        if self.md_view_active() {
+            let mutates = matches!(
+                key.code,
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab
+            ) || (matches!(key.code, KeyCode::Char('d')) && ctrl)
+              || (matches!(key.code, KeyCode::Char(_)) && !ctrl && !alt);
+            if mutates {
+                self.status_msg = Some("Markdown view is read-only — toggle it off to edit".into());
+                return;
+            }
+        }
+
         self.last_yank = None; // any primitive key breaks a C-y / M-y chain
         // Undo coalescing: remember the run in progress, then default to breaking
         // it — only the insert/backspace arms below renew it.
@@ -3748,6 +3762,45 @@ impl App {
     }
 
     /// Execute a palette action.
+    /// Flip the focused editor pane into (or out of) the read-only rendered
+    /// Markdown view. No-op with a hint on a terminal pane.
+    fn toggle_markdown(&mut self) {
+        if !matches!(self.focused_pane().content, PaneContent::Editor(_)) {
+            self.status_msg = Some("Markdown view applies to editor panes only".into());
+            return;
+        }
+        let p = self.focused_pane_mut();
+        p.md_view = !p.md_view;
+        let on = p.md_view;
+        self.status_msg = Some(if on {
+            "Markdown view on (read-only) — toggle again to edit".into()
+        } else {
+            "Markdown view off".into()
+        });
+    }
+
+    /// True when the focused pane is showing the read-only Markdown view.
+    fn md_view_active(&self) -> bool {
+        let p = self.focused_pane();
+        p.md_view && matches!(p.content, PaneContent::Editor(_))
+    }
+
+    /// Actions that write to the buffer — blocked while the Markdown view is up.
+    fn action_mutates_buffer(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::Undo
+                | Action::Redo
+                | Action::KillLine
+                | Action::KillRegion
+                | Action::Yank
+                | Action::YankPop
+                | Action::Paste
+                | Action::KillWordForward
+                | Action::KillWordBackward
+        )
+    }
+
     pub fn run_action(&mut self, action: Action) {
         self.edit_run = EditRun::None; // a command breaks the typing/backspace undo run
         // Track frecency
@@ -3757,6 +3810,13 @@ impl App {
         // Any action other than yank/yank-pop breaks the M-y chain.
         if !matches!(action, Action::Yank | Action::YankPop) {
             self.last_yank = None;
+        }
+
+        // Read-only Markdown view: buffer-mutating commands are inert (the same
+        // contract the edit-primitive guard enforces for typed keys).
+        if self.md_view_active() && Self::action_mutates_buffer(&action) {
+            self.status_msg = Some("Markdown view is read-only — toggle it off to edit".into());
+            return;
         }
 
         match action {
@@ -3794,6 +3854,7 @@ impl App {
             Action::TabMode            => self.mode = Mode::Tab,
             Action::Save               => self.do_save(),
             Action::ToggleFileTree     => self.toggle_file_tree(),
+            Action::ToggleMarkdown     => self.toggle_markdown(),
             Action::RefreshIndex       => {
                 self.project_index = None;
                 self.ensure_project_index();

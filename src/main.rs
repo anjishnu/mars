@@ -3913,6 +3913,49 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] orphan actions now in menu PASS");
     }
 
+    // 40b. Markdown view: the toggle repaints the focused editor pane as a
+    //      read-only rendered view (heading marker stripped, bullet glyph,
+    //      inline bold markers gone) with the cursor + scroll still live, and
+    //      blocks buffer edits until it is toggled back off.
+    {
+        let mut app = App::new(None)?;
+        let mut term = Terminal::new(TestBackend::new(120, 40))?;
+        for line in ["# Heading", "- bullet", "**bold**", "```", "code", "```"] {
+            typ(&mut app, line)?;
+            app.handle_key(k(KeyCode::Enter))?;
+        }
+        let before = app.focused_buf().rope.to_string();
+
+        app.run_action(palette::Action::ToggleMarkdown);
+        assert!(app.focused_pane().md_view, "md_view flag did not set");
+        app.run_action(palette::Action::GoTop);
+        term.draw(|f| ui::render(f, &mut app))?;
+        let md = screen_text(&term);
+        assert!(md.contains("Heading") && !md.contains("# Heading"), "heading marker not stripped");
+        assert!(md.contains("•"), "bullet glyph not rendered");
+        assert!(md.contains("bold") && !md.contains("**bold**"), "inline bold markers not stripped");
+        assert!(md.contains("— markdown"), "markdown view title missing");
+
+        // Cursor is line-level and live: arrows move it (scroll reuses ensure_scroll).
+        assert_eq!(app.focused_pane().cursor_row, 0, "GoTop did not land on line 0");
+        app.handle_key(k(KeyCode::Down))?;
+        app.handle_key(k(KeyCode::Down))?;
+        assert_eq!(app.focused_pane().cursor_row, 2, "arrows did not move the cursor in md_view");
+
+        // Read-only: typing / Enter / paste leave the buffer byte-for-byte identical.
+        typ(&mut app, "SHOULD_NOT_APPEAR")?;
+        app.handle_key(k(KeyCode::Enter))?;
+        app.run_action(palette::Action::Paste);
+        assert_eq!(app.focused_buf().rope.to_string(), before, "md_view did not block edits");
+
+        // Toggle OFF → normal editing resumes.
+        app.run_action(palette::Action::ToggleMarkdown);
+        assert!(!app.focused_pane().md_view, "md_view flag did not clear");
+        typ(&mut app, "EDITS")?;
+        assert!(app.focused_buf().rope.to_string().contains("EDITS"), "editing broken after md_view off");
+        println!("[selfcheck] markdown view toggle ...... PASS");
+    }
+
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
     //     stats aggregates it, and logging is a strict no-op when disabled.
     {

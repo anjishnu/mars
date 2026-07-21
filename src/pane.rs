@@ -25,6 +25,8 @@ pub struct Pane {
     pub view_h: usize,
     /// User-set pane title; falls back to the buffer name / "terminal".
     pub title: Option<String>,
+    /// Read-only rendered-Markdown view (cursor + scroll live; editing disabled).
+    pub md_view: bool,
 }
 
 impl Pane {
@@ -39,6 +41,7 @@ impl Pane {
             selection_anchor: None,
             view_h: 0,
             title: None,
+            md_view: false,
         }
     }
 
