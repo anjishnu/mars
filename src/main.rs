@@ -104,9 +104,11 @@ LLM DEBUG  (calibrate prompts / right-size models per call)
   mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
                                  latency) to ~/.mars/logs/ (or MARS_LLM_DEBUG=1;
                                  export it so session daemons inherit it all day)
-  mars llm-stats [--raw|--json|--daily]
+  mars llm-stats [--raw|--json|--daily|--since 7d]
                                  profile the log: per task×model ranked by token
-                                 use; --daily = day-by-day trend, --json = scriptable
+                                 use; --daily trend, --json scriptable, --since window
+  mars theme [list|<name>]       list color themes, or switch (writes config) [beta]
+  mars config                    show the global config (~/.mars/config.json)
   mars translate \"<english>\"     headless: English → one shell command (logs it)
   --memory none|history|docs|full  retrieval variant: history = your own commands
                                  for translate; docs = Mars's own docs for ask
@@ -246,7 +248,30 @@ fn main() -> Result<()> {
         Some("llm-stats") => {
             let flags: Vec<String> = args.collect();
             let has = |f: &str| flags.iter().any(|a| a == f);
-            return llm_log::stats(has("--raw"), has("--json"), has("--daily"));
+            // `--since 7d` / `12h` / `30m` / bare `7` (days) — a trailing window.
+            let since = flags.iter().position(|a| a == "--since").and_then(|i| flags.get(i + 1)).and_then(|s| {
+                let (num, mult) = match s.chars().last() {
+                    Some('d') => (&s[..s.len() - 1], 86400),
+                    Some('h') => (&s[..s.len() - 1], 3600),
+                    Some('m') => (&s[..s.len() - 1], 60),
+                    Some(c) if c.is_ascii_digit() => (s.as_str(), 86400),
+                    _ => return None,
+                };
+                num.parse::<u64>().ok().map(|n| n * mult)
+            });
+            return llm_log::stats(has("--raw"), has("--json"), has("--daily"), since);
+        }
+        // Show the global config file (~/.mars/config.json): path + contents.
+        Some("config") => {
+            let Some(p) = config::config_json_path() else {
+                anyhow::bail!("no home directory");
+            };
+            println!("{}", p.display());
+            match std::fs::read_to_string(&p) {
+                Ok(s) => print!("\n{s}"),
+                Err(_) => println!("\n(no config file yet — create it to set env overrides or a theme)\nexample: {{ \"theme\": \"eclipse\", \"env\": {{ \"MARS_LLM_DEBUG\": \"1\" }} }}"),
+            }
+            return Ok(());
         }
         // Color themes: list, or switch (writes ~/.mars/config.json "theme").
         Some("theme") => {
@@ -4113,6 +4138,28 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] themes (resolve/parse/render) . PASS");
     }
 
+    // 40e. Live theme cycle (beta): CycleTheme changes the resolved palette and
+    //      persists the choice. HOME is isolated so it never touches a real config.
+    {
+        let saved = std::env::var(sys::paths::HOME_ENV).ok();
+        let tmp = std::env::temp_dir().join(format!("mars-theme-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".mars"))?;
+        std::env::set_var(sys::paths::HOME_ENV, &tmp);
+
+        let mut app = App::new(None)?;
+        let before = app.tuning.palette.accent;
+        app.run_action(palette::Action::CycleTheme);
+        assert_ne!(app.tuning.palette.accent, before, "cycle did not change the live palette");
+        assert!(config::selected_theme().is_some(), "cycle did not persist the theme");
+
+        match saved {
+            Some(h) => std::env::set_var(sys::paths::HOME_ENV, h),
+            None => std::env::remove_var(sys::paths::HOME_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        println!("[selfcheck] cycle theme (live) ......... PASS");
+    }
+
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
     //     stats aggregates it, and logging is a strict no-op when disabled.
     {
@@ -4140,7 +4187,7 @@ fn selfcheck() -> Result<()> {
         let outc = std::fs::read_to_string(llm_log::outcomes_path())?;
         assert!(outc.contains("\"call_id\":1") && outc.contains("git status"), "outcome not logged");
         assert!(std::fs::read_to_string(llm_log::log_path())?.contains("session_start"), "session event not logged");
-        llm_log::stats(false, false, false)?; // aggregation runs cleanly, skips session events
+        llm_log::stats(false, false, false, None)?; // aggregation runs cleanly, skips session events
         // Disabled → strictly no writes.
         std::env::remove_var("MARS_LLM_DEBUG");
         let before = std::fs::metadata(llm_log::log_path())?.len();

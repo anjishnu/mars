@@ -218,7 +218,8 @@ fn day_label(ts: u64) -> String {
 /// optimized. Rows are ranked by total token consumption (the biggest budget/latency
 /// targets first). `--raw` dumps the JSONL; `--json` emits the aggregate + daily
 /// series as JSON (scriptable); `--daily` prints a day-by-day token-trend chart.
-pub fn stats(raw: bool, json: bool, daily: bool) -> anyhow::Result<()> {
+pub fn stats(raw: bool, json: bool, daily: bool, since_secs: Option<u64>) -> anyhow::Result<()> {
+    let cutoff = since_secs.map(|w| now_secs().saturating_sub(w));
     let path = log_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -249,6 +250,11 @@ pub fn stats(raw: bool, json: bool, daily: bool) -> anyhow::Result<()> {
         if j.get("kind").is_some() {
             continue; // session_start / session_end boundary event, not a call
         }
+        if let Some(cut) = cutoff {
+            if j["ts"].as_u64().unwrap_or(0) < cut {
+                continue; // outside the --since window
+            }
+        }
         let task = j["task"].as_str().unwrap_or("?").to_string();
         let model = j["model"].as_str().unwrap_or("?").to_string();
         let pt = j["prompt_tokens"].as_u64().unwrap_or(0);
@@ -265,7 +271,8 @@ pub fn stats(raw: bool, json: bool, daily: bool) -> anyhow::Result<()> {
         if json {
             println!("{{\"calls\":0,\"rows\":[],\"daily\":[]}}");
         } else {
-            println!("Log at {} is empty.", path.display());
+            let scope = if cutoff.is_some() { " in the --since window" } else { "" };
+            println!("No calls{scope} in the log at {}.", path.display());
         }
         return Ok(());
     }
@@ -342,7 +349,7 @@ pub fn stats(raw: bool, json: bool, daily: bool) -> anyhow::Result<()> {
         }
     } else {
         println!("tips: heaviest rows first — try a smaller model or a shorter prompt there;");
-        println!("      `--raw` shows full inputs/outputs · `--daily` day-by-day trends · `--json` machine-readable.");
+        println!("      `--raw` full I/O · `--daily` day-by-day · `--json` machine-readable · `--since 7d` a window.");
     }
     Ok(())
 }

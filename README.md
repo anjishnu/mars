@@ -175,6 +175,9 @@ mars llm-stats                # per task×model, ranked by total tokens:
 #   watch      qwen/qwen3-32b   2    6050      195    12490   62%    3025    0   ← heaviest
 #   ask        qwen/qwen3-32b   2    1720      215     3870   19%     900    0
 mars llm-stats --raw          # full inputs/outputs per call
+mars llm-stats --daily        # day-by-day token trend (a bar per day)
+mars llm-stats --json         # machine-readable (rows + a daily series)
+mars llm-stats --since 7d     # only the last 7 days (also 12h, 30m)
 ```
 
 To keep it on without exporting the env var every time, set it in the global MARS
@@ -311,6 +314,15 @@ interval, scrollback depth, colors, timings, watch quiet threshold) live in
 `~/.config/mars/tuning.json`, each with a plain-English description of what it does.
 Broke your config experimenting? **`mars reset`** restores default keys + tuning (your
 old files are kept as `*.bak`).
+
+**Color themes (beta).** `mars theme list` shows the bundled themes — **Mission
+Control** (the default), **Eclipse** (high-contrast), **Paper** (warm light), and
+**Hacker** (green-on-black); `mars theme <name>` switches (recorded in
+`~/.mars/config.json`). Or **Cycle theme** in the command bar flips through them
+*live*. Drop your own token→color JSON in `~/.mars/themes/`. A running session keeps
+its look until it's restarted (or you cycle from inside it). Every color is a single
+semantic token now, so a theme repaints the whole UI at once — it's new, so please
+report anything that reads wrong (especially on the light theme).
 
 ## Troubleshooting
 

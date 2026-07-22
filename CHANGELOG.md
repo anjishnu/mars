@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.1
+
+Themes, editor polish, and observability. The look is now fully tokenized, so a
+color theme repaints the whole UI at once — plus a batch of editor-feel refinements
+and richer `llm-stats`.
+
+### Added
+- **Color themes (beta)**: every colored cell resolves through one of 17 semantic
+  tokens (accent, info, danger, text, border, surface, …), so a theme swaps the
+  whole palette. Four bundled themes — **Mission Control** (default, unchanged),
+  **Eclipse** (high-contrast), **Paper** (warm light), **Hacker** (green-on-black).
+  `mars theme list` / `mars theme <name>` switch it (recorded in
+  `~/.mars/config.json`); **Cycle theme** in the command bar flips through them
+  *live*. Drop your own token→color JSON in `~/.mars/themes/`. Custom `theme_*`
+  tuning knobs still override per token, so existing customizations are untouched.
+- **Current-line highlight** — a subtle tint on the cursor's row
+  (`highlight_current_line` / `current_line_bg`).
+- **Passive matched-bracket highlight** — the bracket at the cursor and its match
+  render bold-accent.
+- **Markdown reading-mode** — a read-only, reflowed view (tables, wrapping) capped
+  at `reading_width` (default 90 cols) and centered; skin in a clay → sandstone →
+  light-teal hierarchy.
+- **`mars config`** — show the global config file and its contents.
+- **`llm-stats` gains `--json`** (scriptable: rows + a per-day series), **`--daily`**
+  (a day-by-day token-trend chart), and **`--since 7d`** (a trailing window; also
+  `12h`, `30m`).
+- **Navigator** shows dotfiles by default (`.` still toggles).
+- The space-warp panel has a `@ · go to the navigator` row.
+
+### Changed
+- **Config moved to `~/.mars/config.json`** (alongside worklog/briefings/logs),
+  replacing the project-local `.mars` rc — same `env`-override schema, now with a
+  `theme` field. The real environment still wins.
+- The mouse wheel scrolls the **viewport** in a normal editor and the **document**
+  in reading-mode (was moving the cursor / a no-op).
+- The space-warp WARP panel uses neutral grey/white chrome instead of teal.
+
+### Removed
+- The red ● REC status-bar chip (LLM logging is a persistent config state now).
+
 ## 0.5.0
 
 The monitoring release: MARS watches the whole fleet and tells you what needs
