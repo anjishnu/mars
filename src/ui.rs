@@ -33,9 +33,6 @@ fn rgb(c: [u8; 3]) -> Color {
 
 /// Brighten an RGB theme color by `amt` per channel — for readable variants of dark
 /// theme hues (e.g. the dark teal used for code, which is near-invisible on a dark bg).
-fn lighten(c: [u8; 3], amt: u8) -> Color {
-    Color::Rgb(c[0].saturating_add(amt), c[1].saturating_add(amt), c[2].saturating_add(amt))
-}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -128,6 +125,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
     let rows: &[(&str, &str)] = &[
         ("← → ↑ ↓",  "move focus  ·  pane → tab at the edges"),
         ("1-9",      "jump to tab"),
+        ("@",        "go to the navigator (file tree)"),
         ("z / Spc",  "zoom (maximize)  ·  toggle"),
         ("d / ⌫",    "close focused  ·  pane, or tab if last"),
         ("",         ""),
@@ -156,7 +154,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
                 format!(" {:<9}", keys),
                 Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", what), Style::default().fg(lighten(app.tuning.theme_terminal, 90))),
+            Span::styled(format!(" {}", what), Style::default().fg(Color::Gray)),
         ]));
     }
 
@@ -169,12 +167,11 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         height: panel_h,
     };
     frame.render_widget(Clear, rect);
-    // A full box with " WARP " on a teal line — matching the WORKSPACES box's border.
-    let teal = rgb(app.tuning.theme_terminal);
+    // A full box with " WARP " on a neutral grey/white line — a calm, non-teal chrome.
     let block = Block::default()
-        .title(Span::styled(" WARP ", Style::default().fg(teal).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" WARP ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(teal));
+        .border_style(Style::default().fg(Color::Gray));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
