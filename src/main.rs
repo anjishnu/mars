@@ -4138,8 +4138,12 @@ fn selfcheck() -> Result<()> {
         // The committed surface (black) fills the whole frame — not just where a
         // widget sets a bg — so a themed background is consistent everywhere.
         let black = RColor::Rgb(0, 0, 0);
-        let filled = term.backend().buffer().content().iter().filter(|c| c.bg == black).count();
-        assert!(filled > 60 * 8 / 2, "the surface did not fill most of the frame ({filled} cells)");
+        let count_black = |t: &Terminal<TestBackend>| t.backend().buffer().content().iter().filter(|c| c.bg == black).count();
+        assert!(count_black(&term) > 60 * 8 / 2, "the surface did not fill most of the frame");
+        // opaque_background = 0 forces transparent (terminal bg) even for a colored theme.
+        app.tuning.opaque_background = 0;
+        term.draw(|f| ui::render(f, &mut app))?;
+        assert!(count_black(&term) < 60 * 8 / 4, "opaque_background=0 should not paint the surface");
         println!("[selfcheck] themes (resolve/parse/render) . PASS");
     }
 

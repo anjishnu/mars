@@ -99,6 +99,11 @@ pub struct Tuning {
     pub current_line_bg: [u8; 3],
     /// Max reflow width for the Markdown reading-mode, in columns (0 = full width).
     pub reading_width: u64,
+    /// Paint the theme's `surface` as a solid background (1) or stay transparent and
+    /// honor the terminal's own background (0). A theme with a `Reset` surface (the
+    /// default) is transparent either way; a colored surface (Paper, Hacker) is
+    /// solid when this is on.
+    pub opaque_background: u64,
     /// Seconds before the agent may auto-name a default-named tab (0 = off).
     pub auto_name_secs: u64,
     pub agent_max_tokens: u32,
@@ -163,6 +168,7 @@ impl Default for Tuning {
             highlight_current_line: 1,
             current_line_bg: [42, 37, 34],   // subtle warm tint on the cursor's row
             reading_width: 90,
+            opaque_background: 1,
             auto_name_secs: 45,
             agent_max_tokens: 1024, // headroom for reasoning models (Qwen3/R1)
             agent_temperature: 0.3,
@@ -307,6 +313,10 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("reading_width", knob(json!(d.reading_width),
             "Max reflow width for the Markdown reading-mode, in columns; the \
              document is centered within the pane. 0 = use the full pane width.")),
+        ("opaque_background", knob(json!(d.opaque_background),
+            "Paint the theme's background as solid (1) or stay transparent and let \
+             the terminal's own background show through (0). The default theme is \
+             transparent regardless; colored themes (Paper, Hacker) turn solid.")),
         ("auto_name_secs", knob(json!(d.auto_name_secs),
             "With an agent configured, tabs still wearing their default numeric \
              name get an auto-generated label after this many seconds (0 = off). \
@@ -486,6 +496,7 @@ pub fn load() -> Tuning {
         t.highlight_current_line = get_u64(&map, "highlight_current_line", t.highlight_current_line);
         t.current_line_bg = get_rgb(&map, "current_line_bg", t.current_line_bg);
         t.reading_width = get_u64(&map, "reading_width", t.reading_width);
+        t.opaque_background = get_u64(&map, "opaque_background", t.opaque_background);
         t.auto_name_secs = get_u64(&map, "auto_name_secs", t.auto_name_secs);
         t.agent_max_tokens      = get_u64(&map, "agent_max_tokens", t.agent_max_tokens as u64) as u32;
         t.agent_temperature     = get_f64(&map, "agent_temperature", t.agent_temperature);

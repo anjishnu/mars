@@ -14,6 +14,9 @@ and richer `llm-stats`.
   `mars theme list` / `mars theme <name>` switch it (recorded in
   `~/.mars/config.json`); the **Theme ▸** picker in the command bar switches live. Drop your own token→color JSON in `~/.mars/themes/`. Custom `theme_*`
   tuning knobs still override per token, so existing customizations are untouched.
+  A colored theme paints a solid background everywhere (panes *and* overlays); the
+  default honors the terminal's own background. `opaque_background = 0` forces
+  transparency under any theme.
 - **Current-line highlight** — a subtle tint on the cursor's row
   (`highlight_current_line` / `current_line_bg`).
 - **Passive matched-bracket highlight** — the bracket at the cursor and its match

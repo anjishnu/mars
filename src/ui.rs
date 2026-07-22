@@ -31,6 +31,24 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+/// The solid background color to paint, or `None` for a transparent (terminal-bg)
+/// look. Solid only when `opaque_background` is on AND the theme commits to a real
+/// surface color — so Mission Control (Reset surface) stays clear either way.
+fn opaque_bg(app: &App) -> Option<Color> {
+    (app.tuning.opaque_background != 0 && app.tuning.palette.surface != Color::Reset)
+        .then_some(app.tuning.palette.surface)
+}
+
+/// Clear a rect for an overlay panel, then fill it with the theme surface when the
+/// background is opaque — so Paper/Hacker popups are solid, not see-through to the
+/// terminal's own background. Transparent themes just clear (unchanged behavior).
+fn clear_panel(frame: &mut Frame, app: &App, rect: Rect) {
+    frame.render_widget(Clear, rect);
+    if let Some(bg) = opaque_bg(app) {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
+    }
+}
+
 /// Brighten an RGB theme color by `amt` per channel — for readable variants of dark
 /// theme hues (e.g. the dark teal used for code, which is near-invisible on a dark bg).
 
@@ -41,10 +59,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Paint the whole frame in the theme's surface first, so a committed background
     // (Paper's cream, Hacker's black) is consistent everywhere — not just where a
-    // widget happens to set a bg. Skipped when surface is Reset (Mission Control),
-    // which honors the terminal's own background byte-identically to before.
-    if app.tuning.palette.surface != Color::Reset {
-        frame.render_widget(Block::default().style(Style::default().bg(app.tuning.palette.surface)), area);
+    // widget happens to set a bg. Transparent for Mission Control / a Reset surface
+    // (or when `opaque_background = 0`), which honors the terminal's own background.
+    if let Some(bg) = opaque_bg(app) {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
 
     // Layout: tab-bar (1) | pane area (min) | status (1) | control bar (1)
@@ -174,7 +192,7 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         width,
         height: panel_h,
     };
-    frame.render_widget(Clear, rect);
+    clear_panel(frame, app, rect);
     // A full box with " WARP " on a neutral grey/white line — a calm, non-teal chrome.
     let block = Block::default()
         .title(Span::styled(" WARP ", Style::default().fg(app.tuning.palette.text).add_modifier(Modifier::BOLD)))
@@ -218,7 +236,7 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
         width,
         height: panel_h,
     };
-    frame.render_widget(Clear, rect);
+    clear_panel(frame, app, rect);
     let block = Block::default()
         .title(Span::styled(
             format!(" {} - ", prefix),
@@ -795,7 +813,7 @@ fn ansi_to_line(raw: &str) -> (Line<'static>, u16) {
 fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     let t = &app.tuning;
     // Overlay: wipe whatever's underneath (terminal shell or empty editor).
-    frame.render_widget(Clear, inner);
+    clear_panel(frame, app, inner);
 
     // Parse the rich ANSI banner; fall back to a plain wordmark when narrow.
     let parsed: Vec<(Line, u16)> = crate::banner::BANNER_LINES
@@ -907,7 +925,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// workstreams. Splash pattern: Clear + one centered Paragraph. Any key resumes.
 fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let Some(rep) = app.shift_report.as_ref() else { return };
-    frame.render_widget(Clear, inner);
+    clear_panel(frame, app, inner);
     let accent = app.tuning.palette.accent;
     let bright = app.tuning.palette.accent_bright;
     let teal = app.tuning.palette.info;
@@ -1813,7 +1831,7 @@ fn render_bar_dropdown(
     if !show_ws {
         // No fleet to survey → the plain single-column launcher (previous behaviour).
         let full = Rect { x: bar_area.x, y: bar_area.y.saturating_sub(cmd_h), width: bar_area.width, height: cmd_h };
-        frame.render_widget(Clear, full);
+        clear_panel(frame, app, full);
         render_command_panel(frame, app, full, true, true);
         return Some(full);
     }
@@ -1832,8 +1850,8 @@ fn render_bar_dropdown(
         width: bar_area.width.saturating_sub(ws_w),
         height: cmd_h,
     };
-    frame.render_widget(Clear, ws_rect);
-    frame.render_widget(Clear, cmd_rect);
+    clear_panel(frame, app, ws_rect);
+    clear_panel(frame, app, cmd_rect);
     render_workspaces_panel(frame, app, ws_rect);
     render_command_panel(frame, app, cmd_rect, true, palette.column == crate::palette::BarColumn::Commands);
     Some(Rect {
@@ -1859,7 +1877,7 @@ fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
     };
     let more = if app.notices.len() > 1 { format!("  (+{} more)", app.notices.len() - 1) } else { String::new() };
     let text = format!(" {glyph} {}{more}   Esc dismiss ", n.text);
-    frame.render_widget(Clear, row);
+    clear_panel(frame, app, row);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             text,
@@ -1876,7 +1894,7 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
     let focused = matches!(app.mode, Mode::Tree);
     let border = if focused { app.tuning.palette.accent_bright } else { app.tuning.palette.border };
 
-    frame.render_widget(Clear, area);
+    clear_panel(frame, app, area);
     // Header: the filter query (⌕) while filtering, else the root folder name.
     let (root_name, filter) = app
         .file_tree
@@ -2022,8 +2040,8 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect, avoid: Op
             return;
         }
     }
-    frame.render_widget(Clear, input_rect);
-    frame.render_widget(Clear, hint_rect);
+    clear_panel(frame, app, input_rect);
+    clear_panel(frame, app, hint_rect);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             input,
@@ -2180,7 +2198,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         height: panel_h,
     };
 
-    frame.render_widget(Clear, rect);
+    clear_panel(frame, app, rect);
     let provider = crate::agent::AgentConfig::from_env().provider;
     let title = if provider == "none" {
         " ✦ ask ".to_string()

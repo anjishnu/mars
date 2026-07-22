@@ -319,9 +319,12 @@ old files are kept as `*.bak`).
 Control** (the default), **Eclipse** (high-contrast), **Paper** (warm light), and
 **Hacker** (green-on-black); `mars theme <name>` switches (recorded in
 `~/.mars/config.json`). Or the **Theme ▸** picker in the command bar switches live. Drop your own token→color JSON in `~/.mars/themes/`. A running session keeps
-its look until it's restarted (or you cycle from inside it). Every color is a single
-semantic token now, so a theme repaints the whole UI at once — it's new, so please
-report anything that reads wrong (especially on the light theme).
+its look until it's restarted (or you switch from inside it). Every color is a single
+semantic token now, so a theme repaints the whole UI at once. A colored theme (Paper,
+Hacker) paints a solid background everywhere; the default honors your terminal's own
+background. Set `opaque_background = 0` in `tuning.json` to keep the terminal
+background (transparency) even under a colored theme. It's new — please report
+anything that reads wrong (especially on the light theme).
 
 ## Troubleshooting
 
