@@ -48,7 +48,7 @@ Inside the editor, four keys carry you everywhere:
 
 | Key | What it does |
 |---|---|
-| `Ctrl+Space` | **mission control** — search every command (type to filter, Enter to run); works in terminal panes too |
+| `Ctrl+Space` | **mission control** — a command launcher next to a needs-you-first **workspace board** (press `←` to reach it); type to filter commands, Enter to run. Works in terminal panes too |
 | `!` (in mission control) | run a shell command in a terminal pane |
 | `?` (in mission control) | ask the built-in agent anything ("how do I split the screen?") |
 | `C-x C-f` | **Navigator** — browse & jump to any project file (type to fuzzy-filter) |
@@ -56,6 +56,15 @@ Inside the editor, four keys carry you everywhere:
 
 `C-g` cancels anything. Every menu row shows its real keybinding, so the fast path
 teaches itself as you go.
+
+**The workspace board** ranks every workstream so "anything need me?" is answerable
+at a glance: blocked ⏸ and failed ✗ sort to the top, then running, done ✓, idle —
+each with one status **bubble** (● colored by state) and a plain-English status line.
+Select a row and press `s` for an on-demand, one-line "what is this doing?" summary
+(a single low-tier model call, guarded so it never over-fires). Any Markdown buffer
+can also toggle into a read-only **reading-mode** — real wrapping, tables, and nested
+lists, dressed in the Mars palette, scrolled with the editor's own motion keys
+(↑/↓, `⌥↑`/`⌥↓`, `M-<`/`M->`); toggle again to edit.
 
 ## Moving around fast
 
@@ -160,13 +169,23 @@ so you can right-size the model per task — run with `--llm-debug` (or `MARS_LL
 to log every call, then profile it:
 
 ```bash
-mars --llm-debug              # logs prompts, models, tokens, latency to $TMPDIR/mars-llm/
+mars --llm-debug              # logs prompts, models, tokens, latency to ~/.mars/logs/
 mars llm-stats                # per task×model, ranked by total tokens:
 #   TASK       MODEL            N  AVG_IN  AVG_OUT  TOT_TOK  %TOK  AVG_MS  ERR
 #   watch      qwen/qwen3-32b   2    6050      195    12490   62%    3025    0   ← heaviest
 #   ask        qwen/qwen3-32b   2    1720      215     3870   19%     900    0
 mars llm-stats --raw          # full inputs/outputs per call
 ```
+
+To keep it on for a project without exporting the env var every time, drop a
+`.mars` rc (JSON) in the project root — a per-checkout config, like a `.zshrc`:
+
+```json
+{ "env": { "MARS_LLM_DEBUG": "1" } }
+```
+
+Its `env` entries are exported at startup (the real environment still wins), so the
+session daemon inherits them too. It's yours alone — add `.mars` to your gitignore.
 
 Reasoning models (Qwen3, DeepSeek-R1) work — their `<think>` blocks are stripped from
 answers automatically.
@@ -269,7 +288,8 @@ Mars speaks three dialects at once — whichever your fingers know:
   file sidebar on the left.
   Folders are bold + colored and collapsed — arrow to one and `Enter`/`→` expands it in
   place (`←` collapses); on a file, `→` previews it (reversible) and `Enter` opens it;
-  `../` at the top steps up a directory. Start **typing** to fuzzy-filter the whole
+  `../` at the top steps up a directory. Press `.` to show/hide dotfiles (the important
+  things often live in hidden folders). Start **typing** to fuzzy-filter the whole
   project to a shortlist; `Esc` closes.
 - **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `M-%` query-replace
   (`y`/`n` step, `!` all) · `C-k`/`C-y` kill/yank · `C-x 2`/`C-x 3`/`C-x o` windows ·
