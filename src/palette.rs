@@ -419,29 +419,6 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     }
 }
 
-/// The candidate-char indices matched by the same fuzzy subsequence search, for
-/// bolding them in the UI. `None` when `query` doesn't match; empty vec for an
-/// empty query. Indices are into `candidate`'s char sequence.
-pub fn fuzzy_positions(query: &str, candidate: &str) -> Option<Vec<usize>> {
-    if query.is_empty() {
-        return Some(Vec::new());
-    }
-    let q: Vec<char> = query.to_lowercase().chars().collect();
-    let c: Vec<char> = candidate.to_lowercase().chars().collect();
-    let mut qi = 0;
-    let mut pos = Vec::with_capacity(q.len());
-    for (ci, &ch) in c.iter().enumerate() {
-        if qi >= q.len() {
-            break;
-        }
-        if ch == q[qi] {
-            pos.push(ci);
-            qi += 1;
-        }
-    }
-    if qi < q.len() { None } else { Some(pos) }
-}
-
 // ── Bar mode ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]

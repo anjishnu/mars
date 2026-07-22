@@ -1556,36 +1556,16 @@ fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, nav
             Some(q) => Span::styled(format!(" {q} "), Style::default().fg(app.tuning.palette.on_accent).bg(app.tuning.palette.accent).add_modifier(Modifier::BOLD)),
             None => Span::styled("   ", Style::default().bg(bg)),
         };
-        // Label with the fuzzy-matched characters bolded in the accent, so you see
-        // *why* a row matched what you typed.
-        let label_base = if selected {
-            Style::default().fg(app.tuning.palette.accent).bg(bg).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.tuning.palette.text).bg(bg)
-        };
-        let query = app.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
-        let matched = if query.is_empty() { None } else { crate::palette::fuzzy_positions(&query, &row.label) };
-        let mut label_spans: Vec<Span> = Vec::new();
-        match matched {
-            Some(pos) if !pos.is_empty() => {
-                let hit = label_base.fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD);
-                for (i, ch) in row.label.chars().enumerate() {
-                    label_spans.push(Span::styled(ch.to_string(), if pos.contains(&i) { hit } else { label_base }));
-                }
-                label_spans.push(Span::styled(type_mark.to_string(), label_base));
-            }
-            _ => label_spans.push(Span::styled(format!("{}{}", row.label, type_mark), label_base)),
-        }
-
-        let mut line_spans = vec![
+        out.push(Line::from(vec![
             quick_span,
             Span::styled(format!(" {:<w$}", binding, w = app.tuning.binding_badge_width),
                 Style::default().fg(app.tuning.palette.accent_bright).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled("  ", Style::default().bg(bg)),
-        ];
-        line_spans.extend(label_spans);
-        line_spans.push(Span::styled(desc, Style::default().fg(app.tuning.palette.text_faint).bg(bg)));
-        out.push(Line::from(line_spans));
+            Span::styled(format!("{}{}", row.label, type_mark),
+                if selected { Style::default().fg(app.tuning.palette.accent).bg(bg).add_modifier(Modifier::BOLD) }
+                else { Style::default().fg(app.tuning.palette.text).bg(bg) }),
+            Span::styled(desc, Style::default().fg(app.tuning.palette.text_faint).bg(bg)),
+        ]));
     }
     out
 }

@@ -4079,11 +4079,7 @@ fn selfcheck() -> Result<()> {
         wheel(&mut app, true);
         assert!(app.focused_pane().md_scroll > m0, "wheel did not scroll reading-mode");
 
-        // fuzzy_positions: the matched candidate indices (for bolding).
-        assert_eq!(palette::fuzzy_positions("sp", "Split"), Some(vec![0, 1]));
-        assert!(palette::fuzzy_positions("zz", "Split").is_none());
-        assert_eq!(palette::fuzzy_positions("", "Split"), Some(vec![]));
-        println!("[selfcheck] editor feel (wheel/bracket/fuzzy) . PASS");
+        println!("[selfcheck] editor feel (wheel/bracket) ... PASS");
     }
 
     // 40d. Themes: resolve() yields distinct palettes; the default is byte-identical
