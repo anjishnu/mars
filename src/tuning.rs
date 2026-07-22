@@ -110,7 +110,7 @@ impl Default for Tuning {
                 .map(|s| s.to_string())
                 .collect(),
             tree_width: 30,
-            tree_show_dotfiles: 0,
+            tree_show_dotfiles: 1,
             watch_quiet_secs: 20,
             agent_scrollback_context: 200,
             memory_cwd_boost: 0.25,
