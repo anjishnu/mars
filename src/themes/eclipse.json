@@ -1,0 +1,11 @@
+{
+  "name": "Eclipse",
+  "about": "Maximum-legibility high contrast on true black.",
+  "dark": true,
+  "accent": "#f28b5c", "accent-bright": "#ffb489", "accent-dark": "#c85a2a",
+  "on-accent": "#0a0a0a",
+  "info": "#22d3ee", "success": "#34d399", "warning": "#fbbf24", "danger": "#f87171",
+  "text": "#ffffff", "text-dim": "#c4c4c4", "text-faint": "#8a8a8a",
+  "border": "#6b6b6b", "surface": "#000000", "select-row-bg": "#1a3d42",
+  "selection-bg": "#303030", "search-bg": "#4a3a00", "current-line": "#141414"
+}

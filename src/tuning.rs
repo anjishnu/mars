@@ -7,7 +7,61 @@
 
 use std::collections::HashMap;
 
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+
+/// The resolved color palette — every colored cell in the UI reads exactly one of
+/// these semantic tokens (never a raw `Color::` or a `theme_*` knob). A theme swaps
+/// the whole set; the default below is "Mission Control", byte-identical to the
+/// shipped look. Neutrals default to ANSI-named colors so they honor the terminal
+/// palette exactly as before.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub accent: Color,        // primary brand (focus, active chrome)
+    pub accent_bright: Color, // bright brand (teaching, emphasis)
+    pub accent_dark: Color,   // deep brand (secondary/receded emphasis)
+    pub on_accent: Color,     // legible fg on a saturated fill
+    pub info: Color,          // the teal "mission-control" hue; also the DONE status
+    pub success: Color,       // RUNNING/healthy status; the go/confirm affordance
+    pub warning: Color,       // BLOCKED / waiting-on-you status
+    pub danger: Color,        // FAILED status — the loudest hue
+    pub text: Color,          // primary foreground
+    pub text_dim: Color,      // secondary foreground; the IDLE status
+    pub text_faint: Color,    // tertiary: hints, rules, "N more", stars
+    pub border: Color,        // idle / unfocused pane + panel borders
+    pub surface: Color,       // panel/pane background; "no fill"
+    pub select_row_bg: Color, // highlighted row fill in the command dropdown
+    pub selection_bg: Color,  // active selection highlight bg
+    pub search_bg: Color,     // isearch match bg
+    pub current_line: Color,  // the cursor-line tint
+}
+
+impl Palette {
+    /// The compiled default — the MARS house look. Every other theme starts from
+    /// this and overrides tokens, so an under-specified theme still renders.
+    pub fn mission_control() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Palette {
+            accent: rgb(217, 119, 87),
+            accent_bright: rgb(233, 161, 120),
+            accent_dark: rgb(183, 65, 14),
+            on_accent: rgb(31, 20, 16),
+            info: rgb(13, 115, 119),
+            success: rgb(61, 174, 114),
+            warning: rgb(230, 165, 60),
+            danger: rgb(217, 83, 79),
+            text: Color::White,
+            text_dim: Color::Gray,
+            text_faint: Color::DarkGray,
+            border: Color::DarkGray,
+            surface: Color::Reset,
+            select_row_bg: Color::DarkGray,
+            selection_bg: rgb(74, 42, 31),
+            search_bg: rgb(138, 84, 20),
+            current_line: rgb(42, 37, 34),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Tuning {
@@ -72,6 +126,10 @@ pub struct Tuning {
     pub auto_watch: u64,
     pub watch_min_active_secs: u64,
     pub goal_tracking: u64,
+    /// The resolved color palette (theme + per-token knob overrides). Read by the
+    /// render layer; the `theme_*`/`selection_bg`/… knobs above are its override
+    /// surface, not read directly by `ui.rs`.
+    pub palette: Palette,
 }
 
 impl Default for Tuning {
@@ -134,6 +192,7 @@ impl Default for Tuning {
             auto_watch: 1,
             watch_min_active_secs: 10,
             goal_tracking: 1,
+            palette: Palette::mission_control(),
         }
     }
 }
@@ -469,5 +528,27 @@ pub fn load() -> Tuning {
             }
         }
     }
+
+    // Resolve the color palette: the selected theme (in ~/.mars/config.json) supplies
+    // every token. A legacy `theme_*`/`selection_bg`/… knob overrides its token ONLY
+    // when the user actually changed it from the Mission Control default — so themes
+    // apply out of the box, yet a real customization still wins.
+    let d = Tuning::default();
+    let mut pal = crate::themes::resolve(crate::config::selected_theme().as_deref());
+    let ov = |cur: [u8; 3], def: [u8; 3], base: Color| -> Color {
+        if cur != def { Color::Rgb(cur[0], cur[1], cur[2]) } else { base }
+    };
+    pal.accent        = ov(t.theme_accent,         d.theme_accent,         pal.accent);
+    pal.accent_bright = ov(t.theme_accent_bright,  d.theme_accent_bright,  pal.accent_bright);
+    pal.accent_dark   = ov(t.theme_accent_dark,    d.theme_accent_dark,    pal.accent_dark);
+    pal.on_accent     = ov(t.theme_chip_fg,        d.theme_chip_fg,        pal.on_accent);
+    pal.info          = ov(t.theme_terminal,       d.theme_terminal,       pal.info);
+    pal.success       = ov(t.theme_healthy,        d.theme_healthy,        pal.success);
+    pal.warning       = ov(t.theme_status_blocked, d.theme_status_blocked, pal.warning);
+    pal.danger        = ov(t.theme_status_failed,  d.theme_status_failed,  pal.danger);
+    pal.selection_bg  = ov(t.selection_bg,         d.selection_bg,         pal.selection_bg);
+    pal.search_bg     = ov(t.search_match_bg,      d.search_match_bg,      pal.search_bg);
+    pal.current_line  = ov(t.current_line_bg,      d.current_line_bg,      pal.current_line);
+    t.palette = pal;
     t
 }

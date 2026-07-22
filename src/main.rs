@@ -35,6 +35,7 @@ mod terminal;
 mod persona;
 mod prompts;
 mod tiers;
+mod themes;
 mod worklog;
 mod tuning;
 mod ui;
@@ -246,6 +247,35 @@ fn main() -> Result<()> {
             let flags: Vec<String> = args.collect();
             let has = |f: &str| flags.iter().any(|a| a == f);
             return llm_log::stats(has("--raw"), has("--json"), has("--daily"));
+        }
+        // Color themes: list, or switch (writes ~/.mars/config.json "theme").
+        Some("theme") => {
+            let active = config::selected_theme().unwrap_or_else(|| "mission-control".into());
+            return match args.next().as_deref() {
+                None | Some("list") => {
+                    println!("Active theme: {active}");
+                    if let Some(p) = config::config_json_path() {
+                        println!("  ({})\n", p.display());
+                    }
+                    println!("Available:");
+                    for t in themes::list() {
+                        let mark = if t.name == active { " [active]" } else { "" };
+                        let dot = if t.dark { "●" } else { "○" };
+                        let who = if t.user { " (user)" } else { "" };
+                        println!("  {:<16} {dot} {}{who}{mark}", t.name, t.about);
+                    }
+                    Ok(())
+                }
+                Some(name) => {
+                    if !themes::exists(name) {
+                        let names: Vec<String> = themes::list().into_iter().map(|t| t.name).collect();
+                        anyhow::bail!("unknown theme '{name}'. Available: {}", names.join(", "));
+                    }
+                    config::set_theme(name)?;
+                    println!("Theme set to '{name}'. New sessions use it; restart a running session to repaint.");
+                    Ok(())
+                }
+            };
         }
         // Headless ask — verify the agent provider end-to-end from the shell.
         Some("ask") | Some("--ask") => {
@@ -4054,6 +4084,37 @@ fn selfcheck() -> Result<()> {
         assert!(palette::fuzzy_positions("zz", "Split").is_none());
         assert_eq!(palette::fuzzy_positions("", "Split"), Some(vec![]));
         println!("[selfcheck] editor feel (wheel/bracket/fuzzy) . PASS");
+    }
+
+    // 40d. Themes: resolve() yields distinct palettes; the default is byte-identical
+    //      Mission Control; parse_color handles hex + named; a theme reaches the frame.
+    {
+        use ratatui::style::Color as RColor;
+        let mc = themes::resolve(None);
+        let hk = themes::resolve(Some("hacker"));
+        let pp = themes::resolve(Some("paper"));
+        assert_eq!(mc.accent, RColor::Rgb(217, 119, 87), "default accent is not Mission Control clay");
+        assert_eq!(mc.text, RColor::White, "default text should stay ANSI white (terminal-honoring)");
+        assert_eq!(hk.accent, RColor::Rgb(57, 255, 20), "hacker accent is not neon green");
+        assert_eq!(hk.surface, RColor::Rgb(0, 0, 0), "hacker surface is not true black");
+        assert_ne!(hk.accent, mc.accent, "theme swap did not change the accent");
+        assert_eq!(pp.surface, RColor::Rgb(244, 236, 224), "paper surface is not cream");
+        assert!(!themes::exists("no-such-theme"), "unknown theme should not resolve");
+        assert!(themes::exists("eclipse") && themes::exists("mission-control"), "bundled themes missing");
+        assert_eq!(themes::parse_color("#39ff14"), Some(RColor::Rgb(57, 255, 20)), "hex parse");
+        assert_eq!(themes::parse_color("darkgray"), Some(RColor::DarkGray), "named parse");
+        assert_eq!(themes::parse_color("nope"), None, "bad color should be None");
+        // A theme's colors actually reach a rendered cell: type to dismiss the splash,
+        // so the focused editor pane draws its accent-colored border.
+        let mut app = App::new(None)?;
+        typ(&mut app, "x")?; // dismiss the day-0 banner → editor pane with an accent border
+        app.tuning.palette = hk;
+        let mut term = Terminal::new(TestBackend::new(60, 8))?;
+        term.draw(|f| ui::render(f, &mut app))?;
+        let green = RColor::Rgb(57, 255, 20);
+        let has_green = term.backend().buffer().content().iter().any(|c| c.fg == green || c.bg == green);
+        assert!(has_green, "the hacker palette did not reach any rendered cell");
+        println!("[selfcheck] themes (resolve/parse/render) . PASS");
     }
 
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,

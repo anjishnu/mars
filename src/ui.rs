@@ -152,9 +152,9 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {:<9}", keys),
-                Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
+                Style::default().fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", what), Style::default().fg(Color::Gray)),
+            Span::styled(format!(" {}", what), Style::default().fg(app.tuning.palette.text_dim)),
         ]));
     }
 
@@ -169,9 +169,9 @@ fn render_travel_panel(frame: &mut Frame, app: &App, pane_area: Rect, status_are
     frame.render_widget(Clear, rect);
     // A full box with " WARP " on a neutral grey/white line — a calm, non-teal chrome.
     let block = Block::default()
-        .title(Span::styled(" WARP ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" WARP ", Style::default().fg(app.tuning.palette.text).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+        .border_style(Style::default().fg(app.tuning.palette.text_dim));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -192,12 +192,12 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
             Span::styled(
                 format!(" {:<4}", tail),
                 Style::default()
-                    .fg(rgb(app.tuning.theme_accent_bright))
+                    .fg(app.tuning.palette.accent_bright)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {}", action.label()),
-                Style::default().fg(Color::White),
+                Style::default().fg(app.tuning.palette.text),
             ),
         ]));
     }
@@ -215,11 +215,11 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
         .title(Span::styled(
             format!(" {} - ", prefix),
             Style::default()
-                .fg(rgb(app.tuning.theme_accent_bright))
+                .fg(app.tuning.palette.accent_bright)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::TOP | Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(app.tuning.palette.border));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -237,11 +237,11 @@ fn render_which_key(frame: &mut Frame, app: &App, pane_area: Rect, status_area: 
 fn verdict_color(app: &App, v: crate::briefing::Verdict) -> Color {
     use crate::briefing::Verdict;
     match v {
-        Verdict::Blocked => rgb(app.tuning.theme_status_blocked), // amber
-        Verdict::Failed  => rgb(app.tuning.theme_status_failed),  // red
-        Verdict::Running => rgb(app.tuning.theme_healthy),        // green
-        Verdict::Done    => rgb(app.tuning.theme_terminal),       // teal
-        Verdict::Context => Color::Gray,                          // idle
+        Verdict::Blocked => app.tuning.palette.warning, // amber
+        Verdict::Failed  => app.tuning.palette.danger,  // red
+        Verdict::Running => app.tuning.palette.success,        // green
+        Verdict::Done    => app.tuning.palette.info,       // teal
+        Verdict::Context => app.tuning.palette.text_dim,                          // idle
     }
 }
 
@@ -304,15 +304,15 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         if i == app.active_tab {
             // The active tab is inverted chrome (you're looking at it); its bubble
             // recedes into the chip color, but stays in the same slot.
-            let chip = rgb(app.tuning.theme_chip_fg);
-            let accent = rgb(app.tuning.theme_accent);
+            let chip = app.tuning.palette.on_accent;
+            let accent = app.tuning.palette.accent;
             spans.push(Span::styled(format!(" ● {name} "),
                 Style::default().fg(chip).bg(accent).add_modifier(Modifier::BOLD)));
         } else {
             spans.push(Span::styled(" ● ", Style::default().fg(bubble)));
-            spans.push(Span::styled(format!("{name} "), Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(format!("{name} "), Style::default().fg(app.tuning.palette.text_dim)));
         }
-        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("│", Style::default().fg(app.tuning.palette.text_faint)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     // (The top-right status counter/beacon was removed: it counted finished-Done
@@ -448,9 +448,9 @@ fn render_editor_pane(
     }
 
     let border_style = if focused {
-        Style::default().fg(rgb(app.tuning.theme_accent))
+        Style::default().fg(app.tuning.palette.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.tuning.palette.border)
     };
     let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
     let marker    = if buf.modified { " ●" } else { "" };
@@ -474,14 +474,12 @@ fn render_editor_pane(
         let c = (pane.cursor_row, pane.cursor_col);
         if a <= c { (a, c) } else { (c, a) }
     });
-    let [sr, sg, sb] = app.tuning.selection_bg;
-    let [hr, hg, hb] = app.tuning.search_match_bg;
-    let sel_style = Style::default().bg(Color::Rgb(sr, sg, sb));
-    let search_style = Style::default().bg(Color::Rgb(hr, hg, hb));
+    let sel_style = Style::default().bg(app.tuning.palette.selection_bg);
+    let search_style = Style::default().bg(app.tuning.palette.search_bg);
     // Teleport labels: high-contrast chip (accent bg, dark fg, bold).
     let label_style = Style::default()
-        .bg(rgb(app.tuning.theme_accent_bright))
-        .fg(rgb(app.tuning.theme_chip_fg))
+        .bg(app.tuning.palette.accent_bright)
+        .fg(app.tuning.palette.on_accent)
         .add_modifier(Modifier::BOLD);
 
     let numbers = app.tuning.line_numbers;
@@ -492,29 +490,29 @@ fn render_editor_pane(
         if row >= line_count {
             // Blank gutter beyond end-of-buffer.
             let blank = " ".repeat(gutter_width(&app.tuning) as usize);
-            lines.push(Line::from(Span::styled(blank, Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(blank, Style::default().fg(app.tuning.palette.text_faint))));
         } else {
             let content = buf.line_str(row);
             let on_cursor = focused && row == pane.cursor_row;
             // Current-line tint: a subtle bg on the cursor's row (selection/search
             // backgrounds still win where they sit).
             let line_bg = if on_cursor && app.tuning.highlight_current_line == 1 {
-                Some(rgb(app.tuning.current_line_bg))
+                Some(app.tuning.palette.current_line)
             } else { None };
             let with_bg = |st: Style| -> Style { if let Some(bg) = line_bg { st.bg(bg) } else { st } };
 
             let mut spans = Vec::new();
             if numbers {
                 let num_style = if on_cursor {
-                    Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD)
+                    Style::default().fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(app.tuning.palette.text_faint)
                 };
                 spans.push(Span::styled(format!("{:>4}│ ", row + 1), with_bg(num_style)));
             } else {
                 // Slim pointer gutter: a marker on the cursor line, else blank.
                 let (glyph, style) = if on_cursor {
-                    ("▸ ", Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD))
+                    ("▸ ", Style::default().fg(app.tuning.palette.accent).add_modifier(Modifier::BOLD))
                 } else {
                     ("  ", Style::default())
                 };
@@ -574,7 +572,7 @@ fn render_editor_pane(
                     spans.push(match kind {
                         1 => Span::styled(text, sel_style),
                         2 => Span::styled(text, search_style),
-                        4 => Span::styled(text, with_bg(Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD))),
+                        4 => Span::styled(text, with_bg(Style::default().fg(app.tuning.palette.accent).add_modifier(Modifier::BOLD))),
                         _ => Span::styled(text, with_bg(Style::default())),
                     });
                     i = j;
@@ -616,9 +614,9 @@ fn mars_md_skin(app: &App) -> termimad::MadSkin {
     let lite = |c: [u8; 3], a: u8| TColor::Rgb {
         r: c[0].saturating_add(a), g: c[1].saturating_add(a), b: c[2].saturating_add(a),
     };
-    let clay = ct(app.tuning.theme_accent);        // primary
-    let sandstone = ct(app.tuning.theme_accent_bright); // secondary
-    let light_teal = lite(app.tuning.theme_terminal, 110); // tertiary (never raw dark teal)
+    let clay = ct(crate::themes::rgb_of(app.tuning.palette.accent));        // primary
+    let sandstone = ct(crate::themes::rgb_of(app.tuning.palette.accent_bright)); // secondary
+    let light_teal = lite(crate::themes::rgb_of(app.tuning.palette.info), 110); // tertiary (never raw dark teal)
 
     let mut s = termimad::MadSkin::default();
     s.set_headers_fg(clay);
@@ -710,9 +708,9 @@ fn render_markdown_pane(
     focused: bool,
 ) -> Option<(u16, u16)> {
     let border_style = if focused {
-        Style::default().fg(rgb(app.tuning.theme_accent))
+        Style::default().fg(app.tuning.palette.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.tuning.palette.border)
     };
     let title_mod = if focused { Modifier::BOLD } else { Modifier::empty() };
     let shown = pane.title.as_deref().unwrap_or(&buf.name);
@@ -840,7 +838,7 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
         .unwrap_or(0) as u16;
     let lpad = " ".repeat((inner.width.saturating_sub(block_w) / 2) as usize);
     let key_style = Style::default().fg(rgb(t.theme_accent_bright)).add_modifier(Modifier::BOLD);
-    let desc_style = Style::default().fg(Color::Gray);
+    let desc_style = Style::default().fg(app.tuning.palette.text_dim);
     for (k, d) in cmds {
         lines.push(Line::from(vec![
             Span::raw(lpad.clone()),
@@ -852,7 +850,7 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "or just start typing",
-        Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+        Style::default().fg(app.tuning.palette.text_dim).add_modifier(Modifier::ITALIC),
     )).centered());
 
     // Vertically center the banner block.
@@ -902,12 +900,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
     let Some(rep) = app.shift_report.as_ref() else { return };
     frame.render_widget(Clear, inner);
-    let accent = rgb(app.tuning.theme_accent);
-    let bright = rgb(app.tuning.theme_accent_bright);
-    let teal = rgb(app.tuning.theme_terminal);
-    let green = rgb(app.tuning.theme_healthy);
-    let dim = Style::default().fg(Color::DarkGray);
-    let white = Style::default().fg(Color::White);
+    let accent = app.tuning.palette.accent;
+    let bright = app.tuning.palette.accent_bright;
+    let teal = app.tuning.palette.info;
+    let green = app.tuning.palette.success;
+    let dim = Style::default().fg(app.tuning.palette.text_faint);
+    let white = Style::default().fg(app.tuning.palette.text);
     let cw = inner.width as usize;
     // The reading measure: one centered column the prose and manifest share, so
     // every element hangs off the same axis down the middle of the screen.
@@ -1096,7 +1094,7 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
             crate::briefing::Verdict::Running => green, // healthy work — calm, dismissible
             crate::briefing::Verdict::Done => teal,     // the win keeps its teal
 
-            _ => Color::DarkGray,
+            _ => app.tuning.palette.text_faint,
         };
         let body_style = if needsyou || goodnews { white } else { dim };
         let glyph = if goodnews { "★" } else { r.verdict.glyph() };
@@ -1187,11 +1185,11 @@ fn render_terminal_pane(
     // The pane border/title carry NO status glyph — status lives in the tab bar, so
     // the divider line stays uncluttered. Border color is focus/exited only.
     let border_style = if exited {
-        Style::default().fg(rgb(app.tuning.theme_accent_dark))
+        Style::default().fg(app.tuning.palette.accent_dark)
     } else if focused {
-        Style::default().fg(rgb(app.tuning.theme_terminal))
+        Style::default().fg(app.tuning.palette.info)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.tuning.palette.text_faint)
     };
     let base = pane.title.as_deref().unwrap_or("terminal");
     let title = if exited {
@@ -1217,7 +1215,7 @@ fn render_terminal_pane(
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "(terminal closed)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.tuning.palette.text_faint),
                 )),
                 inner,
             );
@@ -1237,8 +1235,7 @@ fn render_terminal_pane(
         if b < a { std::mem::swap(&mut a, &mut b); }
         (a, b, s.vw.saturating_sub(1))
     });
-    let [sr, sg, sb] = app.tuning.selection_bg;
-    let sel_bg = Color::Rgb(sr, sg, sb);
+    let sel_bg = app.tuning.palette.selection_bg;
 
     let mut lines: Vec<Line> = Vec::with_capacity(vh as usize);
     for row in 0..vh {
@@ -1277,8 +1274,8 @@ fn render_terminal_pane(
             Paragraph::new(Span::styled(
                 " process exited — Enter closes this pane ",
                 Style::default()
-                    .fg(rgb(app.tuning.theme_chip_fg))
-                    .bg(rgb(app.tuning.theme_accent_dark))
+                    .fg(app.tuning.palette.on_accent)
+                    .bg(app.tuning.palette.accent_dark)
                     .add_modifier(Modifier::BOLD),
             )),
             notice,
@@ -1352,9 +1349,9 @@ fn bar_open_keys(app: &App) -> String {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let accent = rgb(app.tuning.theme_accent);
-    let sand   = rgb(app.tuning.theme_accent_bright);
-    let chipfg = rgb(app.tuning.theme_chip_fg);
+    let accent = app.tuning.palette.accent;
+    let sand   = app.tuning.palette.accent_bright;
+    let chipfg = app.tuning.palette.on_accent;
     // Brand lives in chrome; green stays semantic (a live shell process).
     let (mode_fg, mode_bg, key_bg, key_fg) = match &app.mode {
         Mode::Edit     => (chipfg, accent,       accent, chipfg),
@@ -1364,8 +1361,8 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Tree     => (chipfg, accent,       accent, chipfg),
         Mode::Undo     => (chipfg, sand,         sand,   chipfg),
         Mode::Terminal => {
-            let teal = rgb(app.tuning.theme_terminal);
-            (Color::White, teal, teal, Color::White)
+            let teal = app.tuning.palette.info;
+            (app.tuning.palette.text, teal, teal, app.tuning.palette.text)
         }
     };
 
@@ -1392,7 +1389,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(
             format!(":{} ", action),
             Style::default()
-                .fg(Color::White)
+                .fg(app.tuning.palette.text)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled("  ", Style::default()));
@@ -1403,12 +1400,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     if !app.pending_prefix.is_empty() {
         spans.push(Span::styled(
             format!(" {}- ", crate::config::render_chords(&app.pending_prefix)),
-            Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
+            Style::default().fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD),
         ));
     } else if let Some(msg) = &app.status_msg {
         spans.push(Span::styled(
             format!(" {msg} "),
-            Style::default().fg(rgb(app.tuning.theme_accent_bright)),
+            Style::default().fg(app.tuning.palette.accent_bright),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1433,7 +1430,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             readout,
-            Style::default().fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD),
+            Style::default().fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Right),
         area,
@@ -1457,7 +1454,7 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
             };
             let prompt = format!("[{}] › {}▎", mode_label, palette.query);
             let style = Style::default()
-                .fg(rgb(app.tuning.theme_accent))
+                .fg(app.tuning.palette.accent)
                 .add_modifier(Modifier::BOLD);
             // In-bar quick keys, taught right where they work — only while the
             // query is empty, because that's the only time they fire.
@@ -1473,7 +1470,7 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(prompt.clone(), style),
-                    Span::styled(legend, Style::default().fg(Color::DarkGray)),
+                    Span::styled(legend, Style::default().fg(app.tuning.palette.text_faint)),
                 ])),
                 area,
             );
@@ -1502,7 +1499,7 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         text.clone(),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default().fg(app.tuning.palette.text).add_modifier(Modifier::BOLD),
                     )),
                     area,
                 );
@@ -1522,7 +1519,7 @@ fn render_control_bar(frame: &mut Frame, app: &App, area: Rect) {
                 bar_open_keys(app), open, search
             );
             frame.render_widget(
-                Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                Paragraph::new(Span::styled(hint, Style::default().fg(app.tuning.palette.text_faint))),
                 area,
             );
         }
@@ -1549,29 +1546,29 @@ fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, nav
     let scroll = if sel >= body_max { sel + 1 - body_max } else { 0 };
     for (idx, row) in rows.iter().enumerate().skip(scroll).take(body_max) {
         let selected = active && navigated && idx == sel;
-        let bg = if selected { Color::DarkGray } else { Color::Reset };
+        let bg = if selected { app.tuning.palette.select_row_bg } else { app.tuning.palette.surface };
         let has_sub = matches!(row.kind, ItemKind::Submenu(_));
         let quick = match &row.kind { ItemKind::Run(a) => crate::palette::bar_quick_key(a), _ => None };
         let binding = match &row.kind { ItemKind::Run(a) => app.keys.binding_for(a).unwrap_or_default(), _ => String::new() };
         let desc = if row.description.is_empty() { String::new() } else { format!(" — {}", row.description) };
         let type_mark = if has_sub { " ▸" } else { "" };
         let quick_span = match quick {
-            Some(q) => Span::styled(format!(" {q} "), Style::default().fg(rgb(app.tuning.theme_chip_fg)).bg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD)),
+            Some(q) => Span::styled(format!(" {q} "), Style::default().fg(app.tuning.palette.on_accent).bg(app.tuning.palette.accent).add_modifier(Modifier::BOLD)),
             None => Span::styled("   ", Style::default().bg(bg)),
         };
         // Label with the fuzzy-matched characters bolded in the accent, so you see
         // *why* a row matched what you typed.
         let label_base = if selected {
-            Style::default().fg(rgb(app.tuning.theme_accent)).bg(bg).add_modifier(Modifier::BOLD)
+            Style::default().fg(app.tuning.palette.accent).bg(bg).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White).bg(bg)
+            Style::default().fg(app.tuning.palette.text).bg(bg)
         };
         let query = app.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
         let matched = if query.is_empty() { None } else { crate::palette::fuzzy_positions(&query, &row.label) };
         let mut label_spans: Vec<Span> = Vec::new();
         match matched {
             Some(pos) if !pos.is_empty() => {
-                let hit = label_base.fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD);
+                let hit = label_base.fg(app.tuning.palette.accent_bright).add_modifier(Modifier::BOLD);
                 for (i, ch) in row.label.chars().enumerate() {
                     label_spans.push(Span::styled(ch.to_string(), if pos.contains(&i) { hit } else { label_base }));
                 }
@@ -1583,11 +1580,11 @@ fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, nav
         let mut line_spans = vec![
             quick_span,
             Span::styled(format!(" {:<w$}", binding, w = app.tuning.binding_badge_width),
-                Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(bg).add_modifier(Modifier::BOLD)),
+                Style::default().fg(app.tuning.palette.accent_bright).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled("  ", Style::default().bg(bg)),
         ];
         line_spans.extend(label_spans);
-        line_spans.push(Span::styled(desc, Style::default().fg(Color::DarkGray).bg(bg)));
+        line_spans.push(Span::styled(desc, Style::default().fg(app.tuning.palette.text_faint).bg(bg)));
         out.push(Line::from(line_spans));
     }
     out
@@ -1603,13 +1600,13 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
         let s = active && idx == sel;
         // Selected row: inverted teal (dark text on a teal bar) so it's clearly
         // visible — the old DarkGray highlight vanished against the dark ground.
-        let bg = if s { rgb(app.tuning.theme_terminal) } else { Color::Reset };
-        let sel_fg = rgb(app.tuning.theme_chip_fg);
+        let bg = if s { app.tuning.palette.info } else { app.tuning.palette.surface };
+        let sel_fg = app.tuning.palette.on_accent;
         let (glyph, vcolor, id, cur) = match &row.kind {
             ItemKind::Surface(sr) => {
                 ("●", verdict_color(app, sr.verdict), sr.tab_index + 1, sr.tab_index == app.active_tab)
             }
-            _ => ("●", Color::Gray, 0, false),
+            _ => ("●", app.tuning.palette.text_dim, 0, false),
         };
         let _ = id;
         let marker = if cur { "‹" } else { " " };
@@ -1617,11 +1614,11 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
         // highlighted workspace. The selected row carries only the ↵ verb.
         let name_budget = (width as usize).saturating_sub(3 + 3);
         let mut spans = vec![
-            Span::styled(marker.to_string(), Style::default().fg(if s { sel_fg } else { rgb(app.tuning.theme_accent_bright) }).bg(bg).add_modifier(Modifier::BOLD)),
+            Span::styled(marker.to_string(), Style::default().fg(if s { sel_fg } else { app.tuning.palette.accent_bright }).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{glyph} "), Style::default().fg(if s { sel_fg } else { vcolor }).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled(
                 ellip(&row.label, name_budget),
-                Style::default().fg(if s { sel_fg } else { Color::White }).bg(bg)
+                Style::default().fg(if s { sel_fg } else { app.tuning.palette.text }).bg(bg)
                     .add_modifier(if s { Modifier::BOLD } else { Modifier::empty() }),
             ),
         ];
@@ -1629,7 +1626,7 @@ fn workspace_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, a
         let lw: usize = spans.iter().map(|x| x.content.chars().count()).sum();
         let pad = (width as usize).saturating_sub(lw + right.chars().count());
         spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        spans.push(Span::styled(right.to_string(), Style::default().fg(if s { sel_fg } else { Color::DarkGray }).bg(bg).add_modifier(if s { Modifier::BOLD } else { Modifier::empty() })));
+        spans.push(Span::styled(right.to_string(), Style::default().fg(if s { sel_fg } else { app.tuning.palette.text_faint }).bg(bg).add_modifier(if s { Modifier::BOLD } else { Modifier::empty() })));
         out.push(Line::from(spans));
     }
     out
@@ -1678,7 +1675,7 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
     let w = width as usize;
     let mut out = vec![Line::from(Span::styled(
         format!(" {} ", "─".repeat(w.saturating_sub(2))),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(app.tuning.palette.text_faint),
     ))];
     let Some(ItemKind::Surface(s)) = row.map(|r| &r.kind) else { return out };
     let vcolor = verdict_color(app, s.verdict);
@@ -1686,26 +1683,26 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
         Verdict::Blocked => "blocked", Verdict::Failed => "failed",
         Verdict::Running => "running", Verdict::Done => "done", Verdict::Context => "idle",
     };
-    let teal = rgb(app.tuning.theme_terminal);
+    let teal = app.tuning.palette.info;
     let rail = || Span::styled(" ▌ ", Style::default().fg(teal));
     let content_w = w.saturating_sub(5); // " ▌ " + right padding
     // Status + age (the time count now lives here, not inline on the row).
     let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
     out.push(Line::from(vec![
         rail(),
-        Span::styled("status: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled("status: ", Style::default().fg(app.tuning.palette.text).add_modifier(Modifier::BOLD)),
         Span::styled(vlabel.to_string(), Style::default().fg(vcolor).add_modifier(Modifier::BOLD)),
-        Span::styled(age, Style::default().fg(Color::DarkGray)),
+        Span::styled(age, Style::default().fg(app.tuning.palette.text_faint)),
     ]));
     // The generated summary, wrapped to fill the box (up to 4 lines).
     let why = row.map(|r| r.description.clone()).unwrap_or_default();
     for line in wrap_summary(&why, content_w, 4) {
         out.push(Line::from(vec![
             rail(),
-            Span::styled(line, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+            Span::styled(line, Style::default().fg(app.tuning.palette.text_dim).add_modifier(Modifier::ITALIC)),
         ]));
     }
-    out.push(Line::from(Span::styled(" s  summarize", Style::default().fg(Color::DarkGray))));
+    out.push(Line::from(Span::styled(" s  summarize", Style::default().fg(app.tuning.palette.text_faint))));
     out
 }
 
@@ -1724,7 +1721,7 @@ fn star_hash(x: usize, y: usize) -> u64 {
 /// never moves, and only a meteor's brief, gentle pass animates.
 fn starfield(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     let (w, h) = (width as usize, height as usize);
-    let teal = rgb(app.tuning.theme_terminal);
+    let teal = app.tuning.palette.info;
     // A still, dim scatter of stars — no motion. Quiet by design (the "no idle
     // frames" doctrine): a static field costs zero repaints and never distracts.
     let mut lines = Vec::with_capacity(h);
@@ -1736,7 +1733,7 @@ fn starfield(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
             if seed % 31 == 0 {
                 if !run.is_empty() { spans.push(Span::raw(std::mem::take(&mut run))); }
                 let glyph = match seed % 13 { 0 => "✦", 1 => "⋆", _ => "·" };
-                let color = if seed % 101 == 0 { teal } else { Color::DarkGray }; // still, dim
+                let color = if seed % 101 == 0 { teal } else { app.tuning.palette.text_faint }; // still, dim
                 spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
             } else {
                 run.push(' ');
@@ -1754,7 +1751,7 @@ fn starfield(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
 fn render_workspaces_panel(frame: &mut Frame, app: &App, rect: Rect) {
     let active = app.palette.as_ref().map(|p| p.column == crate::palette::BarColumn::Workspaces).unwrap_or(false);
     let sel = app.palette.as_ref().map(|p| p.sel_ws).unwrap_or(0);
-    let teal = rgb(app.tuning.theme_terminal);
+    let teal = app.tuning.palette.info;
     let mut bstyle = Style::default().fg(teal);
     if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
@@ -1793,7 +1790,7 @@ fn render_command_panel(frame: &mut Frame, app: &App, rect: Rect, left_border: b
     // The command box always keeps its accent (orange) border — a fully-boxed panel —
     // and just bolds when it holds focus; the selection highlight inside carries the
     // rest of the focus signal.
-    let accent = rgb(app.tuning.theme_accent);
+    let accent = app.tuning.palette.accent;
     let mut bstyle = Style::default().fg(accent);
     if active { bstyle = bstyle.add_modifier(Modifier::BOLD); }
     let block = Block::default()
@@ -1868,9 +1865,9 @@ fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
     }
     let row = Rect { x: pane_area.x, y: pane_area.bottom() - 1, width: pane_area.width, height: 1 };
     let (glyph, fg) = match n.kind {
-        crate::app::NoticeKind::Failure => ("✗", rgb(app.tuning.theme_accent_bright)),
-        crate::app::NoticeKind::Blocked => ("⏸", rgb(app.tuning.theme_accent)),
-        crate::app::NoticeKind::Info => ("✓", rgb(app.tuning.theme_terminal)),
+        crate::app::NoticeKind::Failure => ("✗", app.tuning.palette.accent_bright),
+        crate::app::NoticeKind::Blocked => ("⏸", app.tuning.palette.accent),
+        crate::app::NoticeKind::Info => ("✓", app.tuning.palette.info),
     };
     let more = if app.notices.len() > 1 { format!("  (+{} more)", app.notices.len() - 1) } else { String::new() };
     let text = format!(" {glyph} {}{more}   Esc dismiss ", n.text);
@@ -1878,7 +1875,7 @@ fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             text,
-            Style::default().fg(Color::Black).bg(fg).add_modifier(Modifier::BOLD),
+            Style::default().fg(app.tuning.palette.on_accent).bg(fg).add_modifier(Modifier::BOLD),
         ))),
         row,
     );
@@ -1887,9 +1884,9 @@ fn render_notice(frame: &mut Frame, app: &App, pane_area: Rect) {
 // ── Left file-tree sidebar (@ / C-x d) ───────────────────────────────────────
 
 fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
-    let accent = rgb(app.tuning.theme_accent);
+    let accent = app.tuning.palette.accent;
     let focused = matches!(app.mode, Mode::Tree);
-    let border = if focused { rgb(app.tuning.theme_accent_bright) } else { Color::DarkGray };
+    let border = if focused { app.tuning.palette.accent_bright } else { app.tuning.palette.border };
 
     frame.render_widget(Clear, area);
     // Header: the filter query (⌕) while filtering, else the root folder name.
@@ -1932,7 +1929,7 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
     for (idx, row) in app.tree_rows.iter().enumerate().skip(scroll).take(max_show) {
         let is_sel = idx == selected && focused;
         // Selected row: a full-width accent band (unmistakable), like a chip.
-        let bg = if is_sel { accent } else { Color::Reset };
+        let bg = if is_sel { accent } else { app.tuning.palette.surface };
         let indent = "  ".repeat(row.depth);
         let glyph = if row.updir {
             "↑ "
@@ -1948,15 +1945,15 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
         };
         // Foreground: readable on the band when selected; folders bold+accent,
         // files white, `../` dim — otherwise.
-        let chip = rgb(app.tuning.theme_chip_fg);
+        let chip = app.tuning.palette.on_accent;
         let name_fg = if is_sel {
             chip
         } else if row.updir {
-            rgb(app.tuning.theme_accent_bright) // visible "go up" affordance
+            app.tuning.palette.accent_bright // visible "go up" affordance
         } else if row.is_dir {
             accent
         } else {
-            Color::White
+            app.tuning.palette.text
         };
         let glyph_fg = if is_sel { chip } else { accent };
         let mut modifier = Modifier::empty();
@@ -1979,8 +1976,8 @@ fn render_file_tree(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect, avoid: Option<Rect>) {
     let query = app.palette.as_ref().map(|p| p.query.as_str()).unwrap_or("");
-    let chipfg = rgb(app.tuning.theme_chip_fg);
-    let accent = rgb(app.tuning.theme_accent);
+    let chipfg = app.tuning.palette.on_accent;
+    let accent = app.tuning.palette.accent;
 
     // The input line begins EXACTLY where the cursor was (no label prefix), so
     // it reads as typing in place. A tiny chip sits just left of it: `!` for the
@@ -2049,7 +2046,7 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect, avoid: Op
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(Color::DarkGray).bg(rgb(app.tuning.selection_bg)),
+            Style::default().fg(app.tuning.palette.text_faint).bg(app.tuning.palette.selection_bg),
         ))),
         hint_rect,
     );
@@ -2064,7 +2061,7 @@ fn render_shell_overlay(frame: &mut Frame, app: &App, pane_area: Rect, avoid: Op
 
 fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rect) {
     let width = bar_area.width.saturating_sub(2).max(10) as usize;
-    let sand = rgb(app.tuning.theme_accent_bright);
+    let sand = app.tuning.palette.accent_bright;
     let mut lines: Vec<Line> = Vec::new();
 
     // The conversation transcript.
@@ -2072,13 +2069,13 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         let (tag, tag_style) = if role == "user" {
             ("you  › ", Style::default().fg(sand).add_modifier(Modifier::BOLD))
         } else {
-            ("mars › ", Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD))
+            ("mars › ", Style::default().fg(app.tuning.palette.accent).add_modifier(Modifier::BOLD))
         };
         for (i, wrapped) in wrap_text(text, width.saturating_sub(7)).into_iter().enumerate() {
             let prefix = if i == 0 { tag } else { "       " };
             lines.push(Line::from(vec![
                 Span::styled(prefix, tag_style),
-                Span::styled(wrapped, Style::default().fg(Color::White)),
+                Span::styled(wrapped, Style::default().fg(app.tuning.palette.text)),
             ]));
         }
     }
@@ -2086,12 +2083,12 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
     // final Answer replaces it (directive stripped, pushed into history).
     if let Some(partial) = app.agent_partial.as_ref().filter(|p| !p.is_empty()) {
         let tag_style =
-            Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD);
+            Style::default().fg(app.tuning.palette.accent).add_modifier(Modifier::BOLD);
         for (i, wrapped) in wrap_text(partial, width.saturating_sub(7)).into_iter().enumerate() {
             let prefix = if i == 0 { "mars › " } else { "       " };
             lines.push(Line::from(vec![
                 Span::styled(prefix, tag_style),
-                Span::styled(wrapped, Style::default().fg(Color::White)),
+                Span::styled(wrapped, Style::default().fg(app.tuning.palette.text)),
             ]));
         }
     }
@@ -2108,7 +2105,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         for wrapped in wrap_text(notice, width) {
             lines.push(Line::from(Span::styled(
                 wrapped,
-                Style::default().fg(rgb(app.tuning.theme_accent_dark)),
+                Style::default().fg(app.tuning.palette.accent_dark),
             )));
         }
     }
@@ -2123,7 +2120,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(
             format!(" ▶ Enter to {verb} ({n} lines) · C-l cancel "),
-            Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default().fg(app.tuning.palette.on_accent).bg(app.tuning.palette.success).add_modifier(Modifier::BOLD),
         )));
     } else if let Some(d) = &app.agent_directive {
         let label = match d {
@@ -2138,15 +2135,15 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         lines.push(Line::from(Span::styled(
             label,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(app.tuning.palette.on_accent)
+                .bg(app.tuning.palette.success)
                 .add_modifier(Modifier::BOLD),
         )));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             " Ask about what's on your screen — Enter sends · C-l new chat",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.tuning.palette.text_faint),
         )));
     }
 
@@ -2172,7 +2169,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
             if let Some(last) = view.last_mut() {
                 *last = Line::from(Span::styled(
                     format!(" ↓ {} more (Down to scroll) ", scroll),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.tuning.palette.text_faint),
                 ));
             }
         }
@@ -2180,7 +2177,7 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
             if let Some(first) = view.first_mut() {
                 *first = Line::from(Span::styled(
                     format!(" ↑ {} more (Up to scroll) ", start),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.tuning.palette.text_faint),
                 ));
             }
         }
@@ -2206,11 +2203,11 @@ fn render_ask_panel(frame: &mut Frame, app: &App, pane_area: Rect, bar_area: Rec
         .title(Span::styled(
             title,
             Style::default()
-                .fg(rgb(app.tuning.theme_accent))
+                .fg(app.tuning.palette.accent)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(rgb(app.tuning.theme_accent)));
+        .border_style(Style::default().fg(app.tuning.palette.accent));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);

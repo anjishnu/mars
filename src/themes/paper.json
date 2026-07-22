@@ -1,0 +1,11 @@
+{
+  "name": "Paper",
+  "about": "Warm ink on cream — for daylight and e-ink.",
+  "dark": false,
+  "accent": "#b24a28", "accent-bright": "#a84b1f", "accent-dark": "#7a3416",
+  "on-accent": "#fbf6ee",
+  "info": "#0e7c74", "success": "#2e7d4f", "warning": "#9a6a00", "danger": "#b3271e",
+  "text": "#2b2622", "text-dim": "#6e655c", "text-faint": "#9b9186",
+  "border": "#c9bca9", "surface": "#f4ece0", "select-row-bg": "#e4d3be",
+  "selection-bg": "#e4d3be", "search-bg": "#f0d89a", "current-line": "#eae0d2"
+}

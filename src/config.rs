@@ -351,6 +351,36 @@ pub fn state_path() -> Option<std::path::PathBuf> {
     app_config_dir().map(|d| d.join("state.json"))
 }
 
+/// The global MARS config file `~/.mars/config.json` (env overrides + theme).
+pub fn config_json_path() -> Option<std::path::PathBuf> {
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("config.json"))
+}
+
+/// The active theme name from `~/.mars/config.json` (`None` ⇒ the default).
+pub fn selected_theme() -> Option<String> {
+    let p = config_json_path()?;
+    let s = std::fs::read_to_string(&p).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get("theme").and_then(|t| t.as_str()).map(String::from)
+}
+
+/// Write `theme` into `~/.mars/config.json`, preserving every other key (env, …).
+pub fn set_theme(name: &str) -> std::io::Result<()> {
+    let p = config_json_path().ok_or_else(|| std::io::Error::other("no home directory"))?;
+    let mut v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !v.is_object() {
+        v = serde_json::json!({});
+    }
+    v.as_object_mut().unwrap().insert("theme".into(), serde_json::json!(name));
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&p, format!("{}\n", serde_json::to_string_pretty(&v).unwrap()))
+}
+
 /// `~/.config/mars`, migrating a pre-rename `~/.config/ares` on first touch.
 fn app_config_dir() -> Option<std::path::PathBuf> {
     let base = config_dir()?;

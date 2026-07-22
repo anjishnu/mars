@@ -1,0 +1,11 @@
+{
+  "name": "Mission Control",
+  "about": "The MARS house look — terracotta over mission-control teal.",
+  "dark": true,
+  "accent": "#d97757", "accent-bright": "#e9a178", "accent-dark": "#b7410e",
+  "on-accent": "#1f1410",
+  "info": "#0d7377", "success": "#3dae72", "warning": "#e6a53c", "danger": "#d9534f",
+  "text": "white", "text-dim": "gray", "text-faint": "darkgray",
+  "border": "darkgray", "surface": "reset", "select-row-bg": "darkgray",
+  "selection-bg": "#4a2a1f", "search-bg": "#8a5414", "current-line": "#2a2522"
+}
