@@ -103,8 +103,9 @@ LLM DEBUG  (calibrate prompts / right-size models per call)
   mars --llm-debug <cmd>         log every LLM call (prompt, model, tokens,
                                  latency) to ~/.mars/logs/ (or MARS_LLM_DEBUG=1;
                                  export it so session daemons inherit it all day)
-  mars llm-stats [--raw]         profile the log: per task×model, ranked by
-                                 token use — avg in/out tokens, total, latency
+  mars llm-stats [--raw|--json|--daily]
+                                 profile the log: per task×model ranked by token
+                                 use; --daily = day-by-day trend, --json = scriptable
   mars translate \"<english>\"     headless: English → one shell command (logs it)
   --memory none|history|docs|full  retrieval variant: history = your own commands
                                  for translate; docs = Mars's own docs for ask
@@ -135,13 +136,18 @@ MORE
   Config: ~/.config/mars/keys.json (bindings), tuning.json (behavior knobs)
   Session logs: ~/.local/state/mars/<name>.log";
 
-/// Apply a project-local `.mars` rc file (JSON) if present in the cwd — a
-/// per-project config, like `.zshrc` for a shell. Currently supports an `env`
-/// object whose entries are exported into the process environment (so a spawned
-/// session daemon inherits them too), but ONLY when the variable isn't already
-/// set — the real environment and explicit flags always win. A malformed file
-/// warns and is ignored; a bad rc must never block startup.
-fn apply_project_config(path: &std::path::Path) {
+/// Apply the global MARS config (`~/.mars/config.json`) if present — like a shell
+/// rc. Currently supports an `env` object whose entries are exported into the process
+/// environment (so a spawned session daemon inherits them too), but ONLY when the
+/// variable isn't already set — the real environment and explicit flags always win.
+/// A malformed file warns and is ignored; a bad config must never block startup.
+/// Path to the global MARS config file: `~/.mars/config.json`, alongside the rest of
+/// MARS's state (worklog, briefings, logs). `None` only when `$HOME` is unset.
+fn config_path() -> Option<std::path::PathBuf> {
+    crate::sys::paths::home_dir().map(|h| h.join(".mars").join("config.json"))
+}
+
+fn apply_config_from(path: &std::path::Path) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
     let val: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
@@ -171,10 +177,12 @@ fn main() -> Result<()> {
     // it before printing anything (and before crossterm snapshots "original").
     session::sanitize_tty();
 
-    // A project-local `.mars` rc (JSON) in the cwd can export env overrides — e.g.
-    // {"env": {"MARS_LLM_DEBUG": "1"}} to turn on LLM call logging for this project.
-    // Applied before anything reads the environment; the real env still wins.
-    apply_project_config(std::path::Path::new(".mars"));
+    // The global MARS config (~/.mars/config.json) can export env overrides — e.g.
+    // {"env": {"MARS_LLM_DEBUG": "1"}} to turn on LLM call logging. Applied before
+    // anything reads the environment (so the daemon inherits it); the real env wins.
+    if let Some(p) = config_path() {
+        apply_config_from(&p);
+    }
 
     // `--llm-debug` is a global flag (any position): turn on LLM call logging and
     // strip it out so it isn't mistaken for a filename/unknown command. It sets
@@ -235,8 +243,9 @@ fn main() -> Result<()> {
         Some("--selfcheck") => return selfcheck(),
         // LLM observability: profile the debug log to right-size models per call.
         Some("llm-stats") => {
-            let raw = args.any(|a| a == "--raw");
-            return llm_log::stats(raw);
+            let flags: Vec<String> = args.collect();
+            let has = |f: &str| flags.iter().any(|a| a == f);
+            return llm_log::stats(has("--raw"), has("--json"), has("--daily"));
         }
         // Headless ask — verify the agent provider end-to-end from the shell.
         Some("ask") | Some("--ask") => {
@@ -4027,7 +4036,7 @@ fn selfcheck() -> Result<()> {
         let outc = std::fs::read_to_string(llm_log::outcomes_path())?;
         assert!(outc.contains("\"call_id\":1") && outc.contains("git status"), "outcome not logged");
         assert!(std::fs::read_to_string(llm_log::log_path())?.contains("session_start"), "session event not logged");
-        llm_log::stats(false)?; // aggregation runs cleanly, skips session events
+        llm_log::stats(false, false, false)?; // aggregation runs cleanly, skips session events
         // Disabled → strictly no writes.
         std::env::remove_var("MARS_LLM_DEBUG");
         let before = std::fs::metadata(llm_log::log_path())?.len();
@@ -4044,35 +4053,35 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] llm debug log + stats ..... PASS");
     }
 
-    // 41b. Project-local `.mars` rc: an `env` map is exported into the process
+    // 41b. Global `~/.mars/config.json`: an `env` map is exported into the process
     //      environment, but the real environment wins, and a malformed file is a
     //      no-op (never blocks startup).
     {
-        let dir = std::env::temp_dir().join(format!("mars-projcfg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mars-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
-        let rc = dir.join(".mars");
+        let cfg = dir.join("config.json");
 
         // A fresh var is exported from the file.
-        std::env::remove_var("MARS_TEST_PROJCFG");
-        std::fs::write(&rc, r#"{"env":{"MARS_TEST_PROJCFG":"from_file","MARS_TEST_PROJCFG_HELD":"file"}}"#)?;
-        apply_project_config(&rc);
-        assert_eq!(std::env::var("MARS_TEST_PROJCFG").as_deref(), Ok("from_file"), "rc env not exported");
+        std::env::remove_var("MARS_TEST_CFG");
+        std::fs::write(&cfg, r#"{"env":{"MARS_TEST_CFG":"from_file","MARS_TEST_CFG_HELD":"file"}}"#)?;
+        apply_config_from(&cfg);
+        assert_eq!(std::env::var("MARS_TEST_CFG").as_deref(), Ok("from_file"), "config env not exported");
 
         // The real environment wins over the file.
-        std::env::set_var("MARS_TEST_PROJCFG_HELD", "real");
-        apply_project_config(&rc);
-        assert_eq!(std::env::var("MARS_TEST_PROJCFG_HELD").as_deref(), Ok("real"), "file clobbered the real env");
+        std::env::set_var("MARS_TEST_CFG_HELD", "real");
+        apply_config_from(&cfg);
+        assert_eq!(std::env::var("MARS_TEST_CFG_HELD").as_deref(), Ok("real"), "file clobbered the real env");
 
-        // A malformed rc is ignored without panicking or setting anything.
-        std::fs::write(&rc, "{ not json")?;
-        apply_project_config(&rc); // must not panic
+        // A malformed file is ignored without panicking or setting anything.
+        std::fs::write(&cfg, "{ not json")?;
+        apply_config_from(&cfg); // must not panic
         // A missing file is a clean no-op.
-        apply_project_config(&dir.join("nope.mars"));
+        apply_config_from(&dir.join("nope.json"));
 
-        std::env::remove_var("MARS_TEST_PROJCFG");
-        std::env::remove_var("MARS_TEST_PROJCFG_HELD");
+        std::env::remove_var("MARS_TEST_CFG");
+        std::env::remove_var("MARS_TEST_CFG_HELD");
         let _ = std::fs::remove_dir_all(&dir);
-        println!("[selfcheck] project .mars rc ........... PASS");
+        println!("[selfcheck] ~/.mars/config.json ........ PASS");
     }
 
     // 42. Retrieval: BM25 ranks the relevant doc first; memory-mode parsing

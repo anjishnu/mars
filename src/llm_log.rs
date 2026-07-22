@@ -195,19 +195,43 @@ impl Agg {
     }
 }
 
-/// `mars llm-stats [--raw]` — profile the log so each call type can be optimized.
-/// Rows are ranked by total token consumption (the biggest budget/latency targets
-/// first). `--raw` dumps the JSONL instead.
-pub fn stats(raw: bool) -> anyhow::Result<()> {
+/// Days since 1970-01-01 → (year, month, day) via Howard Hinnant's civil algorithm,
+/// so per-day buckets can be labelled without pulling in a date crate (UTC).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+fn day_label(ts: u64) -> String {
+    let (y, m, d) = civil_from_days((ts / 86400) as i64);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// `mars llm-stats [--raw|--json|--daily]` — profile the log so each call type can be
+/// optimized. Rows are ranked by total token consumption (the biggest budget/latency
+/// targets first). `--raw` dumps the JSONL; `--json` emits the aggregate + daily
+/// series as JSON (scriptable); `--daily` prints a day-by-day token-trend chart.
+pub fn stats(raw: bool, json: bool, daily: bool) -> anyhow::Result<()> {
     let path = log_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => {
-            println!(
-                "No LLM debug log yet at {}.\nEnable it with `mars --llm-debug` (or MARS_LLM_DEBUG=1), \
-                 use the agent, then re-run `mars llm-stats`.",
-                path.display()
-            );
+            if json {
+                println!("{{\"calls\":0,\"rows\":[],\"daily\":[]}}");
+            } else {
+                println!(
+                    "No LLM debug log yet at {}.\nEnable it with `mars --llm-debug` (or MARS_LLM_DEBUG=1), \
+                     use the agent, then re-run `mars llm-stats`.",
+                    path.display()
+                );
+            }
             return Ok(());
         }
     };
@@ -218,6 +242,7 @@ pub fn stats(raw: bool) -> anyhow::Result<()> {
 
     use std::collections::BTreeMap;
     let mut by_key: BTreeMap<(String, String), Agg> = BTreeMap::new();
+    let mut by_day: BTreeMap<String, Agg> = BTreeMap::new();
     let mut total = Agg::default();
     for line in content.lines() {
         let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else { continue };
@@ -231,10 +256,17 @@ pub fn stats(raw: bool) -> anyhow::Result<()> {
         let ms = j["latency_ms"].as_u64().unwrap_or(0);
         let ok = j["ok"].as_bool().unwrap_or(true);
         by_key.entry((task, model)).or_default().add(pt, ct, ms, ok);
+        if let Some(ts) = j["ts"].as_u64() {
+            by_day.entry(day_label(ts)).or_default().add(pt, ct, ms, ok);
+        }
         total.add(pt, ct, ms, ok);
     }
     if total.n == 0 {
-        println!("Log at {} is empty.", path.display());
+        if json {
+            println!("{{\"calls\":0,\"rows\":[],\"daily\":[]}}");
+        } else {
+            println!("Log at {} is empty.", path.display());
+        }
         return Ok(());
     }
 
@@ -242,8 +274,40 @@ pub fn stats(raw: bool) -> anyhow::Result<()> {
     // targets) surface first.
     let mut rows: Vec<((String, String), Agg)> = by_key.into_iter().collect();
     rows.sort_by(|a, b| b.1.total_tokens().cmp(&a.1.total_tokens()));
-
     let grand = total.total_tokens().max(1);
+
+    if json {
+        let row_json: Vec<_> = rows.iter().map(|((task, model), a)| {
+            let n = a.n.max(1);
+            serde_json::json!({
+                "task": task, "model": model, "n": a.n,
+                "avg_in": a.prompt / n, "avg_out": a.completion / n,
+                "total_tokens": a.total_tokens(), "pct_tokens": a.total_tokens() * 100 / grand,
+                "avg_ms": a.ms / n, "errors": a.errs,
+            })
+        }).collect();
+        let day_json: Vec<_> = by_day.iter().map(|(date, a)| {
+            let n = a.n.max(1);
+            serde_json::json!({
+                "date": date, "calls": a.n, "prompt_tokens": a.prompt,
+                "completion_tokens": a.completion, "total_tokens": a.total_tokens(),
+                "avg_ms": a.ms / n, "errors": a.errs,
+            })
+        }).collect();
+        let tn = total.n.max(1);
+        let out = serde_json::json!({
+            "log": path.display().to_string(),
+            "calls": total.n,
+            "total_tokens": total.total_tokens(),
+            "avg_in": total.prompt / tn, "avg_out": total.completion / tn,
+            "avg_ms": total.ms / tn, "errors": total.errs,
+            "rows": row_json,
+            "daily": day_json,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     println!(
         "{:<13} {:<22} {:>4} {:>8} {:>8} {:>9} {:>5} {:>7} {:>4}",
         "TASK", "MODEL", "N", "AVG_IN", "AVG_OUT", "TOT_TOK", "%TOK", "AVG_MS", "ERR"
@@ -253,33 +317,32 @@ pub fn stats(raw: bool) -> anyhow::Result<()> {
         let n = a.n.max(1);
         println!(
             "{:<13} {:<22} {:>4} {:>8} {:>8} {:>9} {:>4}% {:>7} {:>4}",
-            task,
-            model,
-            a.n,
-            a.prompt / n,
-            a.completion / n,
-            a.total_tokens(),
-            a.total_tokens() * 100 / grand,
-            a.ms / n,
-            a.errs
+            task, model, a.n, a.prompt / n, a.completion / n,
+            a.total_tokens(), a.total_tokens() * 100 / grand, a.ms / n, a.errs
         );
     }
     println!("{:-<86}", "");
     let n = total.n.max(1);
     println!(
         "{:<13} {:<22} {:>4} {:>8} {:>8} {:>9} {:>4}% {:>7} {:>4}",
-        "TOTAL",
-        "",
-        total.n,
-        total.prompt / n,
-        total.completion / n,
-        total.total_tokens(),
-        100,
-        total.ms / n,
-        total.errs
+        "TOTAL", "", total.n, total.prompt / n, total.completion / n,
+        total.total_tokens(), 100, total.ms / n, total.errs
     );
     println!("\nlog: {}   ({} calls)", path.display(), total.n);
-    println!("tips: heaviest rows first — try a smaller model or a shorter prompt there;");
-    println!("      `mars llm-stats --raw` shows the full inputs/outputs per call.");
+
+    if daily {
+        // Day-by-day token trend — a bar per day, scaled to the busiest day.
+        println!("\nday-by-day (total tokens):");
+        let max = by_day.values().map(|a| a.total_tokens()).max().unwrap_or(1).max(1);
+        for (date, a) in &by_day {
+            let tt = a.total_tokens();
+            let filled = (tt * 30 / max) as usize;
+            let bar = "█".repeat(if tt > 0 { filled.max(1) } else { 0 });
+            println!("  {}  {:>8} tok  {:>4} calls  {}", date, tt, a.n, bar);
+        }
+    } else {
+        println!("tips: heaviest rows first — try a smaller model or a shorter prompt there;");
+        println!("      `--raw` shows full inputs/outputs · `--daily` day-by-day trends · `--json` machine-readable.");
+    }
     Ok(())
 }

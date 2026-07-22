@@ -48,5 +48,3 @@ final_results.md
 __pycache__/
 *.pyc
 
-# Project-local mars rc (env overrides; personal, not shared)
-.mars

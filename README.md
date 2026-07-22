@@ -177,15 +177,15 @@ mars llm-stats                # per task×model, ranked by total tokens:
 mars llm-stats --raw          # full inputs/outputs per call
 ```
 
-To keep it on for a project without exporting the env var every time, drop a
-`.mars` rc (JSON) in the project root — a per-checkout config, like a `.zshrc`:
+To keep it on without exporting the env var every time, set it in the global MARS
+config, `~/.mars/config.json` (alongside the rest of Mars's state) — like a shell rc:
 
 ```json
 { "env": { "MARS_LLM_DEBUG": "1" } }
 ```
 
 Its `env` entries are exported at startup (the real environment still wins), so the
-session daemon inherits them too. It's yours alone — add `.mars` to your gitignore.
+session daemon inherits them too.
 
 Reasoning models (Qwen3, DeepSeek-R1) work — their `<think>` blocks are stripped from
 answers automatically.
