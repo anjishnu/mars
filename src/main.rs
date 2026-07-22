@@ -4135,10 +4135,15 @@ fn selfcheck() -> Result<()> {
         let green = RColor::Rgb(57, 255, 20);
         let has_green = term.backend().buffer().content().iter().any(|c| c.fg == green || c.bg == green);
         assert!(has_green, "the hacker palette did not reach any rendered cell");
+        // The committed surface (black) fills the whole frame — not just where a
+        // widget sets a bg — so a themed background is consistent everywhere.
+        let black = RColor::Rgb(0, 0, 0);
+        let filled = term.backend().buffer().content().iter().filter(|c| c.bg == black).count();
+        assert!(filled > 60 * 8 / 2, "the surface did not fill most of the frame ({filled} cells)");
         println!("[selfcheck] themes (resolve/parse/render) . PASS");
     }
 
-    // 40e. Live theme cycle (beta): CycleTheme changes the resolved palette and
+    // 40e. Live theme picker (beta): SetTheme applies the resolved palette and
     //      persists the choice. HOME is isolated so it never touches a real config.
     {
         let saved = std::env::var(sys::paths::HOME_ENV).ok();
@@ -4148,16 +4153,17 @@ fn selfcheck() -> Result<()> {
 
         let mut app = App::new(None)?;
         let before = app.tuning.palette.accent;
-        app.run_action(palette::Action::CycleTheme);
-        assert_ne!(app.tuning.palette.accent, before, "cycle did not change the live palette");
-        assert!(config::selected_theme().is_some(), "cycle did not persist the theme");
+        app.run_action(palette::Action::SetTheme("hacker".into()));
+        assert_eq!(app.tuning.palette.accent, ratatui::style::Color::Rgb(57, 255, 20), "SetTheme did not apply the live palette");
+        assert_ne!(app.tuning.palette.accent, before, "palette unchanged");
+        assert_eq!(config::selected_theme().as_deref(), Some("hacker"), "SetTheme did not persist the theme");
 
         match saved {
             Some(h) => std::env::set_var(sys::paths::HOME_ENV, h),
             None => std::env::remove_var(sys::paths::HOME_ENV),
         }
         let _ = std::fs::remove_dir_all(&tmp);
-        println!("[selfcheck] cycle theme (live) ......... PASS");
+        println!("[selfcheck] set theme live (beta) ..... PASS");
     }
 
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,

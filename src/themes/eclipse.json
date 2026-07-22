@@ -1,11 +1,11 @@
 {
   "name": "Eclipse",
-  "about": "Maximum-legibility high contrast on true black.",
+  "about": "Bold electric high-contrast on true black — magenta, cyan, lime.",
   "dark": true,
-  "accent": "#f28b5c", "accent-bright": "#ffb489", "accent-dark": "#c85a2a",
-  "on-accent": "#0a0a0a",
-  "info": "#22d3ee", "success": "#34d399", "warning": "#fbbf24", "danger": "#f87171",
-  "text": "#ffffff", "text-dim": "#c4c4c4", "text-faint": "#8a8a8a",
-  "border": "#6b6b6b", "surface": "#000000", "select-row-bg": "#1a3d42",
-  "selection-bg": "#303030", "search-bg": "#4a3a00", "current-line": "#141414"
+  "accent": "#ff3d9a", "accent-bright": "#ff85c2", "accent-dark": "#c81e6a",
+  "on-accent": "#0a0a12",
+  "info": "#22e0ff", "success": "#4dff88", "warning": "#ffd21a", "danger": "#ff3b52",
+  "text": "#f2f2ff", "text-dim": "#9aa0c8", "text-faint": "#565c82",
+  "border": "#3a4270", "surface": "#05060f", "select-row-bg": "#2a1450",
+  "selection-bg": "#3a2a5e", "search-bg": "#5a4a00", "current-line": "#12132a"
 }

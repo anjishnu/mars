@@ -318,8 +318,7 @@ old files are kept as `*.bak`).
 **Color themes (beta).** `mars theme list` shows the bundled themes — **Mission
 Control** (the default), **Eclipse** (high-contrast), **Paper** (warm light), and
 **Hacker** (green-on-black); `mars theme <name>` switches (recorded in
-`~/.mars/config.json`). Or **Cycle theme** in the command bar flips through them
-*live*. Drop your own token→color JSON in `~/.mars/themes/`. A running session keeps
+`~/.mars/config.json`). Or the **Theme ▸** picker in the command bar switches live. Drop your own token→color JSON in `~/.mars/themes/`. A running session keeps
 its look until it's restarted (or you cycle from inside it). Every color is a single
 semantic token now, so a theme repaints the whole UI at once — it's new, so please
 report anything that reads wrong (especially on the light theme).

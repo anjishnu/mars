@@ -39,6 +39,14 @@ fn rgb(c: [u8; 3]) -> Color {
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
+    // Paint the whole frame in the theme's surface first, so a committed background
+    // (Paper's cream, Hacker's black) is consistent everywhere — not just where a
+    // widget happens to set a bg. Skipped when surface is Reset (Mission Control),
+    // which honors the terminal's own background byte-identically to before.
+    if app.tuning.palette.surface != Color::Reset {
+        frame.render_widget(Block::default().style(Style::default().bg(app.tuning.palette.surface)), area);
+    }
+
     // Layout: tab-bar (1) | pane area (min) | status (1) | control bar (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)

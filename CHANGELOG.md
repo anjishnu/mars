@@ -12,8 +12,7 @@ and richer `llm-stats`.
   whole palette. Four bundled themes — **Mission Control** (default, unchanged),
   **Eclipse** (high-contrast), **Paper** (warm light), **Hacker** (green-on-black).
   `mars theme list` / `mars theme <name>` switch it (recorded in
-  `~/.mars/config.json`); **Cycle theme** in the command bar flips through them
-  *live*. Drop your own token→color JSON in `~/.mars/themes/`. Custom `theme_*`
+  `~/.mars/config.json`); the **Theme ▸** picker in the command bar switches live. Drop your own token→color JSON in `~/.mars/themes/`. Custom `theme_*`
   tuning knobs still override per token, so existing customizations are untouched.
 - **Current-line highlight** — a subtle tint on the cursor's row
   (`highlight_current_line` / `current_line_bg`).

@@ -3859,20 +3859,13 @@ impl App {
         });
     }
 
-    /// Cycle to the next color theme, applying it live — beta. Updates the resolved
-    /// palette in place (repaints immediately) and persists the choice, sidestepping
-    /// the new-session-only caveat of the `mars theme` CLI.
-    fn cycle_theme(&mut self) {
-        let names: Vec<String> = crate::themes::list().into_iter().map(|t| t.name).collect();
-        if names.is_empty() {
-            return;
-        }
-        let cur = crate::config::selected_theme().unwrap_or_else(|| "mission-control".into());
-        let idx = names.iter().position(|n| *n == cur).unwrap_or(0);
-        let next = names[(idx + 1) % names.len()].clone();
-        self.tuning.palette = crate::themes::resolve(Some(&next));
-        let _ = crate::config::set_theme(&next);
-        self.status_msg = Some(format!("Theme: {next} (beta)"));
+    /// Apply a color theme live — beta. Updates the resolved palette in place
+    /// (repaints immediately) and persists the choice, sidestepping the
+    /// new-session-only caveat of the `mars theme` CLI.
+    fn set_theme_live(&mut self, name: &str) {
+        self.tuning.palette = crate::themes::resolve(Some(name));
+        let _ = crate::config::set_theme(name);
+        self.status_msg = Some(format!("Theme: {name} (beta)"));
         self.needs_redraw = true;
     }
 
@@ -3952,7 +3945,7 @@ impl App {
             Action::Save               => self.do_save(),
             Action::ToggleFileTree     => self.toggle_file_tree(),
             Action::ToggleMarkdown     => self.toggle_markdown(),
-            Action::CycleTheme         => self.cycle_theme(),
+            Action::SetTheme(name)     => self.set_theme_live(&name),
             Action::RefreshIndex       => {
                 self.project_index = None;
                 self.ensure_project_index();

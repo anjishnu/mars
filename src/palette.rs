@@ -80,8 +80,8 @@ pub enum Action {
     OpenDenylist,
     /// Open tuning.json — every behavioral knob, self-describing — in the editor.
     OpenTuning,
-    /// Cycle to the next color theme, applying it live (beta).
-    CycleTheme,
+    /// Apply the named color theme live (beta) — selected from the Theme ▸ submenu.
+    SetTheme(String),
     /// Open the assistant's voice file (~/.mars/persona.md) in the editor.
     OpenPersona,
     /// Detach when in a session (nothing is lost); actually exits standalone.
@@ -158,7 +158,7 @@ impl Action {
             Action::ClearCommandMemory => "forget all commands",
             Action::OpenDenylist       => "open redaction denylist",
             Action::OpenTuning         => "open tuning knobs",
-            Action::CycleTheme         => "cycle theme",
+            Action::SetTheme(_)        => "set theme",
             Action::OpenPersona        => "open persona (voice)",
             Action::Quit               => "quit (detach)",
             Action::KillSession        => "kill session",
@@ -266,7 +266,7 @@ fn root_menu() -> Vec<MenuItem> {
         MenuItem::run_desc("Forget all commands", Action::ClearCommandMemory, "Erase the agent's remembered commands (asks first)"),
         MenuItem::run_desc("Open redaction denylist", Action::OpenDenylist, "Edit the strings always redacted from LLM prompts"),
         MenuItem::run_desc("Open tuning knobs", Action::OpenTuning, "Edit every behavioral knob (tuning.json) — each explains itself"),
-        MenuItem::run_desc("Cycle theme (beta)", Action::CycleTheme, "Switch to the next color theme — applies live and is remembered"),
+        MenuItem::sub("Theme ▸ (beta)", "themes"),
         MenuItem::run_desc("Open persona", Action::OpenPersona, "Edit the voice the assistant replies in — style only, never behavior"),
         MenuItem::run_desc("Detach session", Action::Detach,      "Disconnect; the session keeps running (reattach: mars attach)"),
         MenuItem::run_desc("Rename session", Action::RenameSession, "Rename this session (also: mars rename <old> <new>)"),
@@ -337,8 +337,20 @@ pub fn menu_for(name: &str) -> Vec<MenuItem> {
         "window" => window_menu(),
         "tab"    => tab_menu(),
         "go"     => go_menu(),
+        "themes" => themes_menu(),
         _        => root_menu(),
     }
+}
+
+/// The Theme ▸ picker — one row per bundled theme; selecting one applies it live.
+/// (User themes in ~/.mars/themes/ are reachable via `mars theme <name>`.)
+fn themes_menu() -> Vec<MenuItem> {
+    vec![
+        MenuItem::run_desc("Mission Control", Action::SetTheme(String::from("mission-control")), "The MARS house look — terracotta over teal (default)"),
+        MenuItem::run_desc("Eclipse", Action::SetTheme(String::from("eclipse")), "Bold electric high-contrast on true black"),
+        MenuItem::run_desc("Paper", Action::SetTheme(String::from("paper")), "Warm ink on cream — a light theme"),
+        MenuItem::run_desc("Hacker", Action::SetTheme(String::from("hacker")), "Green phosphor on black"),
+    ]
 }
 
 /// Flattened list of all leaf (Run) items used for fuzzy search.
