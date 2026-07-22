@@ -131,7 +131,8 @@ pub fn resolve(name: Option<&str>) -> Palette {
 
 /// One entry in `mars theme list`.
 pub struct ThemeInfo {
-    pub name: String,
+    pub name: String,    // slug (file stem / bundled key) — the value written to config
+    pub display: String, // the theme's "name" field, for display
     pub about: String,
     pub dark: bool,
     pub user: bool,
@@ -143,6 +144,7 @@ pub fn list() -> Vec<ThemeInfo> {
     let mut out: Vec<ThemeInfo> = Vec::new();
     let info = |name: &str, j: &Value, user: bool| ThemeInfo {
         name: name.to_string(),
+        display: j.get("name").and_then(|v| v.as_str()).unwrap_or(name).to_string(),
         about: j.get("about").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         dark: j.get("dark").and_then(|v| v.as_bool()).unwrap_or(true),
         user,

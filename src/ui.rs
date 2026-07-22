@@ -31,6 +31,13 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+/// Whether the resolved palette is the default Mission Control look — the baked
+/// terracotta banner matches only this. Any other theme (or a customized accent)
+/// gets the plain block wordmark in its own accent instead.
+fn is_default_theme(app: &App) -> bool {
+    app.tuning.palette.accent == Color::Rgb(217, 119, 87)
+}
+
 /// The solid background color to paint, or `None` for a transparent (terminal-bg)
 /// look. Solid only when `opaque_background` is on AND the theme commits to a real
 /// surface color — so Mission Control (Reset surface) stays clear either way.
@@ -956,16 +963,26 @@ fn render_shift_report(frame: &mut Frame, app: &App, inner: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     // The MARS wordmark (instant — the console's always-on identity), centered as
-    // a block so its internal art stays aligned while the whole mark sits mid-page.
+    // a block. On the default look, the baked terracotta banner; under any other
+    // theme, the plain block wordmark painted in the theme's accent so it matches.
     let logo_rows = &crate::banner::BANNER_LINES[1..=9];
     if inner.height as usize > rep.rows.len() + logo_rows.len() + 14 {
-        let logo: Vec<(Line, u16)> = logo_rows.iter().map(|r| ansi_to_line(r)).collect();
-        let logo_w = logo.iter().map(|(_, wd)| *wd as usize).max().unwrap_or(0);
-        let logo_pad = " ".repeat(cw.saturating_sub(logo_w) / 2);
-        for (line, _) in logo {
-            let mut spans = vec![Span::raw(logo_pad.clone())];
-            spans.extend(line.spans);
-            lines.push(Line::from(spans));
+        if is_default_theme(app) {
+            let logo: Vec<(Line, u16)> = logo_rows.iter().map(|r| ansi_to_line(r)).collect();
+            let logo_w = logo.iter().map(|(_, wd)| *wd as usize).max().unwrap_or(0);
+            let logo_pad = " ".repeat(cw.saturating_sub(logo_w) / 2);
+            for (line, _) in logo {
+                let mut spans = vec![Span::raw(logo_pad.clone())];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+        } else {
+            let style = Style::default().fg(app.tuning.palette.accent).add_modifier(Modifier::BOLD);
+            let w = crate::banner::MARS_BLOCK.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+            let pad = " ".repeat(cw.saturating_sub(w) / 2);
+            for row in crate::banner::MARS_BLOCK {
+                lines.push(Line::from(vec![Span::raw(pad.clone()), Span::styled((*row).to_string(), style)]));
+            }
         }
         lines.push(Line::from(""));
     }

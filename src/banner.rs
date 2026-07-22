@@ -19,6 +19,18 @@ pub const BANNER_LINES: &[&str] = &[
     " \x1b[38;2;36;128;122m───  \x1b[38;2;232;217;200mMission control for your terminal  \x1b[38;2;36;128;122m───             \x1b[38;2;16;92;92m·              \x1b[38;2;138;148;148m·\x1b[0m",
 ];
 
+/// The plain block wordmark (the README figlet) — no baked colors, so a theme can
+/// paint it in its own accent. Used on the mission briefing under non-default themes,
+/// where the baked terracotta banner above would clash.
+pub const MARS_BLOCK: &[&str] = &[
+    "███╗   ███╗ █████╗ ██████╗ ███████╗",
+    "████╗ ████║██╔══██╗██╔══██╗██╔════╝",
+    "██╔████╔██║███████║██████╔╝███████╗",
+    "██║╚██╔╝██║██╔══██║██╔══██╗╚════██║",
+    "██║ ╚═╝ ██║██║  ██║██║  ██║███████║",
+    "╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝",
+];
+
 /// Emit the banner to a real terminal (raw ANSI) — used by `mars version`.
 pub fn print_banner() {
     for line in BANNER_LINES {

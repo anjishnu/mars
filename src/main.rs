@@ -4144,6 +4144,11 @@ fn selfcheck() -> Result<()> {
         app.tuning.opaque_background = 0;
         term.draw(|f| ui::render(f, &mut app))?;
         assert!(count_black(&term) < 60 * 8 / 4, "opaque_background=0 should not paint the surface");
+        // The Theme ▸ picker reads live from disk (bundled + user), as SetTheme rows.
+        let tmenu = palette::menu_for("themes");
+        assert!(tmenu.len() >= 4, "theme menu should list the bundled themes ({} found)", tmenu.len());
+        assert!(tmenu.iter().all(|m| matches!(m.kind, palette::ItemKind::Run(palette::Action::SetTheme(_)))), "theme rows must be SetTheme actions");
+        assert!(tmenu.iter().any(|m| m.label.contains("Mission Control")), "Mission Control missing from the theme menu");
         println!("[selfcheck] themes (resolve/parse/render) . PASS");
     }
 

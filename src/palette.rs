@@ -223,17 +223,21 @@ pub struct SurfaceRef {
 }
 
 pub struct MenuItem {
-    pub label: &'static str,
+    pub label: std::borrow::Cow<'static, str>,
     pub kind: ItemKind,
-    pub description: &'static str,
+    pub description: std::borrow::Cow<'static, str>,
 }
 
 impl MenuItem {
     fn run_desc(label: &'static str, action: Action, description: &'static str) -> Self {
-        MenuItem { label, kind: ItemKind::Run(action), description }
+        MenuItem { label: label.into(), kind: ItemKind::Run(action), description: description.into() }
+    }
+    /// Like `run_desc` but for runtime-built rows (e.g. the theme list read from disk).
+    fn run_owned(label: String, action: Action, description: String) -> Self {
+        MenuItem { label: label.into(), kind: ItemKind::Run(action), description: description.into() }
     }
     fn sub(label: &'static str, name: &'static str) -> Self {
-        MenuItem { label, kind: ItemKind::Submenu(name), description: "Open submenu" }
+        MenuItem { label: label.into(), kind: ItemKind::Submenu(name), description: "Open submenu".into() }
     }
 }
 
@@ -342,15 +346,17 @@ pub fn menu_for(name: &str) -> Vec<MenuItem> {
     }
 }
 
-/// The Theme ▸ picker — one row per bundled theme; selecting one applies it live.
-/// (User themes in ~/.mars/themes/ are reachable via `mars theme <name>`.)
+/// The Theme ▸ picker — one row per available theme, read live from the bundled set
+/// and your `~/.mars/themes/` folder (so a dropped-in theme just appears). Selecting
+/// one applies it live. The "Theme:" prefix makes them findable by typing "theme".
 fn themes_menu() -> Vec<MenuItem> {
-    vec![
-        MenuItem::run_desc("Mission Control", Action::SetTheme(String::from("mission-control")), "The MARS house look — terracotta over teal (default)"),
-        MenuItem::run_desc("Eclipse", Action::SetTheme(String::from("eclipse")), "Bold electric high-contrast on true black"),
-        MenuItem::run_desc("Paper", Action::SetTheme(String::from("paper")), "Warm ink on cream — a light theme"),
-        MenuItem::run_desc("Hacker", Action::SetTheme(String::from("hacker")), "Green phosphor on black"),
-    ]
+    crate::themes::list()
+        .into_iter()
+        .map(|t| {
+            let about = if t.user { format!("{} (yours)", t.about) } else { t.about };
+            MenuItem::run_owned(format!("Theme: {}", t.display), Action::SetTheme(t.name), about)
+        })
+        .collect()
 }
 
 /// Flattened list of all leaf (Run) items used for fuzzy search.
