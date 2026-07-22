@@ -485,6 +485,8 @@ fn render_editor_pane(
         .add_modifier(Modifier::BOLD);
 
     let numbers = app.tuning.line_numbers;
+    // Passive matched-bracket pair (row, col) for both ends, computed once.
+    let bracket = if focused { app.bracket_pair() } else { None };
     for row_off in 0..vp_h {
         let row = pane.scroll_row + row_off;
         if row >= line_count {
@@ -494,6 +496,13 @@ fn render_editor_pane(
         } else {
             let content = buf.line_str(row);
             let on_cursor = focused && row == pane.cursor_row;
+            // Current-line tint: a subtle bg on the cursor's row (selection/search
+            // backgrounds still win where they sit).
+            let line_bg = if on_cursor && app.tuning.highlight_current_line == 1 {
+                Some(rgb(app.tuning.current_line_bg))
+            } else { None };
+            let with_bg = |st: Style| -> Style { if let Some(bg) = line_bg { st.bg(bg) } else { st } };
+
             let mut spans = Vec::new();
             if numbers {
                 let num_style = if on_cursor {
@@ -501,7 +510,7 @@ fn render_editor_pane(
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                spans.push(Span::styled(format!("{:>4}│ ", row + 1), num_style));
+                spans.push(Span::styled(format!("{:>4}│ ", row + 1), with_bg(num_style)));
             } else {
                 // Slim pointer gutter: a marker on the cursor line, else blank.
                 let (glyph, style) = if on_cursor {
@@ -509,11 +518,11 @@ fn render_editor_pane(
                 } else {
                     ("  ", Style::default())
                 };
-                spans.push(Span::styled(glyph, style));
+                spans.push(Span::styled(glyph, with_bg(style)));
             }
             let chars: Vec<char> = content.chars().collect();
 
-            // Per-char highlight map: 0 none, 1 selection, 2 isearch match.
+            // Per-char highlight map: 0 none, 1 selection, 2 isearch, 3 label, 4 bracket.
             let mut hl: Vec<u8> = vec![0; chars.len()];
             if let Some(((sr, sc), (er, ec))) = sel {
                 if row >= sr && row <= er {
@@ -540,9 +549,15 @@ fn render_editor_pane(
                     }
                 }
             }
+            // Bracket pair (kind 4) only where nothing stronger already sits.
+            if let Some((a, b)) = bracket {
+                for &(br, bc) in &[a, b] {
+                    if br == row && bc < chars.len() && hl[bc] == 0 { hl[bc] = 4; }
+                }
+            }
 
             if hl.iter().all(|&h| h == 0) {
-                spans.push(Span::raw(content));
+                spans.push(Span::styled(content, with_bg(Style::default())));
             } else {
                 let mut i = 0;
                 while i < chars.len() {
@@ -559,9 +574,17 @@ fn render_editor_pane(
                     spans.push(match kind {
                         1 => Span::styled(text, sel_style),
                         2 => Span::styled(text, search_style),
-                        _ => Span::raw(text),
+                        4 => Span::styled(text, with_bg(Style::default().fg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD))),
+                        _ => Span::styled(text, with_bg(Style::default())),
                     });
                     i = j;
+                }
+            }
+            // Extend the tint across the whole row.
+            if let Some(bg) = line_bg {
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                if used < inner.width as usize {
+                    spans.push(Span::styled(" ".repeat(inner.width as usize - used), Style::default().bg(bg)));
                 }
             }
             lines.push(Line::from(spans));
@@ -582,29 +605,30 @@ fn render_editor_pane(
 
 // ── Markdown view (read-only rendered) ────────────────────────────────────────
 
-/// A termimad skin dressed in MARS's palette so reading-mode reads as *ours*, not a
-/// generic renderer: teal headings + table rules, accent bullets/quotes, a lightened
-/// teal for code, white bold, accent italic. termimad rides crossterm 0.29, so colors
-/// use `termimad::crossterm`.
+/// A termimad skin dressed in MARS's palette, in a clear three-tier hierarchy on a
+/// dark ground: **clay** (the brand terracotta) is primary — headings and bold;
+/// **sandstone** (light accent) is secondary — italic and bullets; a **lightened**
+/// teal is tertiary — code and table rules. Never the raw dark teal (invisible on a
+/// dark background). termimad rides crossterm 0.29, so colors use `termimad::crossterm`.
 fn mars_md_skin(app: &App) -> termimad::MadSkin {
     use termimad::crossterm::style::Color as TColor;
     let ct = |c: [u8; 3]| TColor::Rgb { r: c[0], g: c[1], b: c[2] };
     let lite = |c: [u8; 3], a: u8| TColor::Rgb {
         r: c[0].saturating_add(a), g: c[1].saturating_add(a), b: c[2].saturating_add(a),
     };
-    let teal = ct(app.tuning.theme_terminal);
-    let accent = ct(app.tuning.theme_accent_bright);
-    let code = lite(app.tuning.theme_terminal, 110);
+    let clay = ct(app.tuning.theme_accent);        // primary
+    let sandstone = ct(app.tuning.theme_accent_bright); // secondary
+    let light_teal = lite(app.tuning.theme_terminal, 110); // tertiary (never raw dark teal)
 
     let mut s = termimad::MadSkin::default();
-    s.set_headers_fg(teal);
-    s.bold.set_fg(TColor::White);
-    s.italic.set_fg(accent);
-    s.inline_code.set_fg(code);
-    s.code_block.compound_style.set_fg(code);
-    s.bullet.set_fg(accent);
-    s.quote_mark.set_fg(accent);
-    s.table.set_fg(teal);
+    s.set_headers_fg(clay);
+    s.bold.set_fg(clay);
+    s.italic.set_fg(sandstone);
+    s.bullet.set_fg(sandstone);
+    s.inline_code.set_fg(light_teal);
+    s.code_block.compound_style.set_fg(light_teal);
+    s.quote_mark.set_fg(light_teal);
+    s.table.set_fg(light_teal);
     s
 }
 
@@ -613,7 +637,10 @@ fn mars_md_skin(app: &App) -> termimad::MadSkin {
 /// a cell grid and convert to ratatui spans, so its full output lands in our frame.
 fn render_markdown_termimad(frame: &mut Frame, app: &App, buf: &crate::buffer::Buffer, pane: &crate::pane::Pane, inner: Rect) {
     if inner.width == 0 || inner.height == 0 { return; }
-    let width = inner.width;
+    // Reading-mode: cap the reflow width and center the column, so wide panes don't
+    // stretch prose to unreadable line lengths. 0 = use the full pane width.
+    let cap = app.tuning.reading_width as u16;
+    let width = if cap > 0 { inner.width.min(cap) } else { inner.width };
     let md_scroll = pane.md_scroll;
     let mut text = String::with_capacity(buf.line_count() * 40);
     for i in 0..buf.line_count() {
@@ -668,7 +695,10 @@ fn render_markdown_termimad(frame: &mut Frame, app: &App, buf: &crate::buffer::B
         if let Some(s) = run_style { spans.push(Span::styled(run, s)); }
         lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    // Center the (possibly narrower) reading column within the pane.
+    let x_off = (inner.width - width) / 2;
+    let text_rect = Rect { x: inner.x + x_off, y: inner.y, width, height: inner.height };
+    frame.render_widget(Paragraph::new(Text::from(lines)), text_rect);
 }
 
 fn render_markdown_pane(
@@ -1529,16 +1559,36 @@ fn command_lines(app: &App, rows: &[crate::palette::PaletteRow], sel: usize, nav
             Some(q) => Span::styled(format!(" {q} "), Style::default().fg(rgb(app.tuning.theme_chip_fg)).bg(rgb(app.tuning.theme_accent)).add_modifier(Modifier::BOLD)),
             None => Span::styled("   ", Style::default().bg(bg)),
         };
-        out.push(Line::from(vec![
+        // Label with the fuzzy-matched characters bolded in the accent, so you see
+        // *why* a row matched what you typed.
+        let label_base = if selected {
+            Style::default().fg(rgb(app.tuning.theme_accent)).bg(bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).bg(bg)
+        };
+        let query = app.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
+        let matched = if query.is_empty() { None } else { crate::palette::fuzzy_positions(&query, &row.label) };
+        let mut label_spans: Vec<Span> = Vec::new();
+        match matched {
+            Some(pos) if !pos.is_empty() => {
+                let hit = label_base.fg(rgb(app.tuning.theme_accent_bright)).add_modifier(Modifier::BOLD);
+                for (i, ch) in row.label.chars().enumerate() {
+                    label_spans.push(Span::styled(ch.to_string(), if pos.contains(&i) { hit } else { label_base }));
+                }
+                label_spans.push(Span::styled(type_mark.to_string(), label_base));
+            }
+            _ => label_spans.push(Span::styled(format!("{}{}", row.label, type_mark), label_base)),
+        }
+
+        let mut line_spans = vec![
             quick_span,
             Span::styled(format!(" {:<w$}", binding, w = app.tuning.binding_badge_width),
                 Style::default().fg(rgb(app.tuning.theme_accent_bright)).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(format!("{}{}", row.label, type_mark),
-                if selected { Style::default().fg(rgb(app.tuning.theme_accent)).bg(bg).add_modifier(Modifier::BOLD) }
-                else { Style::default().fg(Color::White).bg(bg) }),
-            Span::styled(desc, Style::default().fg(Color::DarkGray).bg(bg)),
-        ]));
+        ];
+        line_spans.extend(label_spans);
+        line_spans.push(Span::styled(desc, Style::default().fg(Color::DarkGray).bg(bg)));
+        out.push(Line::from(line_spans));
     }
     out
 }

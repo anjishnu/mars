@@ -39,6 +39,12 @@ pub struct Tuning {
     /// Show the line-number gutter in editor panes (position always lives in
     /// the status bar).
     pub line_numbers: bool,
+    /// Tint the cursor's line with a subtle background (0 = off, 1 = on).
+    pub highlight_current_line: u64,
+    /// The current-line tint color (used when highlight_current_line = 1).
+    pub current_line_bg: [u8; 3],
+    /// Max reflow width for the Markdown reading-mode, in columns (0 = full width).
+    pub reading_width: u64,
     /// Seconds before the agent may auto-name a default-named tab (0 = off).
     pub auto_name_secs: u64,
     pub agent_max_tokens: u32,
@@ -96,6 +102,9 @@ impl Default for Tuning {
             theme_status_failed: [217, 83, 79],   // #D9534F conventional error red (failed)
             theme_status_blocked: [230, 165, 60], // #E6A53C conventional amber (blocked / waiting on you)
             line_numbers: false,
+            highlight_current_line: 1,
+            current_line_bg: [42, 37, 34],   // subtle warm tint on the cursor's row
+            reading_width: 90,
             auto_name_secs: 45,
             agent_max_tokens: 1024, // headroom for reasoning models (Qwen3/R1)
             agent_temperature: 0.3,
@@ -230,6 +239,15 @@ fn default_knobs() -> Vec<(&'static str, Knob)> {
         ("line_numbers", knob(json!(d.line_numbers),
             "Show the line-number gutter in editor panes. The cursor position \
              is always in the status bar, so this defaults to off for width.")),
+        ("highlight_current_line", knob(json!(d.highlight_current_line),
+            "Tint the cursor's line with a subtle background (0 = off, 1 = on) \
+             for focus. The color is `current_line_bg`.")),
+        ("current_line_bg", knob(json!(d.current_line_bg),
+            "Background tint for the cursor's line (RGB). Keep it subtle — a few \
+             shades above the terminal background.")),
+        ("reading_width", knob(json!(d.reading_width),
+            "Max reflow width for the Markdown reading-mode, in columns; the \
+             document is centered within the pane. 0 = use the full pane width.")),
         ("auto_name_secs", knob(json!(d.auto_name_secs),
             "With an agent configured, tabs still wearing their default numeric \
              name get an auto-generated label after this many seconds (0 = off). \
@@ -406,6 +424,9 @@ pub fn load() -> Tuning {
             .get("line_numbers")
             .and_then(|e| e.value.as_bool())
             .unwrap_or(t.line_numbers);
+        t.highlight_current_line = get_u64(&map, "highlight_current_line", t.highlight_current_line);
+        t.current_line_bg = get_rgb(&map, "current_line_bg", t.current_line_bg);
+        t.reading_width = get_u64(&map, "reading_width", t.reading_width);
         t.auto_name_secs = get_u64(&map, "auto_name_secs", t.auto_name_secs);
         t.agent_max_tokens      = get_u64(&map, "agent_max_tokens", t.agent_max_tokens as u64) as u32;
         t.agent_temperature     = get_f64(&map, "agent_temperature", t.agent_temperature);

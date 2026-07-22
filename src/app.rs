@@ -1218,6 +1218,54 @@ impl App {
         }
     }
 
+    /// The bracket at (or just before) the cursor and its match, as `(row, col)`
+    /// pairs — for passive highlighting in the editor render. Non-mutating; `None`
+    /// when the cursor isn't on/next to a bracket or the pair is unbalanced.
+    pub fn bracket_pair(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (row, col, buf_id) = self.editor_pos()?;
+        const OPENS: [char; 3] = ['(', '[', '{'];
+        const CLOSES: [char; 3] = [')', ']', '}'];
+        let rope = &self.buffers.get(&buf_id)?.rope;
+        let len = rope.len_chars();
+        let cur = self.buffers[&buf_id].char_at(row, col);
+        // A bracket under the cursor (scan to end of line), else the char just before.
+        let mut found = None;
+        let mut j = cur;
+        while j < len {
+            let c = rope.char(j);
+            if c == '\n' { break; }
+            if OPENS.contains(&c) || CLOSES.contains(&c) { found = Some((j, c)); break; }
+            j += 1;
+        }
+        if found.is_none() && cur > 0 {
+            let c = rope.char(cur - 1);
+            if OPENS.contains(&c) || CLOSES.contains(&c) { found = Some((cur - 1, c)); }
+        }
+        let (pos, c) = found?;
+        let match_idx = if let Some(oi) = OPENS.iter().position(|&o| o == c) {
+            let (open, close) = (c, CLOSES[oi]);
+            let (mut depth, mut k) = (1i32, pos + 1);
+            loop {
+                if k >= len { return None; }
+                let ch = rope.char(k);
+                if ch == open { depth += 1; } else if ch == close { depth -= 1; if depth == 0 { break k; } }
+                k += 1;
+            }
+        } else if let Some(ci) = CLOSES.iter().position(|&cc| cc == c) {
+            let (open, close) = (OPENS[ci], c);
+            let (mut depth, mut k) = (1i32, pos);
+            loop {
+                if k == 0 { return None; }
+                k -= 1;
+                let ch = rope.char(k);
+                if ch == close { depth += 1; } else if ch == open { depth -= 1; if depth == 0 { break k; } }
+            }
+        } else {
+            return None;
+        };
+        Some((self.rowcol_of(buf_id, pos), self.rowcol_of(buf_id, match_idx)))
+    }
+
     // ── Kill-ring editing (C-d / C-k / C-w / M-w / C-y) ──────────────────────
 
     /// Every kill/copy lands in the kill-ring AND the system clipboard —
@@ -5636,9 +5684,31 @@ impl App {
                             t.scroll_view(delta);
                         }
                     }
-                    PaneContent::Editor(_) if self.mode == Mode::Edit => {
-                        for _ in 0..n {
-                            if up { self.move_up() } else { self.move_down() }
+                    PaneContent::Editor(buf_id) if self.mode == Mode::Edit => {
+                        if self.focused_pane().md_view {
+                            // Reading-mode: the wheel scrolls the rendered document.
+                            let vh = self.focused_pane().view_h.max(1);
+                            let cap = self.focused_pane().md_rendered_total.get().saturating_sub(vh);
+                            let p = self.focused_pane_mut();
+                            p.md_scroll = if up { p.md_scroll.saturating_sub(n as usize) }
+                                          else { (p.md_scroll + n as usize).min(cap) };
+                        } else {
+                            // Normal editor: scroll the viewport (not the cursor), then
+                            // pull the cursor back into view so it stays valid.
+                            let lc = self.buffers[&buf_id].line_count();
+                            let vh = self.focused_pane().view_h.max(1);
+                            {
+                                let p = self.focused_pane_mut();
+                                p.scroll_row = if up { p.scroll_row.saturating_sub(n as usize) }
+                                               else { (p.scroll_row + n as usize).min(lc.saturating_sub(1)) };
+                                if p.cursor_row < p.scroll_row { p.cursor_row = p.scroll_row; }
+                                let bottom = (p.scroll_row + vh.saturating_sub(1)).min(lc.saturating_sub(1));
+                                if p.cursor_row > bottom { p.cursor_row = bottom; }
+                            }
+                            let cr = self.focused_pane().cursor_row;
+                            let ll = self.buffers[&buf_id].line_len(cr);
+                            let p = self.focused_pane_mut();
+                            if p.cursor_col > ll { p.cursor_col = ll; p.col_affinity = ll; }
                         }
                     }
                     _ => {}

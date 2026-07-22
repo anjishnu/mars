@@ -4009,6 +4009,53 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] markdown reading-mode ...... PASS");
     }
 
+    // 40c. Editor feel: the mouse wheel scrolls the *viewport* in a normal editor and
+    //      the *document* in reading-mode (not just the cursor); bracket_pair and
+    //      fuzzy_positions back the passive-bracket and fuzzy-highlight cues.
+    {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let wheel = |app: &mut App, down: bool| app.handle_mouse(MouseEvent {
+            kind: if down { MouseEventKind::ScrollDown } else { MouseEventKind::ScrollUp },
+            column: 3, row: 3, modifiers: KeyModifiers::NONE,
+        });
+
+        // Normal editor: a doc taller than the viewport; wheel-down raises scroll_row
+        // without the cursor having to walk to the edge first.
+        let mut app = App::new(None)?;
+        let mut term = Terminal::new(TestBackend::new(80, 12))?;
+        for i in 0..60 { typ(&mut app, &format!("line {i}"))?; app.handle_key(k(KeyCode::Enter))?; }
+        app.run_action(palette::Action::GoTop);
+        term.draw(|f| ui::render(f, &mut app))?; // sets view_h
+        assert_eq!(app.focused_pane().scroll_row, 0, "GoTop did not reset scroll");
+        wheel(&mut app, true);
+        let s1 = app.focused_pane().scroll_row;
+        assert!(s1 > 0, "wheel-down did not scroll the editor viewport");
+        wheel(&mut app, false);
+        assert!(app.focused_pane().scroll_row < s1, "wheel-up did not scroll back");
+
+        // bracket_pair: cursor on '(' resolves its ')'.
+        {
+            let mut b = App::new(None)?;
+            typ(&mut b, "(x)")?;
+            b.run_action(palette::Action::GoTop);
+            let bp = b.bracket_pair();
+            assert_eq!(bp, Some(((0, 0), (0, 2))), "bracket_pair did not match the pair: {bp:?}");
+        }
+
+        // Reading-mode: the wheel scrolls the rendered document (md_scroll).
+        app.run_action(palette::Action::ToggleMarkdown);
+        term.draw(|f| ui::render(f, &mut app))?;
+        let m0 = app.focused_pane().md_scroll;
+        wheel(&mut app, true);
+        assert!(app.focused_pane().md_scroll > m0, "wheel did not scroll reading-mode");
+
+        // fuzzy_positions: the matched candidate indices (for bolding).
+        assert_eq!(palette::fuzzy_positions("sp", "Split"), Some(vec![0, 1]));
+        assert!(palette::fuzzy_positions("zz", "Split").is_none());
+        assert_eq!(palette::fuzzy_positions("", "Split"), Some(vec![]));
+        println!("[selfcheck] editor feel (wheel/bracket/fuzzy) . PASS");
+    }
+
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
     //     stats aggregates it, and logging is a strict no-op when disabled.
     {
