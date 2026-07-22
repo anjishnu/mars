@@ -71,6 +71,8 @@ reading-mode, a unified space-warp navigation grammar, and a calmer, quieter UI.
   call fails, instead of blanking.
 - Resilient model-tier ring: tiers hold a list of models and rotate off retired
   ones, so a decommissioned model name no longer stalls a tier.
+- Packaging: ship `src/tiers_default.json` in the crate `include` list so a fresh
+  `cargo install mars-terminal` compiles (it's embedded via `include_str!`).
 
 ## 0.4.0
 
