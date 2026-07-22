@@ -677,7 +677,6 @@ impl App {
                 kind: ItemKind::Surface(SurfaceRef {
                     pane_id: worst,
                     tab_index: ti,
-                    tab_name: tab.name.clone(),
                     verdict: v,
                     age_secs: age,
                 }),

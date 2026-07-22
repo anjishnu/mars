@@ -215,7 +215,6 @@ pub enum ItemKind {
 pub struct SurfaceRef {
     pub pane_id: crate::pane::PaneId,
     pub tab_index: usize,
-    pub tab_name: String,
     pub verdict: crate::briefing::Verdict,
     pub age_secs: u64,
 }
