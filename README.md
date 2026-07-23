@@ -291,7 +291,8 @@ Mars speaks three dialects at once — whichever your fingers know:
   file sidebar on the left.
   Folders are bold + colored and collapsed — arrow to one and `Enter`/`→` expands it in
   place (`←` collapses); on a file, `→` previews it (reversible) and `Enter` opens it;
-  `../` at the top steps up a directory. Press `.` to show/hide dotfiles (the important
+  `../` at the top steps up a directory, and `Ctrl+Space` on a folder re-roots *into*
+  it (descend — the mirror of `../`). Press `.` to show/hide dotfiles (the important
   things often live in hidden folders). Start **typing** to fuzzy-filter the whole
   project to a shortlist; `Esc` closes.
 - **Emacs**: `C-x C-s` save · `C-x C-f` open · `C-s` isearch · `M-%` query-replace

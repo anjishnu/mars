@@ -1550,6 +1550,23 @@ fn selfcheck() -> Result<()> {
     assert!(app.tree_open && matches!(app.mode, mode::Mode::Tree), "C-x d did not reopen the tree");
     println!("[selfcheck] file tree (reset/../) ..... PASS");
 
+    // 26b5. Ctrl+Space on a folder re-roots INTO it (descend) — the mirror of `../`,
+    //       so you can drill back down after going up. On a file it opens the bar.
+    {
+        let mut app = App::new(None)?;
+        app.set_project_index_for_test(proj.clone(), vec!["src/main.rs".into(), "README.md".into()]);
+        app.handle_key(kc(KeyCode::Char('x')))?;
+        app.handle_key(k(KeyCode::Char('d')))?; // open the tree
+        let src_idx = app.tree_rows.iter().position(|r| r.label == "src" && r.is_dir).expect("src row missing");
+        for _ in 0..src_idx { app.handle_key(k(KeyCode::Down))?; } // land on src/
+        let before = app.file_tree.as_ref().map(|t| t.root.clone()).unwrap();
+        app.handle_key(kc(KeyCode::Char(' ')))?; // Ctrl+Space on the folder → root into it
+        let after = app.file_tree.as_ref().map(|t| t.root.clone()).unwrap();
+        assert_eq!(after, before.join("src"), "Ctrl+Space did not re-root into the folder");
+        assert!(matches!(app.mode, mode::Mode::Tree), "descend should stay in the navigator, not open the bar");
+        println!("[selfcheck] navigator descend (C-Space) . PASS");
+    }
+
     // 26c. Conversation transcript: history renders bottom-pinned inside the
     //      ask_panel_max_pct cap (~30% of the workspace), scrolls, and C-l
     //      clears.

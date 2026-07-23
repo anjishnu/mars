@@ -2105,6 +2105,24 @@ impl App {
         let chord = chord_of(&key);
         let bar_open = self.pending_prefix.is_empty()
             && (self.keys.bar_open.contains(&chord) || matches!(key.code, KeyCode::Null));
+        // In the navigator, the bar chord on a *folder* re-roots the tree into it —
+        // the mirror of `../` (ascend), so you can drill back down after going up.
+        // On a file or `../`, it still opens the command bar (falls through).
+        if bar_open && matches!(self.mode, Mode::Tree) {
+            let sel = self.file_tree.as_ref().map(|t| t.selected).unwrap_or(0);
+            if let Some(row) = self.tree_rows.get(sel).filter(|r| r.is_dir && !r.updir) {
+                let path = row.path.clone();
+                if let Some(t) = self.file_tree.as_mut() {
+                    t.root = path.clone();
+                    t.selected = 0;
+                    t.filter.clear();
+                    t.expanded.clear();
+                }
+                self.refresh_tree_rows();
+                self.status_msg = Some(format!("rooted at {}", path.file_name().and_then(|n| n.to_str()).unwrap_or("/")));
+                return Ok(());
+            }
+        }
         if bar_open && matches!(self.mode, Mode::Tab | Mode::Tree | Mode::Undo) {
             self.open_bar(BarMode::Command);
             return Ok(());
