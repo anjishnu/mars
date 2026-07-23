@@ -354,7 +354,7 @@ fn themes_menu() -> Vec<MenuItem> {
         .into_iter()
         .map(|t| {
             let about = if t.user { format!("{} (yours)", t.about) } else { t.about };
-            MenuItem::run_owned(format!("Theme: {}", t.display), Action::SetTheme(t.name), about)
+            MenuItem::run_owned(t.display, Action::SetTheme(t.name), about)
         })
         .collect()
 }
@@ -368,6 +368,9 @@ fn all_items() -> Vec<(String, ItemKind, String)> {
                 result.push((item.label.to_string(), item.kind, item.description.to_string()));
             }
             ItemKind::Submenu(sub_name) => {
+                // The submenu entry itself is searchable (so typing "theme" finds
+                // "Theme ▸" and opens it), plus its leaves (so "eclipse" applies directly).
+                result.push((item.label.to_string(), ItemKind::Submenu(sub_name), item.description.to_string()));
                 for subitem in menu_for(sub_name) {
                     result.push((subitem.label.to_string(), subitem.kind, subitem.description.to_string()));
                 }
