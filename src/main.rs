@@ -4175,6 +4175,26 @@ fn selfcheck() -> Result<()> {
         println!("[selfcheck] set theme live (beta) ..... PASS");
     }
 
+    // 40f. Color-honesty guard: after the theming factor, no bare ANSI `Color::Named`
+    //      literal may appear in ui.rs — every colored cell must resolve through a
+    //      palette token. `Color::Reset`/`Rgb`/`Indexed` stay allowed (terminal
+    //      passthrough, the RGB constructor, the default-look sentinel). This is the
+    //      color analogue of the keybinding honesty invariant, with build teeth.
+    {
+        const UI_SRC: &str = include_str!("ui.rs");
+        for forbidden in [
+            "Color::White", "Color::Gray", "Color::DarkGray", "Color::Black",
+            "Color::Green", "Color::Red", "Color::Yellow", "Color::Blue",
+            "Color::Cyan", "Color::Magenta",
+        ] {
+            assert!(
+                !UI_SRC.contains(forbidden),
+                "color-honesty breach: `{forbidden}` is hardcoded in ui.rs — use a palette token"
+            );
+        }
+        println!("[selfcheck] color-honesty guard ........ PASS");
+    }
+
     // 41. LLM debug logging: a record round-trips to JSONL with real token totals,
     //     stats aggregates it, and logging is a strict no-op when disabled.
     {

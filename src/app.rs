@@ -4314,6 +4314,21 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_tick = self.frame_tick.wrapping_add(1);
 
+        // Live elapsed on the workspaces board: while the command bar is open, repaint
+        // ~once a second if any workstream is running, so its counter ticks. Cheap —
+        // the board scan only runs once a second and only in bar mode.
+        if matches!(self.mode, Mode::Bar) {
+            let tps = (1000 / self.tuning.poll_interval_ms.max(1)).max(1);
+            if self.frame_tick % tps == 0
+                && self.bar_workspace_rows().iter().any(|r| {
+                    matches!(&r.kind, crate::palette::ItemKind::Surface(s)
+                        if s.verdict == crate::briefing::Verdict::Running)
+                })
+            {
+                self.needs_redraw = true;
+            }
+        }
+
         for term in self.terms.values_mut() {
             term.flush_startup_input();
         }

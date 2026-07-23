@@ -26,11 +26,6 @@ pub fn gutter_width(tuning: &crate::tuning::Tuning) -> u16 {
     if tuning.line_numbers { LINE_NUM_W } else { POINTER_W }
 }
 
-/// Tuning stores colors as [r, g, b] so they stay agent-editable JSON.
-fn rgb(c: [u8; 3]) -> Color {
-    Color::Rgb(c[0], c[1], c[2])
-}
-
 /// Whether the resolved palette is the default Mission Control look — the baked
 /// terracotta banner matches only this. Any other theme (or a customized accent)
 /// gets the plain block wordmark in its own accent instead.
@@ -707,7 +702,7 @@ fn render_markdown_termimad(frame: &mut Frame, app: &App, buf: &crate::buffer::B
                 Some(cell) => {
                     let c = cell.contents();
                     let ch = if c.is_empty() { " ".to_string() } else { c };
-                    let mut st = Style::default().fg(conv_color(cell.fgcolor())).bg(conv_color(cell.bgcolor()));
+                    let mut st = Style::default().fg(conv_fg(app, cell.fgcolor())).bg(conv_bg(app, cell.bgcolor()));
                     if cell.bold() { st = st.add_modifier(Modifier::BOLD); }
                     if cell.italic() { st = st.add_modifier(Modifier::ITALIC); }
                     if cell.underline() { st = st.add_modifier(Modifier::UNDERLINED); }
@@ -831,8 +826,8 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
     let big = inner.width >= banner_w && inner.height >= (parsed.len() as u16 + 7);
 
     let mut lines: Vec<Line> = Vec::new();
-    if big {
-        // Uniform left pad so the art's internal spacing stays aligned.
+    if big && is_default_theme(app) {
+        // The baked terracotta banner — the default look only.
         let pad = (inner.width.saturating_sub(banner_w) / 2) as usize;
         for (line, _) in parsed {
             let mut spans = vec![Span::raw(" ".repeat(pad))];
@@ -840,14 +835,27 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
             lines.push(Line::from(spans));
         }
         lines.push(Line::raw(""));
+    } else if big {
+        // Any other theme: the plain block wordmark in the theme's accent.
+        let style = Style::default().fg(t.palette.accent).add_modifier(Modifier::BOLD);
+        let w = crate::banner::MARS_BLOCK.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
+        let pad = " ".repeat((inner.width.saturating_sub(w) / 2) as usize);
+        for row in crate::banner::MARS_BLOCK {
+            lines.push(Line::from(vec![Span::raw(pad.clone()), Span::styled((*row).to_string(), style)]));
+        }
+        lines.push(Line::from(Span::styled(
+            "mission control for your terminal",
+            Style::default().fg(t.palette.accent_bright).add_modifier(Modifier::ITALIC),
+        )).centered());
+        lines.push(Line::raw(""));
     } else {
         lines.push(Line::from(Span::styled(
             "M A R S",
-            Style::default().fg(rgb(t.theme_accent)).add_modifier(Modifier::BOLD),
+            Style::default().fg(t.palette.accent).add_modifier(Modifier::BOLD),
         )).centered());
         lines.push(Line::from(Span::styled(
             "mission control for your terminal",
-            Style::default().fg(rgb(t.theme_accent_bright)).add_modifier(Modifier::ITALIC),
+            Style::default().fg(t.palette.accent_bright).add_modifier(Modifier::ITALIC),
         )).centered());
         lines.push(Line::raw(""));
     }
@@ -870,7 +878,7 @@ fn render_splash(frame: &mut Frame, app: &App, inner: Rect) {
         .max()
         .unwrap_or(0) as u16;
     let lpad = " ".repeat((inner.width.saturating_sub(block_w) / 2) as usize);
-    let key_style = Style::default().fg(rgb(t.theme_accent_bright)).add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(t.palette.accent_bright).add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(app.tuning.palette.text_dim);
     for (k, d) in cmds {
         lines.push(Line::from(vec![
@@ -1712,6 +1720,13 @@ fn wrap_summary(text: &str, width: usize, max_lines: usize) -> Vec<String> {
 /// in bold, then the generated summary WRAPPED across the box (not trailing off), and
 /// a dim `s` hint. A teal left rail ties it to the teal-highlighted selection. The ↵
 /// verb lives on the selected row, not here.
+/// A live elapsed duration with seconds, so a running counter visibly ticks
+/// (`45s`, `4m 12s`, `1h 03m`).
+fn fmt_elapsed(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 { format!("{h}h {m:02}m") } else if m > 0 { format!("{m}m {s:02}s") } else { format!("{s}s") }
+}
+
 fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16) -> Vec<Line<'static>> {
     use crate::briefing::Verdict;
     let w = width as usize;
@@ -1728,8 +1743,15 @@ fn detail_lines(app: &App, row: Option<&crate::palette::PaletteRow>, width: u16)
     let teal = app.tuning.palette.info;
     let rail = || Span::styled(" ▌ ", Style::default().fg(teal));
     let content_w = w.saturating_sub(5); // " ▌ " + right padding
-    // Status + age (the time count now lives here, not inline on the row).
-    let age = if s.age_secs > 0 { format!(" · {}", crate::briefing::fmt_secs(s.age_secs)) } else { String::new() };
+    // Status + age. A running job shows a live elapsed counter (with seconds, so it
+    // visibly ticks); everything else shows the coarser age.
+    let age = if s.age_secs == 0 {
+        String::new()
+    } else if s.verdict == Verdict::Running {
+        format!(" · {}", fmt_elapsed(s.age_secs))
+    } else {
+        format!(" · {}", crate::briefing::fmt_secs(s.age_secs))
+    };
     out.push(Line::from(vec![
         rail(),
         Span::styled("status: ", Style::default().fg(app.tuning.palette.text).add_modifier(Modifier::BOLD)),
