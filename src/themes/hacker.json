@@ -4,7 +4,7 @@
   "dark": true,
   "accent": "#39ff14", "accent-bright": "#8dff7a", "accent-dark": "#00a028",
   "on-accent": "#001200",
-  "info": "#00e05a", "success": "#33ff33", "warning": "#c8ff2a", "danger": "#ff4444",
+  "info": "#0b7a34", "success": "#33ff33", "warning": "#c8ff2a", "danger": "#ff4444",
   "text": "#22ff22", "text-dim": "#12b91e", "text-faint": "#0a7015",
   "border": "#0f5f1a", "surface": "#000000", "select-row-bg": "#0f5f1a",
   "selection-bg": "#123d12", "search-bg": "#2a5a00", "current-line": "#0a1a0a"

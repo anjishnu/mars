@@ -1288,8 +1288,8 @@ fn render_terminal_pane(
                 let contents = cell.contents();
                 let ch = if contents.is_empty() { " ".to_string() } else { contents };
                 let mut style = Style::default()
-                    .fg(conv_color(cell.fgcolor()))
-                    .bg(conv_color(cell.bgcolor()));
+                    .fg(conv_fg(app, cell.fgcolor()))
+                    .bg(conv_bg(app, cell.bgcolor()));
                 if cell.bold()      { style = style.add_modifier(Modifier::BOLD); }
                 if cell.italic()    { style = style.add_modifier(Modifier::ITALIC); }
                 if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
@@ -1342,6 +1342,25 @@ fn conv_color(c: vt100::Color) -> Color {
         vt100::Color::Default    => Color::Reset,
         vt100::Color::Idx(i)     => Color::Indexed(i),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+/// Terminal-cell foreground with a themed fallback: under an opaque theme, the
+/// child's *default* fg follows `text` so the shell's base color matches the theme;
+/// otherwise the terminal's own default (Reset) is honored. Explicit 16-color and
+/// truecolor cells the program sets always pass through unchanged.
+fn conv_fg(app: &App, c: vt100::Color) -> Color {
+    match c {
+        vt100::Color::Default if opaque_bg(app).is_some() => app.tuning.palette.text,
+        other => conv_color(other),
+    }
+}
+/// Terminal-cell background — the child's *default* bg follows the theme surface
+/// under an opaque theme, so terminal panes match the rest of the UI.
+fn conv_bg(app: &App, c: vt100::Color) -> Color {
+    match c {
+        vt100::Color::Default => opaque_bg(app).unwrap_or(Color::Reset),
+        other => conv_color(other),
     }
 }
 
