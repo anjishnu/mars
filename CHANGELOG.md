@@ -8,27 +8,34 @@ and richer `llm-stats`.
 
 ### Added
 - **Color themes (beta)**: every colored cell resolves through one of 17 semantic
-  tokens (accent, info, danger, text, border, surface, …), so a theme swaps the
-  whole palette. Four bundled themes — **Mission Control** (default, unchanged),
-  **Eclipse** (high-contrast), **Paper** (warm light), **Hacker** (green-on-black).
-  `mars theme list` / `mars theme <name>` switch it (recorded in
-  `~/.mars/config.json`); the **Theme ▸** picker in the command bar switches live. Drop your own token→color JSON in `~/.mars/themes/`. Custom `theme_*`
-  tuning knobs still override per token, so existing customizations are untouched.
-  A colored theme paints a solid background everywhere (panes *and* overlays); the
-  default honors the terminal's own background. `opaque_background = 0` forces
-  transparency under any theme.
+  tokens (accent, info, danger, text, border, surface, …), so a theme repaints the
+  **whole** UI at once — panes, overlays, the terminal canvas, reading-mode, the
+  splash, and the mission briefing (whose MARS wordmark takes the theme's accent).
+  Four bundled themes: **Mission Control** (default, unchanged), **Eclipse** (bold
+  electric high-contrast), **Paper** (warm light), **Hacker** (green-on-black). Pick
+  one from the **Theme ▸** submenu in the command bar (applies live), or with
+  `mars theme <name>` (recorded in `~/.mars/config.json`); `mars theme list` shows
+  them. The picker reads live from disk, so a token→color JSON you drop in
+  `~/.mars/themes/` just appears. A colored theme paints a solid background
+  everywhere; the default honors the terminal's own background; `opaque_background = 0`
+  forces transparency under any theme. Terminal panes follow the theme's base fg/bg
+  while a program's explicit colors pass through. Custom `theme_*` tuning knobs still
+  override per token, so existing customizations are untouched.
 - **Current-line highlight** — a subtle tint on the cursor's row
   (`highlight_current_line` / `current_line_bg`).
 - **Passive matched-bracket highlight** — the bracket at the cursor and its match
   render bold-accent.
 - **Markdown reading-mode** — a read-only, reflowed view (tables, wrapping) capped
   at `reading_width` (default 90 cols) and centered; skin in a clay → sandstone →
-  light-teal hierarchy.
+  light-teal hierarchy; the wheel scrolls the document.
+- **Live elapsed on the workspaces board** — a running workstream shows a
+  seconds-precision counter (`4m 12s`) that ticks while the bar is open.
+- **Navigator: `Ctrl+Space` on a folder re-roots into it** (descend — the mirror of
+  `../`), and dotfiles now show by default (`.` still toggles).
 - **`mars config`** — show the global config file and its contents.
 - **`llm-stats` gains `--json`** (scriptable: rows + a per-day series), **`--daily`**
   (a day-by-day token-trend chart), and **`--since 7d`** (a trailing window; also
   `12h`, `30m`).
-- **Navigator** shows dotfiles by default (`.` still toggles).
 - The space-warp panel has a `@ · go to the navigator` row.
 
 ### Changed
